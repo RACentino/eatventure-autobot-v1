@@ -2,8 +2,24 @@ import logging
 from pathlib import Path
 import sys
 import time
-import win32api
-import win32gui
+
+# Dependency check
+try:
+    import win32api
+    import win32gui
+except ImportError:
+    print("Error: 'pywin32' is not installed correctly.")
+    print("Please run: pip install pywin32")
+    print("If you still see this error, you might need to run: python Scripts/pywin32_postinstall.py -install")
+    sys.exit(1)
+
+try:
+    from pynput import keyboard
+except ImportError:
+    print("Error: 'pynput' is not installed.")
+    print("Please run: pip install pynput")
+    sys.exit(1)
+
 from pynput import keyboard
 
 import config
