@@ -1091,8 +1091,10 @@ class EatventureBot:
 
     def _passes_red_color_gate(self, screenshot, x, y, relaxed=False):
         """
-        Requirement: Pixel Density Trigger.
-        Counts red pixels in ROI after dilation.
+        Strict dual-gate whitelist verification.
+        Gate 1 (Pixel Density): Counts dilated red pixels in ROI — must meet minimum.
+        Gate 2 (Channel Dominance): Red channel must be meaningfully brighter than G and B.
+        Both gates must pass (AND logic). Either failure discards the candidate.
         Returns: (passed, pixel_count)
         """
         show_mask = getattr(config, "DEBUG_VISION", False)
@@ -1102,11 +1104,32 @@ class EatventureBot:
             show_mask=show_mask
         )
         
-        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50)
+        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 65)
         if relaxed:
             threshold = int(threshold * 0.7)
+
+        # Gate 1: Pixel density — must meet the minimum red blob size
+        if pixel_count < threshold:
+            return False, pixel_count
+
+        # Gate 2: Channel dominance — red channel must dominate G and B
+        # Uses the tightened ratio/mean values from config (now 1.35 / 55)
+        min_ratio = getattr(config, "RED_ICON_COLOR_MIN_RATIO", 1.35)
+        min_mean  = getattr(config, "RED_ICON_COLOR_MIN_MEAN", 55)
+        sample_size = getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24)
+        if not self.image_matcher.is_red_dominant(
+            screenshot, x, y,
+            size=sample_size,
+            min_ratio=min_ratio,
+            min_mean=min_mean,
+        ):
+            logger.debug(
+                "[RedGate] Channel dominance rejected candidate at (%s, %s) px=%d",
+                x, y, pixel_count,
+            )
+            return False, pixel_count
             
-        return pixel_count >= threshold, pixel_count
+        return True, pixel_count
 
     def _segregate_assets(self, detections):
         """
@@ -1347,13 +1370,35 @@ class EatventureBot:
             )
             
             # Action Step 1: Segregate Detections immediately
-            all_stations = self.image_matcher.find_all_templates(
+            all_stations_raw = self.image_matcher.find_all_templates(
                 screenshot,
                 template,
                 mask=mask,
                 threshold=upgrade_threshold,
                 template_name="upgradeStation-all"
             )
+
+            # Whitelist Filter: mandatory color histogram gate.
+            # Shape match alone is insufficient — the color distribution of the
+            # matched region must also correlate with the template.
+            # This rejects background textures that happen to match the silhouette.
+            h_t, w_t = template.shape[:2]
+            all_stations = []
+            for cand_conf, cand_x, cand_y in all_stations_raw:
+                x1 = max(0, cand_x - w_t // 2)
+                y1 = max(0, cand_y - h_t // 2)
+                roi_slice = screenshot[y1:y1 + h_t, x1:x1 + w_t]
+                if roi_slice.shape[:2] == (h_t, w_t):
+                    color_ok = self.image_matcher._check_color_similarity(
+                        screenshot, template, (x1, y1), mask
+                    )
+                    if not color_ok:
+                        logger.debug(
+                            "[UpgradeStation] Color gate rejected candidate at (%s, %s) conf=%.2f",
+                            cand_x, cand_y, cand_conf,
+                        )
+                        continue
+                all_stations.append((cand_conf, cand_x, cand_y))
             
             safe_stations, forbidden_stations = self._segregate_assets(all_stations)
             
@@ -1393,14 +1438,32 @@ class EatventureBot:
                 if self.vision_optimizer.enabled
                 else config.BOX_THRESHOLD
             )
-            found_boxes = self.image_matcher.find_all_templates(
+            found_boxes_raw = self.image_matcher.find_all_templates(
                 screenshot,
                 template,
                 mask=mask,
                 threshold=box_threshold,
                 template_name=box_name
             )
-            for b_conf, b_x, b_y in found_boxes:
+
+            # Whitelist Filter: mandatory color histogram gate for boxes.
+            # Boxes have distinctive color palettes — reject background matches
+            # whose color distribution doesn't correlate with the template.
+            h_t, w_t = template.shape[:2]
+            for b_conf, b_x, b_y in found_boxes_raw:
+                x1 = max(0, b_x - w_t // 2)
+                y1 = max(0, b_y - h_t // 2)
+                roi_slice = screenshot[y1:y1 + h_t, x1:x1 + w_t]
+                if roi_slice.shape[:2] == (h_t, w_t):
+                    box_color_ok = self.image_matcher._check_color_similarity(
+                        screenshot, template, (x1, y1), mask
+                    )
+                    if not box_color_ok:
+                        logger.debug(
+                            "[Box] Color gate rejected %s at (%s, %s) conf=%.2f",
+                            box_name, b_x, b_y, b_conf,
+                        )
+                        continue
                 all_boxes.append((b_conf, b_x, b_y, box_name))
 
         if all_boxes:
@@ -1427,17 +1490,7 @@ class EatventureBot:
             )
 
         return clicked_targets
-
-        if clicked_targets > 0:
-            self._no_red_scroll_cycle_pending = True
-            logger.info(
-                "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
-                clicked_targets,
-                clicked_upgrade_station,
-                clicked_box,
-            )
-
-        return clicked_targets
+        # Gap 1 fix: dead code block removed here (duplicate if/return from prior refactor)
 
 
     def _iter_red_icon_templates(self):
@@ -1622,7 +1675,14 @@ class EatventureBot:
             return State.SCROLL
 
         # STEP 4: No targets (Fallback scan then search)
-        self.check_fallbacks()
+        # Gap 2 fix: capture the return value so a forbidden-only upgrade-station redirect
+        # (check_fallbacks returns State.SCROLL) is propagated explicitly rather than
+        # falling through accidentally. This also ensures _no_red_scroll_cycle_pending is
+        # set correctly via the full _scan_and_click_non_red_assets path before we scroll.
+        fallback_state = self.check_fallbacks()
+        if fallback_state is not None:
+            logger.info("Fallback scan triggered state redirect to: %s", fallback_state)
+            return fallback_state
         logger.info("No targets detected; initiating exploration.")
         return State.SCROLL
 
@@ -1824,6 +1884,24 @@ class EatventureBot:
                 )
                 
                 if found:
+                    # Gap 3 fix: strict forbidden zone guard immediately after detection.
+                    # Without this, a forbidden station passes through refine + confidence
+                    # update before being blocked by handle_hold_upgrade_station, which:
+                    #   (a) wastes a full handler cycle, and
+                    #   (b) biases the VisionOptimizer with update_upgrade_station_confidence()
+                    #       for a coordinate that will ultimately never be clicked.
+                    # Reject here, record an honest miss, and redirect to oscillating search.
+                    if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                        logger.warning(
+                            "handle_search_upgrade_station: station at (%s, %s) is inside "
+                            "forbidden zone — rejecting immediately, triggering Oscillating Search.",
+                            x, y,
+                        )
+                        self.vision_optimizer.update_upgrade_station_miss()
+                        if self._redirect_forbidden_asset_to_scroll("Upgrade Station (search)", x, y):
+                            return State.SCROLL
+                        continue  # Try next attempt if redirect cooldown blocked
+
                     logger.info(f"✓ Upgrade station found (attempt {attempt + 1})")
                     refined_pos, refined = self._refine_template_position(
                         "upgradeStation",

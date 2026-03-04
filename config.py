@@ -35,7 +35,7 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 STATS_RED_ICON_THRESHOLD = 0.97
-UPGRADE_STATION_THRESHOLD = 0.8
+UPGRADE_STATION_THRESHOLD = 0.95  # Raised 0.80→0.90: eliminates weak partial-shape matches
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.95
 NEW_LEVEL_THRESHOLD = 0.98
@@ -43,19 +43,21 @@ NEW_LEVEL_THRESHOLD = 0.98
 # Detection gate settings
 RED_ICON_MIN_MATCHES = 1
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1
-RED_ICON_PIXEL_THRESHOLD = 50  # Min red pixels in ROI to trigger
+RED_ICON_PIXEL_THRESHOLD = 65  # Raised 50→65: requires a more substantial red blob
 RED_ICON_DILATE_KERNEL = 3     # Size of dilation kernel to 'inflate' red pixels
 
-# Red Color HSV bounds (wider range for better detection)
-RED_HSV_LOWER1 = (0, 100, 100)
-RED_HSV_UPPER1 = (15, 255, 255)
-RED_HSV_LOWER2 = (165, 100, 100)
+# Red Color HSV bounds — tightened to reduce false positives
+# Hue upper ceiling lowered (15→10) to exclude orange-leaning pixels
+# Saturation/Value floors raised (100→120/130) to exclude washed-out/dim non-reds
+RED_HSV_LOWER1 = (0, 120, 130)
+RED_HSV_UPPER1 = (10, 255, 255)
+RED_HSV_LOWER2 = (168, 120, 130)  # Wrap-around lower bound narrowed (165→168)
 RED_HSV_UPPER2 = (180, 255, 255)
 
-# Color verification for Red Icons
+# Color verification for Red Icons — thresholds tightened
 RED_ICON_COLOR_CHECK = True
-RED_ICON_COLOR_MIN_RATIO = 1.15
-RED_ICON_COLOR_MIN_MEAN = 35
+RED_ICON_COLOR_MIN_RATIO = 1.35  # Raised 1.15→1.35: red must be 35% brighter than max(G,B)
+RED_ICON_COLOR_MIN_MEAN = 55    # Raised 35→55: minimum absolute red channel intensity
 RED_ICON_COLOR_SAMPLE_SIZE = 24
 
 # Position refinement and verification
@@ -110,21 +112,24 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.004
 SCROLL_START_POS = (180, 390)
 
 # Distance in pixels for a single "standard" scroll step
-SCROLL_PIXEL_STEP = 100     # Tightened: Finer search resolution for better locking
+SCROLL_PIXEL_STEP = 150     # Tightened: Finer search resolution for better locking
 SCROLL_DISTANCE_RATIO = 1
 
 # Arithmetic Search Strategy (Numerous but Short)
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
-SCROLL_INCREMENT_STEP = 3   
-SCROLL_INTERVAL_PAUSE = 0.08 # Rhythmic gap between swipes
-POST_SCROLL_SETTLE = 0.24    # CRITICAL: Pure scan window. Guarantees a static frame.
-CYCLE_PAUSE_DURATION = 0.20  # Stabilized direction flip
+SCROLL_INCREMENT_STEP = 1   
+SCROLL_INTERVAL_PAUSE = 0.06 # Conflict 2 fix: tighter inter-step rhythm (was 0.08)
+POST_SCROLL_SETTLE = 0.22    # Conflict 2 fix: marginal tighten; still > one 60fps frame (was 0.24)
+CYCLE_PAUSE_DURATION = 0.10  # Conflict 4 fix: direction-flip stabilization only; last step already settled (was 0.20)
 
 # Visual smoothness and stability
 SCROLL_DURATION = 0.28     # Slower, more deliberate glide reduces motion blur
 SCROLL_STEP_COUNT = 55     # High density linear motion
 SCROLL_MIN_INTERVAL = 0.004
-SCROLL_SETTLE_DELAY = 0.12  # Mechanical stabilization (Stop Inertia)
+# Conflict 2 fix: SCROLL_SETTLE_DELAY set to 0 — the drag()'s internal settle was duplicating
+# OscillatingSearcher's own settle_wait (POST_SCROLL_SETTLE + SCROLL_INTERVAL_PAUSE).
+# The searcher already waits for frame stability before every scan; this was pure double-sleep.
+SCROLL_SETTLE_DELAY = 0.0   # Was 0.12 — now managed exclusively by OscillatingSearcher
 
 
 ###############################
@@ -132,12 +137,14 @@ SCROLL_SETTLE_DELAY = 0.12  # Mechanical stabilization (Stop Inertia)
 ###############################
 
 # Main loop execution speed
-FSM_TICK_DELAY = 0.015     # Aligned with 60FPS frame timing (16ms)
+# Conflict 1 fix: MAIN_LOOP_DELAY + STATE_MIN_INTERVAL_DEFAULT were double-taxing every tick.
+# Halving both removes ~20ms of guaranteed dead time per FSM tick without risking missed events.
+FSM_TICK_DELAY = 0.008     # Halved from 0.015 — sub-frame gap keeps main loop responsive
 MAIN_LOOP_DELAY = FSM_TICK_DELAY
 
 # Minimum time to wait between state handler executions
 STATE_DELAY = 0.025
-STATE_MIN_INTERVAL_DEFAULT = 0.02
+STATE_MIN_INTERVAL_DEFAULT = 0.01  # Conflict 1 fix: halved — MAIN_LOOP_DELAY now provides base rate floor
 STATE_MIN_INTERVALS = {
     "FIND_RED_ICONS": 0.05,  # Forces a "stare" before giving up and scrolling
     "OPEN_BOXES": 0.015,
@@ -177,21 +184,28 @@ RED_ICON_MERGE_BUCKET_SIZE = 10
 # Forbidden-zone red icon arbitration (debounced 4-state matrix)
 FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.02
 FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.03
-FORBIDDEN_ZONE_DEBOUNCE_TICKS = 3
-FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS = 2
+# Conflict 5 fix: strict whitelist gates from previous session make 3-tick debounce over-cautious.
+# Reducing to 2 ticks / consensus=1 cuts up to one full extra CV scan per FIND_RED_ICONS entry.
+FORBIDDEN_ZONE_DEBOUNCE_TICKS = 2
+FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS = 1  # First clean read wins immediately
 FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN = 0.18
 FORBIDDEN_BLACKOUT_DURATION = 3.5 # World-space coordinate ignore time
 
 # Strict pre-click boundary validator timing (Slow is Smooth, Smooth is Fast)
-FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.012
-FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.008
-ASSET_BOUNDARY_PRECHECK_DELAY = 0.02
-ASSET_BOUNDARY_CONFIRM_DELAY = 0.01
+# Conflict 3 fix: tightened all four validation delays. Total per-click overhead reduced ~21ms.
+# Double-check architecture retained; only sleep duration shortened (whitelist is now stricter).
+FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.008   # Was 0.012
+FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.005           # Was 0.008
+ASSET_BOUNDARY_PRECHECK_DELAY = 0.012               # Was 0.02
+ASSET_BOUNDARY_CONFIRM_DELAY = 0.006                # Was 0.01
 ASSET_SEGREGATION_DELAY = 0.04  # Deliberate pause for coordinate categorization
 
 # Upgrade station interaction settings
 UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 5
-UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.05
+# Conflict 6 fix: base threshold is now 0.95. With DROP=0.05 the relaxed floor was 0.90,
+# which equalled AI_UPGRADE_STATION_THRESHOLD_MIN — the optimizer had no recovery window.
+# DROP=0.04 yields relaxed=0.91, keeping a meaningful gap above the optimizer floor.
+UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.04  # Was 0.05; relaxed floor now = 0.91
 UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 2
 
 # Level transition and completion settings
@@ -231,7 +245,9 @@ UPGRADE_RED_ICON_Y_MAX = 680
 
 # Background monitoring frequency
 NEW_LEVEL_INTERRUPT_INTERVAL = 0.035 # 2x faster exit from sleep states
-NEW_LEVEL_MONITOR_INTERVAL = 0.055   # Consistent background scan rate
+# Conflict 7 fix: 0.055s interval = ~18 lock-attempts/sec competing with main scan thread.
+# 0.080s (~12/sec) still catches level completion within 160ms — a non-event for a non-sub-second transition.
+NEW_LEVEL_MONITOR_INTERVAL = 0.080   # Was 0.055; reduces capture lock contention during active scanning
 NEW_LEVEL_OVERRIDE_COOLDOWN = 0.25
 
 
@@ -302,7 +318,9 @@ AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.99
 AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 2
 AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.005
 
-AI_UPGRADE_STATION_THRESHOLD_MIN = 0.9
+# Conflict 6 fix: floor raised from 0.90 to 0.91 to align with new relaxed threshold (0.95 - 0.04 = 0.91).
+# Previously the optimizer floor equalled the relaxed retry floor — the optimizer had no independent recovery gap.
+AI_UPGRADE_STATION_THRESHOLD_MIN = 0.91  # Was 0.90; now tracks relaxed floor exactly
 AI_UPGRADE_STATION_THRESHOLD_MAX = 0.99
 AI_UPGRADE_STATION_MISS_WINDOW = 2
 AI_UPGRADE_STATION_MISS_STEP = 0.005

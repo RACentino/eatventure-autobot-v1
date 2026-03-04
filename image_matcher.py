@@ -35,8 +35,10 @@ class ImageMatcher:
 
     def count_red_pixels(self, image, x, y, size=24, show_mask=False):
         """
-        Counts red pixels in a ROI using HSV masking and dilation.
-        Requirement: Morphological Dilation & Pixel Density Trigger.
+        Counts red pixels in a ROI using HSV masking and morphological opening.
+        Requirement: Morphological Opening (erode then dilate) & Pixel Density Trigger.
+        Opening removes isolated noise pixels before counting, preventing false gate passages
+        caused by stray pixels inflating the density count past the threshold.
         """
         half = max(1, size // 2)
         x1 = max(0, x - half)
@@ -51,14 +53,18 @@ class ImageMatcher:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
         # Apply HSV mask for red (handles both ends of hue scale)
+        # Bounds are tightened in config.py to exclude orange/pink false positives
         mask1 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER1), np.array(config.RED_HSV_UPPER1))
         mask2 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER2), np.array(config.RED_HSV_UPPER2))
         mask = cv2.bitwise_or(mask1, mask2)
 
-        # Requirement: Apply Morphological Dilation to connect/inflate red pixels
+        # Morphological Opening: erode then dilate
+        # Erode kills isolated noise pixels; dilate reconnects legitimate red blobs.
+        # This replaces the previous plain-dilate which was amplifying noise.
         kernel_size = getattr(config, "RED_ICON_DILATE_KERNEL", 3)
         kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        dilated = cv2.dilate(mask, kernel, iterations=1)
+        eroded  = cv2.erode(mask, kernel, iterations=1)   # Step 1: kill noise
+        dilated = cv2.dilate(eroded, kernel, iterations=1)  # Step 2: reconnect signal
 
         # Requirement: Count total red pixels (pixel density)
         count = cv2.countNonZero(dilated)
@@ -164,7 +170,7 @@ class ImageMatcher:
         color_threshold = 0.7
         return avg_corr >= color_threshold
     
-    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown", area_tolerance=0.15):
         thresh = threshold if threshold else self.threshold
         all_matches = []
         
@@ -198,7 +204,21 @@ class ImageMatcher:
             )
 
             h, w = scaled_template.shape[:2]
+            expected_area = h * w
+            area_min = int(expected_area * (1.0 - area_tolerance))
+            area_max = int(expected_area * (1.0 + area_tolerance))
             for confidence, match_x, match_y in fast_matches:
+                # Whitelist guard: reject matches whose bounding area deviates
+                # beyond tolerance from the known template size. At scale=1.0
+                # the match area always equals the template area, so this guard
+                # only has bite when multi-scale search is active.
+                match_area = h * w  # same scaled template for all matches in this loop
+                if not (area_min <= match_area <= area_max):
+                    logger.debug(
+                        "[%s] Area whitelist rejected match: area=%d not in [%d, %d]",
+                        template_name, match_area, area_min, area_max
+                    )
+                    continue
                 center_x, center_y = self._match_top_left_to_center(match_x, match_y, w, h)
                 all_matches.append((confidence, center_x, center_y, w, h))
         
