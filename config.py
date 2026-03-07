@@ -123,8 +123,8 @@ POST_SCROLL_SETTLE = 0.22    # Conflict 2 fix: marginal tighten; still > one 60f
 CYCLE_PAUSE_DURATION = 0.10  # Conflict 4 fix: direction-flip stabilization only; last step already settled (was 0.20)
 
 # Visual smoothness and stability
-SCROLL_DURATION = 0.5     # Slower, more deliberate glide reduces motion blur
-SCROLL_STEP_COUNT = 40     # High density linear motion
+SCROLL_DURATION = 0.4     # Slower, more deliberate glide reduces motion blur
+SCROLL_STEP_COUNT = 50     # High density linear motion
 SCROLL_MIN_INTERVAL = 0.004
 # Conflict 2 fix: SCROLL_SETTLE_DELAY set to 0 — the drag()'s internal settle was duplicating
 # OscillatingSearcher's own settle_wait (POST_SCROLL_SETTLE + SCROLL_INTERVAL_PAUSE).
