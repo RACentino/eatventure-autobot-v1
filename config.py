@@ -117,14 +117,14 @@ SCROLL_DISTANCE_RATIO = 1
 
 # Arithmetic Search Strategy (Numerous but Short)
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
-SCROLL_INCREMENT_STEP = 1   
+SCROLL_INCREMENT_STEP = 2   
 SCROLL_INTERVAL_PAUSE = 0.06 # Conflict 2 fix: tighter inter-step rhythm (was 0.08)
 POST_SCROLL_SETTLE = 0.22    # Conflict 2 fix: marginal tighten; still > one 60fps frame (was 0.24)
 CYCLE_PAUSE_DURATION = 0.10  # Conflict 4 fix: direction-flip stabilization only; last step already settled (was 0.20)
 
 # Visual smoothness and stability
-SCROLL_DURATION = 0.75     # Slower, more deliberate glide reduces motion blur
-SCROLL_STEP_COUNT = 70     # High density linear motion
+SCROLL_DURATION = 0.5     # Slower, more deliberate glide reduces motion blur
+SCROLL_STEP_COUNT = 40     # High density linear motion
 SCROLL_MIN_INTERVAL = 0.004
 # Conflict 2 fix: SCROLL_SETTLE_DELAY set to 0 — the drag()'s internal settle was duplicating
 # OscillatingSearcher's own settle_wait (POST_SCROLL_SETTLE + SCROLL_INTERVAL_PAUSE).
