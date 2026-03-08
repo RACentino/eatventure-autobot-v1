@@ -344,12 +344,26 @@ class EatventureBot:
             return None
 
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
+            if not getattr(config, "ENABLE_NO_ICON_SCROLL_INTERRUPT", False):
+                logger.debug(
+                    "No-icon scroll interrupt condition met but BYPASSED (ENABLE_NO_ICON_SCROLL_INTERRUPT=False)"
+                )
+                self._no_red_scroll_cycle_pending = False
+                return None
             logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
             self._no_red_scroll_cycle_pending = False
             return State.SCROLL
 
         interrupt = self._consume_new_level_interrupt()
         if interrupt:
+            if not getattr(config, "ENABLE_NEW_LEVEL_INTERRUPT", False):
+                logger.debug(
+                    "New level interrupt (background %s) detected but BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
+                    interrupt["source"],
+                )
+                if self._no_red_scroll_cycle_pending:
+                    self._no_red_scroll_cycle_pending = False
+                return None
             logger.info(
                 "Priority override: background %s detected at (%s, %s), interrupting current action",
                 interrupt["source"],
@@ -374,6 +388,12 @@ class EatventureBot:
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
+            if not getattr(config, "ENABLE_NEW_LEVEL_INTERRUPT", False):
+                logger.debug(
+                    "New level priority hit (%s at %s,%s) BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
+                    source, x, y,
+                )
+                return None
             logger.info(
                 "Priority override: %s detected at (%s, %s), transitioning immediately",
                 source,

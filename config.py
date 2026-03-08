@@ -35,7 +35,7 @@ MATCH_THRESHOLD = 0.98
 RED_ICON_THRESHOLD = 0.94
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95
 STATS_RED_ICON_THRESHOLD = 0.97
-UPGRADE_STATION_THRESHOLD = 0.95  # Raised 0.80→0.90: eliminates weak partial-shape matches
+UPGRADE_STATION_THRESHOLD = 0.90  # Raised 0.80→0.90: eliminates weak partial-shape matches
 BOX_THRESHOLD = 0.97
 UNLOCK_THRESHOLD = 0.95
 NEW_LEVEL_THRESHOLD = 0.98
@@ -119,17 +119,17 @@ SCROLL_DISTANCE_RATIO = 1
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
 SCROLL_INCREMENT_STEP = 2   
 SCROLL_INTERVAL_PAUSE = 0.06 # Conflict 2 fix: tighter inter-step rhythm (was 0.08)
-POST_SCROLL_SETTLE = 0.22    # Conflict 2 fix: marginal tighten; still > one 60fps frame (was 0.24)
-CYCLE_PAUSE_DURATION = 0.10  # Conflict 4 fix: direction-flip stabilization only; last step already settled (was 0.20)
+POST_SCROLL_SETTLE = 0.20    # Optimized: 12 frames at 60fps; still > one frame; saves ~0.02s/step (was 0.22)
+CYCLE_PAUSE_DURATION = 0.08  # Optimized: 5 frames at 60fps; ample for direction-flip stabilization (was 0.10)
 
 # Visual smoothness and stability
-SCROLL_DURATION = 0.4     # Slower, more deliberate glide reduces motion blur
-SCROLL_STEP_COUNT = 50     # High density linear motion
+SCROLL_DURATION = 0.35    # Optimized: 12% faster drag; 30 steps × 7ms = still imperceptibly smooth (was 0.4)
+SCROLL_STEP_COUNT = 30     # Optimized: 6px/step at 180px distance; 40% fewer API calls, no visible jank (was 50)
 SCROLL_MIN_INTERVAL = 0.004
-# Conflict 2 fix: SCROLL_SETTLE_DELAY set to 0 — the drag()'s internal settle was duplicating
-# OscillatingSearcher's own settle_wait (POST_SCROLL_SETTLE + SCROLL_INTERVAL_PAUSE).
-# The searcher already waits for frame stability before every scan; this was pure double-sleep.
-SCROLL_SETTLE_DELAY = 0.0   # Was 0.12 — now managed exclusively by OscillatingSearcher
+# SCROLL_SETTLE_DELAY set to 0.02 — provides a nominal post-drag stabilization buffer.
+# Previously 0.0 caused drag() to fall back to click_delay (0.045s) as unintended padding.
+# This explicit 0.02s is shorter and intentional, replacing the hidden fallback.
+SCROLL_SETTLE_DELAY = 0.02  # Optimized: explicit settle replaces hidden 0.045s click_delay fallback (was 0.0)
 
 
 ###############################
@@ -167,7 +167,8 @@ NEW_LEVEL_BUTTON_POS = (30, 692)
 UPGRADE_HOLD_DURATION = 5  # How long to hold the upgrade button
 UPGRADE_CLICK_INTERVAL = 0.012  # Slower hold-loop tap cadence improves upgrade registration consistency.
 UPGRADE_SEARCH_INTERVAL = 0.08  # More time between upgrade scans avoids CV while UI counters are animating.
-UPGRADE_CHECK_INTERVAL = 0.07  # Slower polling reduces overlap between click effects and verification reads.
+# UPGRADE_CHECK_INTERVAL: Deprecated — no code in the codebase references this variable.
+# UPGRADE_CHECK_INTERVAL = 0.07
 STATS_UPGRADE_CLICK_DURATION = 2
 STATS_UPGRADE_CLICK_DELAY = 0.02  # Added spacing between stat taps to prevent dropped clicks on low FPS moments.
 STATS_ICON_PADDING = 20
@@ -186,7 +187,7 @@ FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.02
 FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.03
 # Conflict 5 fix: strict whitelist gates from previous session make 3-tick debounce over-cautious.
 # Reducing to 2 ticks / consensus=1 cuts up to one full extra CV scan per FIND_RED_ICONS entry.
-FORBIDDEN_ZONE_DEBOUNCE_TICKS = 2
+FORBIDDEN_ZONE_DEBOUNCE_TICKS = 1  # Optimized: consensus=1 means 2nd tick was never reached; align to actual behavior (was 2)
 FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS = 1  # First clean read wins immediately
 FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN = 0.18
 FORBIDDEN_BLACKOUT_DURATION = 3.5 # World-space coordinate ignore time
@@ -252,6 +253,23 @@ NEW_LEVEL_OVERRIDE_COOLDOWN = 0.25
 
 
 ###############################
+### PRIORITY RESOLVER FLAGS ###
+###############################
+
+# Toggle for the New Level priority resolver interrupt.
+# When False (default), the resolver will NOT initiate level transitions.
+# The background monitor thread still detects new levels, but the resolver
+# skips acting on them. check_critical_interrupts() remains active as a safety net.
+ENABLE_NEW_LEVEL_INTERRUPT = False
+
+# Toggle for the No Icon Scroll priority resolver interrupt.
+# When False (default), the resolver will NOT force a SCROLL transition
+# after fallback asset clicks when no red icons were found.
+# Standard scrolling from the main state flow is unaffected.
+ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+
+
+###############################
 ### ADAPTIVE TUNER SETTINGS ###
 ###############################
 
@@ -276,12 +294,12 @@ ADAPTIVE_TUNER_UPGRADE_DECREMENT = 0.001
 
 # Range limits for adaptive delays
 ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.035
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.11
-ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.003
+ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.12   # Unified with learner max to prevent tug-of-war oscillation (was 0.11)
+ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.002   # Unified with learner min to prevent tug-of-war oscillation (was 0.003)
 ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.012
 ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL = 0.006
-ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL = 0.012
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.015
+ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL = 0.013  # Unified with learner max to prevent tug-of-war oscillation (was 0.012)
+ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.012  # Unified with learner min to prevent tug-of-war oscillation (was 0.015)
 ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.09  # Must stay above UPGRADE_SEARCH_INTERVAL so low-success tuning can only slow scans, never snap faster.
 
 
