@@ -112,24 +112,24 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.004
 SCROLL_START_POS = (180, 390)
 
 # Distance in pixels for a single "standard" scroll step
-SCROLL_PIXEL_STEP = 180     # Tightened: Finer search resolution for better locking
+SCROLL_PIXEL_STEP = 90     # Tightened: Finer search resolution for better locking
 SCROLL_DISTANCE_RATIO = 1
 
 # Arithmetic Search Strategy (Numerous but Short)
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
 SCROLL_INCREMENT_STEP = 2   
-SCROLL_INTERVAL_PAUSE = 0.06 # Conflict 2 fix: tighter inter-step rhythm (was 0.08)
-POST_SCROLL_SETTLE = 0.20    # Optimized: 12 frames at 60fps; still > one frame; saves ~0.02s/step (was 0.22)
-CYCLE_PAUSE_DURATION = 0.08  # Optimized: 5 frames at 60fps; ample for direction-flip stabilization (was 0.10)
+SCROLL_INTERVAL_PAUSE = 0.03  # Speed: combined settle = 0.13s / 8 frames (was 0.06)
+POST_SCROLL_SETTLE = 0.10     # Speed: 6 frames at 60fps; sufficient for 90px displacement (was 0.20)
+CYCLE_PAUSE_DURATION = 0.04   # Speed: 2-3 frames for direction flip (was 0.08)
 
 # Visual smoothness and stability
-SCROLL_DURATION = 0.35    # Optimized: 12% faster drag; 30 steps × 7ms = still imperceptibly smooth (was 0.4)
-SCROLL_STEP_COUNT = 30     # Optimized: 6px/step at 180px distance; 40% fewer API calls, no visible jank (was 50)
+SCROLL_DURATION = 0.18    # Speed: 90px at ~500px/s matches original 180px cadence; 15 steps × 12ms = smooth (was 0.35)
+SCROLL_STEP_COUNT = 15     # Speed: 90px ÷ 15 = 6px/step; restores original interpolation density (was 30)
 SCROLL_MIN_INTERVAL = 0.004
 # SCROLL_SETTLE_DELAY set to 0.02 — provides a nominal post-drag stabilization buffer.
 # Previously 0.0 caused drag() to fall back to click_delay (0.045s) as unintended padding.
 # This explicit 0.02s is shorter and intentional, replacing the hidden fallback.
-SCROLL_SETTLE_DELAY = 0.02  # Optimized: explicit settle replaces hidden 0.045s click_delay fallback (was 0.0)
+SCROLL_SETTLE_DELAY = 0.01   # Speed: nominal post-drag buffer; searcher handles real settle (was 0.02)
 
 
 ###############################
@@ -139,16 +139,16 @@ SCROLL_SETTLE_DELAY = 0.02  # Optimized: explicit settle replaces hidden 0.045s 
 # Main loop execution speed
 # Conflict 1 fix: MAIN_LOOP_DELAY + STATE_MIN_INTERVAL_DEFAULT were double-taxing every tick.
 # Halving both removes ~20ms of guaranteed dead time per FSM tick without risking missed events.
-FSM_TICK_DELAY = 0.008     # Halved from 0.015 — sub-frame gap keeps main loop responsive
+FSM_TICK_DELAY = 0.004     # Speed: doubles FSM throughput; above Windows quantum (was 0.008)
 MAIN_LOOP_DELAY = FSM_TICK_DELAY
 
 # Minimum time to wait between state handler executions
 STATE_DELAY = 0.025
-STATE_MIN_INTERVAL_DEFAULT = 0.01  # Conflict 1 fix: halved — MAIN_LOOP_DELAY now provides base rate floor
+STATE_MIN_INTERVAL_DEFAULT = 0.005  # Speed: FSM_TICK provides base floor (was 0.01)
 STATE_MIN_INTERVALS = {
-    "FIND_RED_ICONS": 0.05,  # Forces a "stare" before giving up and scrolling
-    "OPEN_BOXES": 0.015,
-    "SCROLL": 0.025,
+    "FIND_RED_ICONS": 0.025,  # Speed: halved stare window (was 0.05)
+    "OPEN_BOXES": 0.008,      # Speed: boxes don't need long gaps (was 0.015)
+    "SCROLL": 0.012,          # Speed: scroll overhead is the real limiter (was 0.025)
 }
 
 # Red Icon and detection offsets
@@ -183,8 +183,8 @@ RED_ICON_MERGE_PROXIMITY = 10
 RED_ICON_MERGE_BUCKET_SIZE = 10
 
 # Forbidden-zone red icon arbitration (debounced 4-state matrix)
-FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.02
-FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.03
+FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.010  # Speed: coordinate test is instant math (was 0.02)
+FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.015  # Speed: no CV involved (was 0.03)
 # Conflict 5 fix: strict whitelist gates from previous session make 3-tick debounce over-cautious.
 # Reducing to 2 ticks / consensus=1 cuts up to one full extra CV scan per FIND_RED_ICONS entry.
 FORBIDDEN_ZONE_DEBOUNCE_TICKS = 1  # Optimized: consensus=1 means 2nd tick was never reached; align to actual behavior (was 2)
@@ -199,7 +199,7 @@ FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.008   # Was 0.012
 FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.005           # Was 0.008
 ASSET_BOUNDARY_PRECHECK_DELAY = 0.012               # Was 0.02
 ASSET_BOUNDARY_CONFIRM_DELAY = 0.006                # Was 0.01
-ASSET_SEGREGATION_DELAY = 0.04  # Deliberate pause for coordinate categorization
+ASSET_SEGREGATION_DELAY = 0.020  # Speed: in-memory categorization (was 0.04)
 
 # Upgrade station interaction settings
 UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 5
@@ -214,7 +214,7 @@ LEVEL_TRANSITION_MAX_ATTEMPTS = 5
 LEVEL_COMPLETION_RECENCY_WINDOW = 5.0
 NEW_LEVEL_FAIL_COOLDOWN = 15.0
 
-NEW_LEVEL_BUTTON_DELAY = 0.5
+NEW_LEVEL_BUTTON_DELAY = 0.30  # Speed: 300ms between override clicks sufficient for UI (was 0.5)
 NEW_LEVEL_FOLLOWUP_DELAY = 0.3
 UI_TRANSITION_PADDING = 1.1  # Unified transition padding so post-click travel/menu animations fully complete before CV.
 TRANSITION_POST_CLICK_DELAY = UI_TRANSITION_PADDING  # Reuses the padded transition constant for all transition waits.
