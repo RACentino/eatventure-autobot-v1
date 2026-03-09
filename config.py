@@ -109,11 +109,12 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.004
 ###############################
 
 # Start position for search scrolls (relative to window)
-SCROLL_START_POS = (180, 390)
+SCROLL_START_POS = (170, 380)
 
 # Distance in pixels for a single "standard" scroll step
 SCROLL_PIXEL_STEP = 90     # Tightened: Finer search resolution for better locking
 SCROLL_DISTANCE_RATIO = 1
+SCROLL_UP_DISTANCE = 100   # Verification scroll distance
 
 # Arithmetic Search Strategy (Numerous but Short)
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
