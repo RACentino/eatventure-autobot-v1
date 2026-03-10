@@ -2162,16 +2162,13 @@ class EatventureBot:
         self._click_idle()
         logger.info(">>> VERIFICATION PHASE: New Level Trigger Detected")
 
-        # 1. Verification Step: Scroll Up
-        logger.info("Verification: Performing single scroll up to verify trigger")
+        # 1. Verification Step: Scroll Down
+        logger.info("Verification: Performing single scroll down to verify trigger")
         start_x, start_y = config.SCROLL_START_POS
-        # Dragging from start_y to start_y + distance scrolls the CONTENT UP (finger moves down)
-        # The goal is "scroll up" which usually means moving finger down.
-        # However, in SCROLL state, perform_scroll(direction=1) does:
-        # from_y = config.SCROLL_START_POS[1], to_y = from_y + move_dist
+        # Dragging from start_y to start_y - distance scrolls the CONTENT DOWN (finger moves up)
         self.mouse_controller.drag(
             start_x, start_y,
-            start_x, start_y + config.SCROLL_UP_DISTANCE,
+            start_x, start_y - config.SCROLL_VERIFICATION_DISTANCE,
             duration=0.2,
             relative=True
         )

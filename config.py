@@ -114,7 +114,7 @@ SCROLL_START_POS = (170, 380)
 # Distance in pixels for a single "standard" scroll step
 SCROLL_PIXEL_STEP = 90     # Tightened: Finer search resolution for better locking
 SCROLL_DISTANCE_RATIO = 1
-SCROLL_UP_DISTANCE = 100   # Verification scroll distance
+SCROLL_VERIFICATION_DISTANCE = 100   # Verification scroll distance
 
 # Arithmetic Search Strategy (Numerous but Short)
 MAX_SCROLL_CYCLES = 12     # Increased cycles to compensate for shorter steps
@@ -165,7 +165,7 @@ STATS_UPGRADE_BUTTON_POS = (310, 698)
 NEW_LEVEL_BUTTON_POS = (30, 692)
 
 # Timing for interaction sequences
-UPGRADE_HOLD_DURATION = 5  # How long to hold the upgrade button
+UPGRADE_HOLD_DURATION = 6  # How long to hold the upgrade button
 UPGRADE_CLICK_INTERVAL = 0.012  # Slower hold-loop tap cadence improves upgrade registration consistency.
 UPGRADE_SEARCH_INTERVAL = 0.08  # More time between upgrade scans avoids CV while UI counters are animating.
 # UPGRADE_CHECK_INTERVAL: Deprecated — no code in the codebase references this variable.
@@ -261,13 +261,13 @@ NEW_LEVEL_OVERRIDE_COOLDOWN = 0.25
 # When False (default), the resolver will NOT initiate level transitions.
 # The background monitor thread still detects new levels, but the resolver
 # skips acting on them. check_critical_interrupts() remains active as a safety net.
-ENABLE_NEW_LEVEL_INTERRUPT = False
+ENABLE_NEW_LEVEL_INTERRUPT = True
 
 # Toggle for the No Icon Scroll priority resolver interrupt.
 # When False (default), the resolver will NOT force a SCROLL transition
 # after fallback asset clicks when no red icons were found.
 # Standard scrolling from the main state flow is unaffected.
-ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+ENABLE_NO_ICON_SCROLL_INTERRUPT = True
 
 
 ###############################
