@@ -109,13 +109,13 @@ MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.004  # Settle delay between click retries
 SCROLL_START_POS = (170, 380)       # (x, y) relative to window client area
 
 # Scroll distance parameters
-SCROLL_PIXEL_STEP = 90              # Pixels per single scroll step
+SCROLL_PIXEL_STEP = 180              # Pixels per single scroll step
 SCROLL_DISTANCE_RATIO = 1           # Multiplier applied to scroll distance
-SCROLL_VERIFICATION_DISTANCE = 100  # Pixel distance for new-level verification scroll
+SCROLL_VERIFICATION_DISTANCE = 300  # Pixel distance for new-level verification scroll
 
 # Incremental Oscillating Search strategy
-MAX_SCROLL_CYCLES = 10              # Maximum oscillation cycles per search invocation
-SCROLL_INCREMENT_STEP = 2           # Amplitude increment per cycle pair
+MAX_SCROLL_CYCLES = 12              # Maximum oscillation cycles per search invocation
+SCROLL_INCREMENT_STEP = 1           # Amplitude increment per cycle pair
 SCROLL_INTERVAL_PAUSE = 0.06        # Inter-scroll pause for frame stability between steps
 POST_SCROLL_SETTLE = 0.22           # Post-scroll settle time; ensures rendered frame before scan
 CYCLE_PAUSE_DURATION = 0.08         # Pause at direction reversal to prevent momentum artifacts
@@ -250,7 +250,7 @@ EXTENDED_SEARCH_Y = 710             # Extended Y for stats icon and full-view ca
 
 # Interrupt toggles for the FSM priority resolver
 ENABLE_NEW_LEVEL_INTERRUPT = True       # Allow priority resolver to trigger level transitions
-ENABLE_NO_ICON_SCROLL_INTERRUPT = True  # Allow priority resolver to force scroll when no icons found
+ENABLE_NO_ICON_SCROLL_INTERRUPT = False  # Allow priority resolver to force scroll when no icons found
 
 
 ###################################
