@@ -11,7 +11,7 @@ WINDOW_HEIGHT = 650 * 1.2
 
 # Debug and visualization toggles
 DEBUG = True
-DEBUG_VISION = False                # Enables on-screen masked view for red pixel density tuning
+DEBUG_VISION = True                # Enables on-screen masked view for red pixel density tuning
 ShowForbiddenArea = False           # Enables a transparent red overlay showing forbidden zones
 
 
@@ -32,10 +32,10 @@ LOGS_DIR = "logs"                   # Folder for bot logs, vision state, and lea
 MATCH_THRESHOLD = 0.98              # Default threshold passed to ImageMatcher constructor
 
 # Per-asset detection thresholds
-RED_ICON_THRESHOLD = 0.94           # Minimum confidence to accept a red icon match
+RED_ICON_THRESHOLD = 0.90           # Minimum confidence to accept a red icon match
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.95 # Confidence for red-icon-based new-level detection
 STATS_RED_ICON_THRESHOLD = 0.97     # Confidence for stats upgrade icon detection
-UPGRADE_STATION_THRESHOLD = 0.95    # Confidence for upgrade station template match
+UPGRADE_STATION_THRESHOLD = 0.8    # Confidence for upgrade station template match
 BOX_THRESHOLD = 0.97                # Confidence for gift box template match
 UNLOCK_THRESHOLD = 0.95             # Confidence for unlock button template match
 NEW_LEVEL_THRESHOLD = 0.98          # Confidence for new level / travel button template match
