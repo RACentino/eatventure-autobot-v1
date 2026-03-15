@@ -221,10 +221,31 @@ class VisionOptimizer:
     def apply_persisted_state(self, state):
         if not state:
             return
-        for key in ["red_icon_threshold", "new_level_threshold", "new_level_red_icon_threshold", 
-                    "upgrade_station_threshold", "stats_upgrade_threshold", "box_threshold"]:
-            if key in state:
-                setattr(self, key, float(state[key]))
+        clamps = {
+            "red_icon_threshold": (config.AI_RED_ICON_THRESHOLD_MIN, config.AI_RED_ICON_THRESHOLD_MAX),
+            "new_level_threshold": (config.AI_NEW_LEVEL_THRESHOLD_MIN, config.AI_NEW_LEVEL_THRESHOLD_MAX),
+            "new_level_red_icon_threshold": (
+                config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+                config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX,
+            ),
+            "upgrade_station_threshold": (
+                config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+                config.AI_UPGRADE_STATION_THRESHOLD_MAX,
+            ),
+            "stats_upgrade_threshold": (
+                config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+                config.AI_STATS_UPGRADE_THRESHOLD_MAX,
+            ),
+            "box_threshold": (config.AI_BOX_THRESHOLD_MIN, config.AI_BOX_THRESHOLD_MAX),
+        }
+        for key, (minimum, maximum) in clamps.items():
+            if key not in state:
+                continue
+            value = float(state[key])
+            clamped = max(minimum, min(maximum, value))
+            if clamped != value:
+                logger.info("Clamped persisted %s from %.4f to %.4f", key, value, clamped)
+            setattr(self, key, clamped)
 
     def _persist(self, force=False):
         if not self.persistence:

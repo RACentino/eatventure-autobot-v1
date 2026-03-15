@@ -14,15 +14,51 @@ class ImageMatcher:
         # Limit to 1 thread to prevent CPU starvation between monitor and worker threads
         cv2.setNumThreads(1)
 
-    def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
-        # ... existing logic ...
+    def _extract_square_roi(self, image, x, y, size):
         half = max(1, size // 2)
         x1 = max(0, x - half)
         y1 = max(0, y - half)
         x2 = min(image.shape[1], x + half)
         y2 = min(image.shape[0], y + half)
+        return image[y1:y2, x1:x2]
 
-        roi = image[y1:y2, x1:x2]
+    def _build_red_mask(self, hsv):
+        mask1 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER1), np.array(config.RED_HSV_UPPER1))
+        mask2 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER2), np.array(config.RED_HSV_UPPER2))
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        kernel_size = max(1, int(getattr(config, "RED_ICON_DILATE_KERNEL", 3)))
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    def analyze_red_region(self, image, x, y, size=24, show_mask=False):
+        roi = self._extract_square_roi(image, x, y, size)
+        if roi.size == 0:
+            return {"pixel_count": 0, "red_ratio": 0.0, "red_mean": 0.0}
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = self._build_red_mask(hsv)
+        pixel_count = int(cv2.countNonZero(mask))
+
+        red_ratio = 0.0
+        red_mean = 0.0
+        if pixel_count:
+            red_pixels = roi[mask > 0].astype(np.float32)
+            if red_pixels.size:
+                dominant = np.maximum(red_pixels[:, 0], red_pixels[:, 1]) + 1e-6
+                red_values = red_pixels[:, 2]
+                red_mean = float(np.mean(red_values))
+                red_ratio = float(np.mean(red_values) / np.mean(dominant))
+
+        if show_mask:
+            debug_roi = cv2.resize(mask, (200, 200), interpolation=cv2.INTER_NEAREST)
+            cv2.imshow("Red Icon Mask (Debug)", debug_roi)
+            cv2.waitKey(1)
+
+        return {"pixel_count": pixel_count, "red_ratio": red_ratio, "red_mean": red_mean}
+
+    def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
+        roi = self._extract_square_roi(image, x, y, size)
         if roi.size == 0:
             return True
 
@@ -40,41 +76,8 @@ class ImageMatcher:
         Opening removes isolated noise pixels before counting, preventing false gate passages
         caused by stray pixels inflating the density count past the threshold.
         """
-        half = max(1, size // 2)
-        x1 = max(0, x - half)
-        y1 = max(0, y - half)
-        x2 = min(image.shape[1], x + half)
-        y2 = min(image.shape[0], y + half)
-
-        roi = image[y1:y2, x1:x2]
-        if roi.size == 0:
-            return 0
-
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        # Apply HSV mask for red (handles both ends of hue scale)
-        # Bounds are tightened in config.py to exclude orange/pink false positives
-        mask1 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER1), np.array(config.RED_HSV_UPPER1))
-        mask2 = cv2.inRange(hsv, np.array(config.RED_HSV_LOWER2), np.array(config.RED_HSV_UPPER2))
-        mask = cv2.bitwise_or(mask1, mask2)
-
-        # Morphological Opening: erode then dilate
-        # Erode kills isolated noise pixels; dilate reconnects legitimate red blobs.
-        # This replaces the previous plain-dilate which was amplifying noise.
-        kernel_size = getattr(config, "RED_ICON_DILATE_KERNEL", 3)
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        eroded  = cv2.erode(mask, kernel, iterations=1)   # Step 1: kill noise
-        dilated = cv2.dilate(eroded, kernel, iterations=1)  # Step 2: reconnect signal
-
-        # Requirement: Count total red pixels (pixel density)
-        count = cv2.countNonZero(dilated)
-
-        if show_mask:
-            debug_roi = cv2.resize(dilated, (200, 200), interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("Red Icon Mask (Debug)", debug_roi)
-            cv2.waitKey(1)
-
-        return count
+        metrics = self.analyze_red_region(image, x, y, size=size, show_mask=show_mask)
+        return metrics["pixel_count"]
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)

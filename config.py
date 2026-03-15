@@ -11,7 +11,7 @@ WINDOW_HEIGHT = 650 * 1.2
 
 # Debug and visualization toggles
 DEBUG = True
-DEBUG_VISION = True                # Enables on-screen masked view for red pixel density tuning
+DEBUG_VISION = False                # Enables on-screen masked view for red pixel density tuning
 ShowForbiddenArea = False           # Enables a transparent red overlay showing forbidden zones
 
 
@@ -32,10 +32,10 @@ LOGS_DIR = "logs"                   # Folder for bot logs, vision state, and lea
 MATCH_THRESHOLD = 0.98              # Default threshold passed to ImageMatcher constructor
 
 # Per-asset detection thresholds
-RED_ICON_THRESHOLD = 0.90           # Minimum confidence to accept a red icon match
-NEW_LEVEL_RED_ICON_THRESHOLD = 0.95 # Confidence for red-icon-based new-level detection
+RED_ICON_THRESHOLD = 0.935          # Minimum confidence to accept a red icon match
+NEW_LEVEL_RED_ICON_THRESHOLD = 0.94 # Confidence for red-icon-based new-level detection
 STATS_RED_ICON_THRESHOLD = 0.97     # Confidence for stats upgrade icon detection
-UPGRADE_STATION_THRESHOLD = 0.8    # Confidence for upgrade station template match
+UPGRADE_STATION_THRESHOLD = 0.95    # Confidence for upgrade station template match
 BOX_THRESHOLD = 0.97                # Confidence for gift box template match
 UNLOCK_THRESHOLD = 0.95             # Confidence for unlock button template match
 NEW_LEVEL_THRESHOLD = 0.98          # Confidence for new level / travel button template match
@@ -43,14 +43,16 @@ NEW_LEVEL_THRESHOLD = 0.98          # Confidence for new level / travel button t
 # Red icon gate settings
 RED_ICON_MIN_MATCHES = 1            # Minimum number of simultaneous red icon matches required
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1  # Minimum matches for new-level red icon detection
-RED_ICON_PIXEL_THRESHOLD = 65       # Minimum red pixel count in ROI to confirm a genuine red blob
+RED_ICON_PIXEL_THRESHOLD = 48       # Minimum masked red pixel count in ROI to confirm a genuine red blob
 RED_ICON_DILATE_KERNEL = 3          # Morphological kernel size for noise removal and blob reconnection
 
 # Red color HSV bounds for red pixel counting
-RED_HSV_LOWER1 = (0, 120, 130)      # Low-hue red band lower bound
-RED_HSV_UPPER1 = (10, 255, 255)     # Low-hue red band upper bound
-RED_HSV_LOWER2 = (168, 120, 130)    # High-hue red wrap-around lower bound
-RED_HSV_UPPER2 = (180, 255, 255)    # High-hue red wrap-around upper bound
+# Kept intentionally narrow to avoid ambient orange/pink UI clutter while
+# widening just enough for legitimate icon edge shading and hue wrap-around.
+RED_HSV_LOWER1 = (0, 105, 120)      # Low-hue red band lower bound
+RED_HSV_UPPER1 = (12, 255, 255)     # Low-hue red band upper bound
+RED_HSV_LOWER2 = (167, 105, 120)    # High-hue red wrap-around lower bound
+RED_HSV_UPPER2 = (179, 255, 255)    # High-hue red wrap-around upper bound
 
 # Red icon color verification (BGR channel ratio check)
 RED_ICON_COLOR_CHECK = True         # Enable red-dominance verification after template match
@@ -305,9 +307,9 @@ AI_BOX_MISS_WINDOW = 3                  # Consecutive misses before threshold de
 AI_BOX_MISS_STEP = 0.005                # Threshold reduction per miss event
 
 # Red icon detection AI bounds
-AI_RED_ICON_THRESHOLD_MIN = 0.92        # Minimum adaptive threshold for red icon detection
-AI_RED_ICON_THRESHOLD_MAX = 0.985       # Maximum adaptive threshold for red icon detection
-AI_RED_ICON_MARGIN = 0.01               # Confidence margin subtracted during threshold update
+AI_RED_ICON_THRESHOLD_MIN = 0.905       # Minimum adaptive threshold for red icon detection
+AI_RED_ICON_THRESHOLD_MAX = 0.97        # Maximum adaptive threshold for red icon detection
+AI_RED_ICON_MARGIN = 0.02               # Confidence margin subtracted during threshold update
 AI_RED_ICON_MISS_WINDOW = 3             # Consecutive misses before threshold degradation
 AI_RED_ICON_MISS_STEP = 0.004           # Threshold reduction per miss event
 

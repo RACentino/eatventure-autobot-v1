@@ -1012,20 +1012,20 @@ class EatventureBot:
                 red_icons.append((max_conf, x, y, max_pixel_count))
         return red_icons
 
-    def _is_red_icon_present_at(self, x, y, screenshot=None, threshold_override=None):
+    def _is_red_icon_present_at(self, x, y, screenshot=None, threshold_override=None, relaxed_color=False):
         if not self.available_red_icon_templates:
             return False
 
         target_screenshot = screenshot if screenshot is not None else self._capture(max_y=config.MAX_SEARCH_Y)
 
         if config.RED_ICON_COLOR_CHECK:
-            show_mask = getattr(config, "DEBUG_VISION", False)
-            pixel_count = self.image_matcher.count_red_pixels(
-                target_screenshot, x, y,
-                size=getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24),
-                show_mask=show_mask
+            passed_color_gate, _ = self._passes_red_color_gate(
+                target_screenshot,
+                x,
+                y,
+                relaxed=relaxed_color,
             )
-            if pixel_count < getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50):
+            if not passed_color_gate:
                 return False
 
         if threshold_override is not None:
@@ -1071,43 +1071,44 @@ class EatventureBot:
     def _passes_red_color_gate(self, screenshot, x, y, relaxed=False):
         """
         Strict dual-gate whitelist verification.
-        Gate 1 (Pixel Density): Counts dilated red pixels in ROI — must meet minimum.
-        Gate 2 (Channel Dominance): Red channel must be meaningfully brighter than G and B.
+        Gate 1 (Pixel Density): Counts dilated red pixels in ROI - must meet minimum.
+        Gate 2 (Masked Channel Dominance): Evaluates only the HSV-masked red pixels so
+        background pixels cannot dilute a valid icon.
         Both gates must pass (AND logic). Either failure discards the candidate.
         Returns: (passed, pixel_count)
         """
         show_mask = getattr(config, "DEBUG_VISION", False)
-        pixel_count = self.image_matcher.count_red_pixels(
-            screenshot, x, y, 
+        metrics = self.image_matcher.analyze_red_region(
+            screenshot,
+            x,
+            y,
             size=getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24),
-            show_mask=show_mask
+            show_mask=show_mask,
         )
-        
-        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 65)
-        if relaxed:
-            threshold = int(threshold * 0.7)
+        pixel_count = metrics["pixel_count"]
 
-        # Gate 1: Pixel density — must meet the minimum red blob size
+        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 48)
+        min_ratio = getattr(config, "RED_ICON_COLOR_MIN_RATIO", 1.35)
+        min_mean = getattr(config, "RED_ICON_COLOR_MIN_MEAN", 55)
+        if relaxed:
+            threshold = max(1, int(round(threshold * 0.8)))
+            min_ratio *= 0.92
+            min_mean *= 0.9
+
         if pixel_count < threshold:
             return False, pixel_count
 
-        # Gate 2: Channel dominance — red channel must dominate G and B
-        # Uses the tightened ratio/mean values from config (now 1.35 / 55)
-        min_ratio = getattr(config, "RED_ICON_COLOR_MIN_RATIO", 1.35)
-        min_mean  = getattr(config, "RED_ICON_COLOR_MIN_MEAN", 55)
-        sample_size = getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24)
-        if not self.image_matcher.is_red_dominant(
-            screenshot, x, y,
-            size=sample_size,
-            min_ratio=min_ratio,
-            min_mean=min_mean,
-        ):
+        if metrics["red_ratio"] < min_ratio or metrics["red_mean"] < min_mean:
             logger.debug(
-                "[RedGate] Channel dominance rejected candidate at (%s, %s) px=%d",
-                x, y, pixel_count,
+                "[RedGate] Masked dominance rejected candidate at (%s, %s) px=%d ratio=%.3f mean=%.1f",
+                x,
+                y,
+                pixel_count,
+                metrics["red_ratio"],
+                metrics["red_mean"],
             )
             return False, pixel_count
-            
+
         return True, pixel_count
 
     def _segregate_assets(self, detections):
@@ -1753,7 +1754,13 @@ class EatventureBot:
         )
         relaxed_threshold = max(0.0, base_threshold - 0.04) # Match SCROLL_RED_ICON_THRESHOLD_DROP approx
         
-        if not self._is_red_icon_present_at(x, y, screenshot=limited_screenshot, threshold_override=relaxed_threshold):
+        if not self._is_red_icon_present_at(
+            x,
+            y,
+            screenshot=limited_screenshot,
+            threshold_override=relaxed_threshold,
+            relaxed_color=True,
+        ):
             logger.info(
                 "Red icon no longer present at (%s, %s); skipping click",
                 x,
