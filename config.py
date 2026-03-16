@@ -71,6 +71,11 @@ UPGRADE_STATION_COLOR_CHECK = True  # Enable histogram color verification for up
 UPGRADE_STATION_REFINE_RADIUS = 28  # Search radius for upgrade station template refinement
 UPGRADE_STATION_CLICK_REFINE_RADIUS = 18  # Search radius for click-target refinement
 
+# Color similarity threshold for histogram-based verification
+# Used by upgrade station and box detection to reject background matches
+# whose color distribution doesn't correlate with the template.
+COLOR_SIMILARITY_THRESHOLD = 0.7    # Minimum histogram correlation (0.0–1.0)
+
 
 ###################################
 ###   MOUSE & INTERACTION       ###
@@ -215,8 +220,16 @@ STATS_UPGRADE_BUTTON_POS = (310, 698)  # Stats upgrade menu open button
 NEW_LEVEL_BUTTON_POS = (30, 692)    # New level acknowledgement button
 
 # Upgrade station interaction timing
-UPGRADE_HOLD_DURATION = 6           # Duration (seconds) to hold upgrade station button
+# DEPRECATED: UPGRADE_HOLD_DURATION is no longer used for the primary
+# upgrade interaction. Retained as fallback for hold_at() if needed elsewhere.
+UPGRADE_HOLD_DURATION = 6           # (Deprecated) Duration (seconds) for legacy hold
 UPGRADE_CLICK_INTERVAL = 0.018      # Tap cadence during upgrade hold loop
+
+# Spam-click configuration for upgrade station interaction
+# Replaces the old click-and-hold mechanic with rapid sequential left clicks.
+SPAM_CLICK_DURATION = 6.0           # Total duration (seconds) to spam-click the upgrade station
+SPAM_CLICK_DELAY = 0.010            # Delay (seconds) between individual spam clicks
+SPAM_CLICK_JITTER = 0               # Max random pixel offset to vary click position (0 = disabled)
 
 # Upgrade-station retries must wait long enough to beat the capture cache, but not
 # so long that the bot stares at a settled screen without refreshing its search.
@@ -345,7 +358,7 @@ EXTENDED_SEARCH_Y = 710             # Extended Y for stats icon and full-view ca
 ###################################
 
 # Interrupt toggles for the FSM priority resolver
-ENABLE_NEW_LEVEL_INTERRUPT = False       # Allow priority resolver to trigger level transitions
+ENABLE_NEW_LEVEL_INTERRUPT = True       # Allow priority resolver to trigger level transitions
 ENABLE_NO_ICON_SCROLL_INTERRUPT = False  # Allow priority resolver to force scroll when no icons found
 
 

@@ -170,7 +170,7 @@ class ImageMatcher:
         
         avg_corr = (corr_b + corr_g + corr_r) / 3
         
-        color_threshold = 0.7
+        color_threshold = getattr(config, "COLOR_SIMILARITY_THRESHOLD", 0.7)
         return avg_corr >= color_threshold
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown", area_tolerance=0.15):

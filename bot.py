@@ -1983,19 +1983,23 @@ class EatventureBot:
                 return State.SCROLL
             return State.FIND_RED_ICONS
         
-        logger.info("Holding upgrade station click...")
+        logger.info("Spam-clicking upgrade station...")
 
         start_time = time.monotonic()
         
-        # Use the hold action - it's now interrupt-aware via the MouseController global hook
-        self.mouse_controller.hold_at(
-            x, y, 
-            duration=config.UPGRADE_HOLD_DURATION, 
-            relative=True
+        # Use spam-click instead of hold — rapid sequential left clicks
+        # with interrupt awareness via the critical interrupt callback.
+        self.mouse_controller.spam_click_at(
+            x, y,
+            duration=config.SPAM_CLICK_DURATION,
+            click_delay=config.SPAM_CLICK_DELAY,
+            jitter=config.SPAM_CLICK_JITTER,
+            relative=True,
+            interrupt_check=lambda: self.check_critical_interrupts(raise_exception=False),
         )
 
         elapsed_time = time.monotonic() - start_time
-        logger.info(f"Clicking complete: hold duration {elapsed_time:.1f}s")
+        logger.info(f"Spam-clicking complete: duration {elapsed_time:.1f}s")
         
         self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:

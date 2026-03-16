@@ -460,6 +460,89 @@ class MouseController:
             self._send_mouse_up(screen_x, screen_y)
             self._sleep(self.click_delay)
             return True
+
+    def spam_click_at(self, x, y, duration=None, click_delay=None, jitter=0,
+                      relative=True, interrupt_check=None):
+        """
+        Spam-clicks at the given position for ``duration`` seconds.
+
+        Each click is a full mouse-down / mouse-up cycle dispatched through
+        ``_send_click``, which inherits all forbidden-zone enforcement and
+        pre-click stabilisation logic.
+
+        Args:
+            x, y:            Target coordinates.
+            duration:        Total spam-click window in seconds.
+                             Defaults to ``config.SPAM_CLICK_DURATION``.
+            click_delay:     Pause between individual clicks in seconds.
+                             Defaults to ``config.SPAM_CLICK_DELAY``.
+            jitter:          Max random pixel offset applied to each click
+                             position (0 = no jitter).
+            relative:        If True, coordinates are relative to window.
+            interrupt_check: Optional callback; if it returns True the
+                             sequence is aborted early.
+
+        Returns:
+            True if the full duration elapsed, False if interrupted.
+        """
+        import random
+
+        self._check_interrupts()
+        if duration is None:
+            duration = getattr(config, "SPAM_CLICK_DURATION", 6.0)
+        if click_delay is None:
+            click_delay = getattr(config, "SPAM_CLICK_DELAY", 0.035)
+
+        with self._mouse_action_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
+
+            screen_x, screen_y = screen_pos
+            click_count = 0
+
+            logger.info(
+                "Spam-clicking at (%s, %s) for %ss (delay=%.3fs, jitter=%s)",
+                screen_x,
+                screen_y,
+                duration,
+                click_delay,
+                jitter,
+            )
+
+            start_time = time.monotonic()
+            while time.monotonic() - start_time < duration:
+                # Interrupt gate
+                if interrupt_check and interrupt_check():
+                    logger.info(
+                        "Spam-click interrupted after %s clicks (%.2fs)",
+                        click_count,
+                        time.monotonic() - start_time,
+                    )
+                    return False
+
+                # Apply optional jitter
+                if jitter > 0:
+                    jx = screen_x + random.randint(-jitter, jitter)
+                    jy = screen_y + random.randint(-jitter, jitter)
+                else:
+                    jx, jy = screen_x, screen_y
+
+                self._send_click(jx, jy)
+                click_count += 1
+
+                # Inter-click delay
+                remaining = duration - (time.monotonic() - start_time)
+                if remaining > 0 and click_delay > 0:
+                    self._sleep(min(click_delay, remaining))
+
+            elapsed = time.monotonic() - start_time
+            logger.info(
+                "Spam-click complete: %s clicks in %.2fs",
+                click_count,
+                elapsed,
+            )
+            return True
     
     def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, interrupt_check=None):
         self._check_interrupts()
