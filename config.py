@@ -129,7 +129,7 @@ SCROLL_START_POS = (170, 380)       # (x, y) relative to window client area
 # Scroll distance parameters
 SCROLL_PIXEL_STEP = 125              # Pixels per single scroll step
 SCROLL_DISTANCE_RATIO = 1           # Multiplier applied to scroll distance
-SCROLL_VERIFICATION_DISTANCE = 300  # Pixel distance for new-level verification scroll
+SCROLL_VERIFICATION_DISTANCE = 125  # Pixel distance for new-level verification scroll
 
 # Incremental Oscillating Search strategy
 MAX_SCROLL_CYCLES = 12              # Maximum oscillation cycles per search invocation
@@ -214,7 +214,7 @@ RED_ICON_OFFSET_Y = 10              # Vertical offset from detected center to cl
 # Fixed UI click positions (relative to window client area)
 NEW_LEVEL_POS = (171, 434)          # Travel / new level confirmation button
 LEVEL_TRANSITION_POS = (174, 520)   # Level transition confirmation button
-IDLE_CLICK_POS = (4, 390)           # Safe idle click position (keeps game awake)
+IDLE_CLICK_POS = (3, 390)           # Safe idle click position (keeps game awake)
 STATS_UPGRADE_POS = (270, 304)      # Stats upgrade tap target during stat boost loop
 STATS_UPGRADE_BUTTON_POS = (310, 698)  # Stats upgrade menu open button
 NEW_LEVEL_BUTTON_POS = (30, 692)    # New level acknowledgement button
@@ -227,16 +227,18 @@ UPGRADE_CLICK_INTERVAL = 0.018      # Tap cadence during upgrade hold loop
 
 # Spam-click configuration for upgrade station interaction
 # Replaces the old click-and-hold mechanic with rapid sequential left clicks.
-SPAM_CLICK_DURATION = 6.0           # Total duration (seconds) to spam-click the upgrade station
-SPAM_CLICK_DELAY = 0.010            # Delay (seconds) between individual spam clicks
+SPAM_CLICK_DURATION = 3.5           # Total duration (seconds) to spam-click the upgrade station
+SPAM_CLICK_DELAY = 0.011            # Delay (seconds) between individual spam clicks
 SPAM_CLICK_JITTER = 0               # Max random pixel offset to vary click position (0 = disabled)
+RAPID_CLICK_DOWN_UP_DELAY = 0.0015  # Button-hold dwell for the precise rapid-click path
+RAPID_CLICK_SPIN_THRESHOLD = 0.0010  # Final busy-wait window before each scheduled rapid click
 
 # Upgrade-station retries must wait long enough to beat the capture cache, but not
 # so long that the bot stares at a settled screen without refreshing its search.
 UPGRADE_SEARCH_INTERVAL = 0.055
 
 STATS_UPGRADE_CLICK_DURATION = 2    # Duration (seconds) of rapid stat upgrade tap loop
-STATS_UPGRADE_CLICK_DELAY = 0.035   # Delay between individual stat upgrade taps
+STATS_UPGRADE_CLICK_DELAY = 0.010   # Delay between individual stat upgrade taps
 STATS_ICON_PADDING = 20             # Pixel padding for stats icon bounding box
 
 # Idle clicks are only there to keep the UI awake. This settle is shortened so the
@@ -359,7 +361,7 @@ EXTENDED_SEARCH_Y = 710             # Extended Y for stats icon and full-view ca
 
 # Interrupt toggles for the FSM priority resolver
 ENABLE_NEW_LEVEL_INTERRUPT = True       # Allow priority resolver to trigger level transitions
-ENABLE_NO_ICON_SCROLL_INTERRUPT = False  # Allow priority resolver to force scroll when no icons found
+ENABLE_NO_ICON_SCROLL_INTERRUPT = True  # Allow priority resolver to force scroll when no icons found
 
 
 ###################################

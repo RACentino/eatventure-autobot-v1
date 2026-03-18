@@ -1,3 +1,4 @@
+import ctypes
 import win32api
 import win32con
 import win32gui
@@ -5,8 +6,41 @@ import time
 import logging
 import threading
 import config
+from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
+
+_INPUT_MOUSE = 0
+_ULONG_PTR = wintypes.WPARAM
+_USER32 = ctypes.WinDLL("user32", use_last_error=True)
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = (
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", _ULONG_PTR),
+    )
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = (("mi", _MouseInput),)
+
+
+class _Input(ctypes.Structure):
+    _anonymous_ = ("union",)
+    _fields_ = (
+        ("type", wintypes.DWORD),
+        ("union", _InputUnion),
+    )
+
+
+_SEND_INPUT = _USER32.SendInput
+_SEND_INPUT.argtypes = (wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int)
+_SEND_INPUT.restype = wintypes.UINT
 
 
 class MouseController:
@@ -34,6 +68,111 @@ class MouseController:
         self._check_interrupts()
         if duration > 0:
             time.sleep(duration)
+
+    @staticmethod
+    def _seconds_to_ns(duration_seconds):
+        return max(0, int(round(float(duration_seconds) * 1_000_000_000)))
+
+    @staticmethod
+    def _compute_next_click_deadline(previous_deadline_ns, click_start_ns, interval_ns):
+        return max(previous_deadline_ns + interval_ns, click_start_ns + interval_ns)
+
+    def _rapid_click_hold_ns(self, click_interval):
+        requested_hold = max(
+            0.0,
+            float(getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.0)),
+        )
+        if click_interval <= 0:
+            return self._seconds_to_ns(requested_hold)
+
+        # Keep the button dwell shorter than the target interval so the scheduler
+        # can honor sub-50 ms cadences without back-to-back overlap.
+        max_hold = max(0.0, click_interval * 0.5)
+        return self._seconds_to_ns(min(requested_hold, max_hold))
+
+    def _wait_until_precise(self, deadline_ns, interrupt_check=None):
+        spin_threshold_ns = self._seconds_to_ns(
+            getattr(config, "RAPID_CLICK_SPIN_THRESHOLD", 0.0),
+        )
+
+        while True:
+            self._check_interrupts()
+            if interrupt_check and interrupt_check():
+                return False
+
+            remaining_ns = deadline_ns - time.perf_counter_ns()
+            if remaining_ns <= 0:
+                return True
+
+            if remaining_ns > spin_threshold_ns:
+                sleep_ns = remaining_ns - spin_threshold_ns
+                time.sleep(sleep_ns / 1_000_000_000)
+
+    def _send_input_mouse_button(self, flags):
+        input_event = _Input(
+            type=_INPUT_MOUSE,
+            mi=_MouseInput(
+                0,
+                0,
+                0,
+                flags,
+                0,
+                _ULONG_PTR(0),
+            ),
+        )
+        sent = _SEND_INPUT(1, ctypes.byref(input_event), ctypes.sizeof(_Input))
+        if sent != 1:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def _prepare_rapid_click_target(self, screen_x, screen_y):
+        if not self._validate_pre_click_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked rapid-click setup at (%s, %s): forbidden-zone pre-check failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
+        travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
+
+        if self._should_move_cursor(screen_x, screen_y):
+            self._move_cursor(screen_x, screen_y)
+
+        self._ensure_cursor_at_target(screen_x, screen_y)
+        self._correct_cursor_position(screen_x, screen_y)
+        self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
+
+        if not self.is_safe_to_click(screen_x, screen_y, relative=False):
+            logger.warning(
+                "Blocked rapid-click setup at (%s, %s): forbidden-zone final gate failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+
+        self._last_cursor_pos = (int(screen_x), int(screen_y))
+        return True
+
+    def _send_precise_click(self, click_hold_ns, interrupt_check=None):
+        self._check_interrupts()
+        if interrupt_check and interrupt_check():
+            return False
+
+        self._send_input_mouse_button(win32con.MOUSEEVENTF_LEFTDOWN)
+
+        if click_hold_ns > 0:
+            release_deadline_ns = time.perf_counter_ns() + click_hold_ns
+            if not self._wait_until_precise(
+                release_deadline_ns,
+                interrupt_check=interrupt_check,
+            ):
+                self._send_input_mouse_button(win32con.MOUSEEVENTF_LEFTUP)
+                self._last_click_time = time.monotonic()
+                return False
+
+        self._send_input_mouse_button(win32con.MOUSEEVENTF_LEFTUP)
+        self._last_click_time = time.monotonic()
+        return True
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         screen_x, screen_y = self._translate_to_monitor_space(x, y, relative=relative)
@@ -466,9 +605,9 @@ class MouseController:
         """
         Spam-clicks at the given position for ``duration`` seconds.
 
-        Each click is a full mouse-down / mouse-up cycle dispatched through
-        ``_send_click``, which inherits all forbidden-zone enforcement and
-        pre-click stabilisation logic.
+        This path uses a dedicated high-resolution scheduler so repeated clicks
+        are timed against absolute deadlines instead of chaining ``sleep()``
+        calls after the full single-click pipeline.
 
         Args:
             x, y:            Target coordinates.
@@ -493,57 +632,105 @@ class MouseController:
         if click_delay is None:
             click_delay = getattr(config, "SPAM_CLICK_DELAY", 0.035)
 
+        duration = max(0.0, float(duration))
+        click_delay = max(0.0, float(click_delay))
+        if duration <= 0:
+            return True
+        if click_delay <= 0:
+            logger.warning("Rapid-click rejected: click interval must be > 0")
+            return False
+
+        interval_ns = self._seconds_to_ns(click_delay)
+        click_hold_ns = self._rapid_click_hold_ns(click_delay)
+
         with self._mouse_action_lock:
-            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            screen_pos = self._resolve_screen_position(
+                x,
+                y,
+                relative=relative,
+                check_forbidden=False,
+            )
             if screen_pos is None:
                 return False
 
             screen_x, screen_y = screen_pos
+            if not self._prepare_rapid_click_target(screen_x, screen_y):
+                return False
+
             click_count = 0
+            start_ns = time.perf_counter_ns()
+            end_ns = start_ns + self._seconds_to_ns(duration)
+            next_click_ns = start_ns
 
             logger.info(
-                "Spam-clicking at (%s, %s) for %ss (delay=%.3fs, jitter=%s)",
+                "Rapid-clicking at (%s, %s) for %.3fs (interval=%.3fs, hold=%.4fs, jitter=%s)",
                 screen_x,
                 screen_y,
                 duration,
                 click_delay,
+                click_hold_ns / 1_000_000_000,
                 jitter,
             )
 
-            start_time = time.monotonic()
-            while time.monotonic() - start_time < duration:
-                # Interrupt gate
-                if interrupt_check and interrupt_check():
+            while True:
+                if not self._wait_until_precise(
+                    next_click_ns,
+                    interrupt_check=interrupt_check,
+                ):
+                    elapsed = (time.perf_counter_ns() - start_ns) / 1_000_000_000
                     logger.info(
-                        "Spam-click interrupted after %s clicks (%.2fs)",
+                        "Rapid-click interrupted after %s clicks (%.2fs)",
                         click_count,
-                        time.monotonic() - start_time,
+                        elapsed,
                     )
                     return False
 
-                # Apply optional jitter
+                click_start_ns = time.perf_counter_ns()
+                if click_start_ns >= end_ns:
+                    break
+
                 if jitter > 0:
-                    jx = screen_x + random.randint(-jitter, jitter)
-                    jy = screen_y + random.randint(-jitter, jitter)
-                else:
-                    jx, jy = screen_x, screen_y
+                    target_x = screen_x + random.randint(-jitter, jitter)
+                    target_y = screen_y + random.randint(-jitter, jitter)
+                    target_x, target_y = self._clamp_to_screen(target_x, target_y)
+                    if not self.is_safe_to_click(target_x, target_y, relative=False):
+                        logger.warning(
+                            "Blocked rapid-click dispatch at (%s, %s): forbidden-zone check failed",
+                            int(target_x),
+                            int(target_y),
+                        )
+                        return False
+                    if self._should_move_cursor(target_x, target_y):
+                        win32api.SetCursorPos((int(target_x), int(target_y)))
+                        self._last_cursor_pos = (int(target_x), int(target_y))
 
-                self._send_click(jx, jy)
+                if not self._send_precise_click(
+                    click_hold_ns,
+                    interrupt_check=interrupt_check,
+                ):
+                    elapsed = (time.perf_counter_ns() - start_ns) / 1_000_000_000
+                    logger.info(
+                        "Rapid-click interrupted after %s clicks (%.2fs)",
+                        click_count,
+                        elapsed,
+                    )
+                    return False
+
                 click_count += 1
+                next_click_ns = self._compute_next_click_deadline(
+                    next_click_ns,
+                    click_start_ns,
+                    interval_ns,
+                )
 
-                # Inter-click delay
-                remaining = duration - (time.monotonic() - start_time)
-                if remaining > 0 and click_delay > 0:
-                    self._sleep(min(click_delay, remaining))
-
-            elapsed = time.monotonic() - start_time
+            elapsed = (time.perf_counter_ns() - start_ns) / 1_000_000_000
             logger.info(
-                "Spam-click complete: %s clicks in %.2fs",
+                "Rapid-click complete: %s clicks in %.2fs",
                 click_count,
                 elapsed,
             )
             return True
-    
+
     def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, interrupt_check=None):
         self._check_interrupts()
         with self._mouse_action_lock:

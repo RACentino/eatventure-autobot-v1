@@ -2032,25 +2032,15 @@ class EatventureBot:
         # Use standard non-interruptible sleep
         self.sleep(config.STATE_DELAY)
         
-        start_time = time.monotonic()
-        next_click_time = start_time
-        while time.monotonic() - start_time < config.STATS_UPGRADE_CLICK_DURATION:
-            self.mouse_controller.click(
-                config.STATS_UPGRADE_POS[0],
-                config.STATS_UPGRADE_POS[1],
-                relative=True,
-                wait_after=False,
-            )
-            
-            # Use standard non-interruptible sleep
-            sleep_duration = max(0, next_click_time + config.STATS_UPGRADE_CLICK_DELAY - time.monotonic())
-            if sleep_duration > 0:
-                time.sleep(sleep_duration)
-            
-            next_click_time = max(
-                next_click_time + config.STATS_UPGRADE_CLICK_DELAY,
-                time.monotonic()
-            )
+        self.mouse_controller.spam_click_at(
+            config.STATS_UPGRADE_POS[0],
+            config.STATS_UPGRADE_POS[1],
+            duration=config.STATS_UPGRADE_CLICK_DURATION,
+            click_delay=config.STATS_UPGRADE_CLICK_DELAY,
+            jitter=0,
+            relative=True,
+            interrupt_check=lambda: self.check_critical_interrupts(raise_exception=False),
+        )
         
         self._click_idle()
         logger.info("========== STAT UPGRADE COMPLETED ==========")

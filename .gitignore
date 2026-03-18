@@ -34,4 +34,5 @@ wheels/
 logs/
 screenshots/
 *.log
-.gemini
+.gemini/
+tests/
