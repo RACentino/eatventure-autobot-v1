@@ -84,39 +84,39 @@ COLOR_SIMILARITY_THRESHOLD = 0.7    # Minimum histogram correlation (0.0–1.0)
 # Keep the post-click hold short so the bot can resume scanning quickly, but leave
 # enough time for scrcpy plus the game UI to acknowledge the tap and start any
 # immediate animation before the next capture.
-CLICK_DELAY = 0.050
+CLICK_DELAY = 0.044
 
 # Shorter mouse segment spacing reduces travel latency without turning long cursor
 # moves into a teleport that can overshoot or fight the target verification logic.
-MOUSE_MOVE_DELAY = 0.005
+MOUSE_MOVE_DELAY = 0.004
 
 # The button-down dwell is trimmed to the lowest still-deliberate press length so
 # taps register reliably while improving end-to-end reaction time after detection.
-MOUSE_DOWN_UP_DELAY = 0.028
+MOUSE_DOWN_UP_DELAY = 0.024
 
 # Double clicks are only used in narrow cases, but this lower spacing keeps them
 # responsive without collapsing the two inputs into one unreadable burst.
-DOUBLE_CLICK_DELAY = 0.036
+DOUBLE_CLICK_DELAY = 0.030
 
 # Mouse movement retry and correction
 MOUSE_MOVE_RETRIES = 2              # Max retries if mouse fails to reach target position
-MOUSE_MOVE_RETRY_DELAY = 0.002      # Delay between movement retry attempts
-MOUSE_TARGET_SETTLE_DELAY = 0.002   # Settle time after reaching target before verification
-MOUSE_TARGET_TIMEOUT = 0.045        # Max time to wait for cursor to reach target
-MOUSE_TARGET_CHECK_INTERVAL = 0.003 # Polling interval during target verification
-MOUSE_TARGET_HOVER_DELAY = 0.002    # Delay after hover before click
-MOUSE_STABILIZE_DURATION = 0.012    # Stabilization time at target before click input
+MOUSE_MOVE_RETRY_DELAY = 0.0015     # Delay between movement retry attempts
+MOUSE_TARGET_SETTLE_DELAY = 0.001   # Settle time after reaching target before verification
+MOUSE_TARGET_TIMEOUT = 0.036        # Max time to wait for cursor to reach target
+MOUSE_TARGET_CHECK_INTERVAL = 0.002 # Polling interval during target verification
+MOUSE_TARGET_HOVER_DELAY = 0.001    # Delay after hover before click
+MOUSE_STABILIZE_DURATION = 0.008    # Stabilization time at target before click input
 MOUSE_TARGET_RETRIES = 3            # Max retries for target position verification
-MOUSE_TARGET_CORRECTION_DELAY = 0.002  # Delay between correction attempts
+MOUSE_TARGET_CORRECTION_DELAY = 0.0015  # Delay between correction attempts
 
 # Pre-click stabilization (distance-adaptive)
-MOUSE_PRE_CLICK_STABILIZE_BASE = 0.008     # Base stabilization delay before any click
-MOUSE_PRE_CLICK_STABILIZE_MAX = 0.020      # Maximum stabilization delay cap
-MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR = 0.00004  # Additional delay per pixel of mouse travel
+MOUSE_PRE_CLICK_STABILIZE_BASE = 0.006     # Base stabilization delay before any click
+MOUSE_PRE_CLICK_STABILIZE_MAX = 0.016      # Maximum stabilization delay cap
+MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR = 0.00003  # Additional delay per pixel of mouse travel
 
 # Click retry logic
 MOUSE_CLICK_RETRY_COUNT = 2         # Max click retries on registration failure
-MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.004  # Settle delay between click retries
+MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.003  # Settle delay between click retries
 
 
 ###################################
@@ -138,23 +138,23 @@ SCROLL_INCREMENT_STEP = 1           # Amplitude increment per cycle pair
 # This is the first post-drag "thinking" micro-pause. It only covers the tiny
 # release-and-stop moment after the pointer finishes the drag, before CV should
 # trust the next frame at all.
-SCROLL_RELEASE_THINK_DELAY = 0.014
+SCROLL_RELEASE_THINK_DELAY = 0.010
 
 # This is the main visual settle buffer after any scroll. It gives the emulator
 # and game one clean frame to stop smearing so the next scan sees settled assets.
-POST_SCROLL_VISION_THINK_DELAY = 0.055
+POST_SCROLL_VISION_THINK_DELAY = 0.040
 
 # This second micro-pause is intentionally separate so later tuning can widen or
 # shrink the final confirmation window without touching the raw drag settle time.
-POST_SCROLL_CONFIRM_THINK_DELAY = 0.025
+POST_SCROLL_CONFIRM_THINK_DELAY = 0.014
 
 # Reversal scans happen when the content is already near-stationary, so they need
 # less waiting than a full scroll settle, but still benefit from one deliberate beat.
-OSCILLATION_REVERSAL_THINK_DELAY = 0.045
+OSCILLATION_REVERSAL_THINK_DELAY = 0.030
 
 # The oscillating search already waits through POST_SCROLL_SETTLE after every drag.
 # Keep this extra gap tiny; it is only there to avoid scanning on the exact release tick.
-SCROLL_INTERVAL_PAUSE = 0.018
+SCROLL_INTERVAL_PAUSE = 0.010
 
 # Compose the full post-scroll vision settle from two explicit micro-pause stages:
 # one for frame stabilization and one for the final confirm-before-scan beat.
@@ -163,13 +163,13 @@ POST_SCROLL_SETTLE = POST_SCROLL_VISION_THINK_DELAY + POST_SCROLL_CONFIRM_THINK_
 # Direction changes only need a small boundary-think pause before the next scan pass.
 CYCLE_PAUSE_DURATION = OSCILLATION_REVERSAL_THINK_DELAY
 
-# A slightly faster drag cuts exploration latency, but 180 ms is still long enough
+# A slightly faster drag cuts exploration latency, but 150 ms is still long enough
 # for the interpolated movement to remain smooth instead of turning into a flick.
-SCROLL_DURATION = 0.18
+SCROLL_DURATION = 0.15
 
-# Eighteen steps preserves a smooth linear glide at the shorter duration while
+# Sixteen steps preserves a smooth linear glide at the shorter duration while
 # reducing overhead compared with the original wider, slower motion profile.
-SCROLL_STEP_COUNT = 18
+SCROLL_STEP_COUNT = 16
 
 # The drag path already includes explicit settle windows; this minimum interval only
 # prevents back-to-back scroll commands from stacking on the same scheduler tick.
@@ -187,24 +187,24 @@ SCROLL_SETTLE_DELAY = SCROLL_RELEASE_THINK_DELAY
 # Main loop tick rate
 # Tighten the outer scheduler so the FSM can react almost immediately once a handler
 # finishes. The state-specific floors below still prevent blind over-polling.
-MAIN_LOOP_DELAY = 0.012
+MAIN_LOOP_DELAY = 0.008
 
 # This is the steady-state "think" pause between handlers when no larger asset-specific
 # settle window is already in effect. It stays small because scrolls and transitions
 # now carry their own dedicated micro-pause budgets.
-STATE_DELAY = 0.022
+STATE_DELAY = 0.014
 
 # Lower the default handler floor so lightweight states can recycle quickly, while
 # still avoiding wasteful zero-gap state churn on identical frames.
-STATE_MIN_INTERVAL_DEFAULT = 0.014
+STATE_MIN_INTERVAL_DEFAULT = 0.010
 
 # FIND_RED_ICONS is the primary scan loop, so it gets the fastest deliberate cadence.
 # OPEN_BOXES and SCROLL keep small guards only because those states already perform
 # heavier work internally before returning control to the scheduler.
 STATE_MIN_INTERVALS = {
-    "FIND_RED_ICONS": 0.040,
-    "OPEN_BOXES": 0.020,
-    "SCROLL": 0.020,
+    "FIND_RED_ICONS": 0.032,
+    "OPEN_BOXES": 0.016,
+    "SCROLL": 0.016,
 }
 
 # Red icon click offset (applied after detection)
@@ -223,11 +223,11 @@ NEW_LEVEL_BUTTON_POS = (30, 692)    # New level acknowledgement button
 # DEPRECATED: UPGRADE_HOLD_DURATION is no longer used for the primary
 # upgrade interaction. Retained as fallback for hold_at() if needed elsewhere.
 UPGRADE_HOLD_DURATION = 6           # (Deprecated) Duration (seconds) for legacy hold
-UPGRADE_CLICK_INTERVAL = 0.018      # Tap cadence during upgrade hold loop
+UPGRADE_CLICK_INTERVAL = 0.016      # Tap cadence during upgrade hold loop
 
 # Spam-click configuration for upgrade station interaction
 # Replaces the old click-and-hold mechanic with rapid sequential left clicks.
-SPAM_CLICK_DURATION = 3.5           # Total duration (seconds) to spam-click the upgrade station
+SPAM_CLICK_DURATION = 6.0           # Total duration (seconds) to spam-click the upgrade station
 SPAM_CLICK_DELAY = 0.011            # Delay (seconds) between individual spam clicks
 SPAM_CLICK_JITTER = 0               # Max random pixel offset to vary click position (0 = disabled)
 RAPID_CLICK_DOWN_UP_DELAY = 0.0015  # Button-hold dwell for the precise rapid-click path
@@ -235,15 +235,15 @@ RAPID_CLICK_SPIN_THRESHOLD = 0.0010  # Final busy-wait window before each schedu
 
 # Upgrade-station retries must wait long enough to beat the capture cache, but not
 # so long that the bot stares at a settled screen without refreshing its search.
-UPGRADE_SEARCH_INTERVAL = 0.055
+UPGRADE_SEARCH_INTERVAL = 0.040
 
 STATS_UPGRADE_CLICK_DURATION = 2    # Duration (seconds) of rapid stat upgrade tap loop
-STATS_UPGRADE_CLICK_DELAY = 0.010   # Delay between individual stat upgrade taps
+STATS_UPGRADE_CLICK_DELAY = 0.009   # Delay between individual stat upgrade taps
 STATS_ICON_PADDING = 20             # Pixel padding for stats icon bounding box
 
 # Idle clicks are only there to keep the UI awake. This settle is shortened so the
 # bot can resume scanning faster once the tap lands, while still waiting out tap blur.
-IDLE_CLICK_SETTLE_DELAY = 0.050
+IDLE_CLICK_SETTLE_DELAY = 0.032
 
 # A slightly shorter cooldown keeps the keep-alive tap available sooner in sparse
 # screens without turning it into a noisy extra action on every pass.
@@ -257,32 +257,32 @@ RED_ICON_MERGE_BUCKET_SIZE = 10     # Bucket width for spatial hashing during me
 # Upgrade station search retries
 UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 5     # Max attempts per upgrade station search cycle
 UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.04  # Threshold reduction for relaxed retry attempts
-UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 2    # Attempt number at which relaxed threshold activates
+UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 1    # Attempt number at which relaxed threshold activates
 
 # Performance caching
 # The screenshot cache should only coalesce calls that happen on the same visual
-# frame. Cutting this to 18 ms keeps scans fresh while still avoiding duplicate captures.
-CAPTURE_CACHE_TTL = 0.018
+# frame. Cutting this to 15 ms keeps scans fresh while still avoiding duplicate captures.
+CAPTURE_CACHE_TTL = 0.015
 
 # New-level red icon checks benefit from the same policy: keep tiny same-frame reuse,
 # but force a new capture quickly once the UI has had time to change.
-NEW_LEVEL_RED_ICON_CACHE_TTL = 0.022
+NEW_LEVEL_RED_ICON_CACHE_TTL = 0.018
 
 # Keep the temporal stability window long enough to ride out short CV flicker, but
 # shorter than before so stale icon history does not slow reacquisition after scrolls.
-RED_ICON_STABILITY_CACHE_TTL = 1.0
+RED_ICON_STABILITY_CACHE_TTL = 0.75
 
 # Tighten the spatial radius slightly so confirmation stays decisive and tied to the
 # same on-screen icon instead of blending nearby red noise into one track.
-RED_ICON_STABILITY_RADIUS = 12
+RED_ICON_STABILITY_RADIUS = 10
 
-# Three confirmations is the best speed-vs-confidence compromise here: still deliberate,
-# but materially faster than waiting for four full passes before clicking.
-RED_ICON_STABILITY_MIN_HITS = 3
+# Two confirmations plus the existing color/pixel gates shortens click latency
+# materially while staying guarded against single-frame red noise.
+RED_ICON_STABILITY_MIN_HITS = 2
 
 # A smaller history buffer matches the shorter TTL and keeps the temporal gate focused
 # on recent evidence instead of carrying too much already-obsolete icon state.
-RED_ICON_STABILITY_MAX_HISTORY = 8
+RED_ICON_STABILITY_MAX_HISTORY = 6
 
 
 ###################################
@@ -290,19 +290,19 @@ RED_ICON_STABILITY_MAX_HISTORY = 8
 ###################################
 
 # Forbidden-zone debounced arbitration (safe vs. forbidden icon classification)
-FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.020   # Settle time before taking zone snapshot
-FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.025  # Inter-tick pause for debounce consensus
+FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.010   # Settle time before taking zone snapshot
+FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.012  # Inter-tick pause for debounce consensus
 FORBIDDEN_ZONE_DEBOUNCE_TICKS = 1            # Number of snapshot ticks for consensus
 FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS = 1  # Ticks that must agree for decision
-FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN = 0.25   # Cooldown before re-entering scroll after forbidden redirect
+FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN = 0.18   # Cooldown before re-entering scroll after forbidden redirect
 FORBIDDEN_BLACKOUT_DURATION = 5.0            # Duration to suppress re-detection of blacklisted coordinates
 
 # Pre-click boundary validation delays
-FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.015  # Validation window before click execution
-FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.010          # Second-pass verification delay
-ASSET_BOUNDARY_PRECHECK_DELAY = 0.020              # Pre-click boundary check delay
-ASSET_BOUNDARY_CONFIRM_DELAY = 0.012               # Confirmation delay after boundary check
-ASSET_SEGREGATION_DELAY = 0.030                    # Delay for asset category classification
+FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.008  # Validation window before click execution
+FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.006         # Second-pass verification delay
+ASSET_BOUNDARY_PRECHECK_DELAY = 0.010             # Pre-click boundary check delay
+ASSET_BOUNDARY_CONFIRM_DELAY = 0.006              # Confirmation delay after boundary check
+ASSET_SEGREGATION_DELAY = 0.020                   # Delay for asset category classification
 
 
 ###################################
@@ -315,29 +315,29 @@ LEVEL_COMPLETION_RECENCY_WINDOW = 5.0  # Seconds within which a recent completio
 NEW_LEVEL_FAIL_COOLDOWN = 15.0      # Cooldown after failed level transition before retrying
 
 # Transition click timing
-# The acknowledgment tap does not need the original half-second pause; 350 ms is
+# The acknowledgment tap does not need the original half-second pause; 300 ms is
 # enough for the first UI response to begin before the travel-confirm phase starts.
-NEW_LEVEL_BUTTON_DELAY = 0.35
+NEW_LEVEL_BUTTON_DELAY = 0.30
 
 # This is the post-transition "thinking" phase for major screen changes. It is long
 # enough for the new restaurant view to finish drawing, but short enough to avoid
 # burning time once the transition has visibly settled.
-NEW_LEVEL_FOLLOWUP_DELAY = 0.36
+NEW_LEVEL_FOLLOWUP_DELAY = 0.30
 
-TRANSITION_POST_CLICK_DELAY = 1.5   # Animation buffer after transition click (menu + travel)
-TRANSITION_RETRY_DELAY = 0.15       # Delay between transition retry attempts
+TRANSITION_POST_CLICK_DELAY = 1.30  # Animation buffer after transition click (menu + travel)
+TRANSITION_RETRY_DELAY = 0.12       # Delay between transition retry attempts
 
 # Faster interrupt polling lets long sleeps break sooner when a new level appears,
 # which reduces dead time without changing the priority logic itself.
-NEW_LEVEL_INTERRUPT_INTERVAL = 0.040
+NEW_LEVEL_INTERRUPT_INTERVAL = 0.030
 
 # The background watcher should sample often enough to notice the travel button early,
 # but not so fast that it competes with the active FSM for every frame.
-NEW_LEVEL_MONITOR_INTERVAL = 0.10
+NEW_LEVEL_MONITOR_INTERVAL = 0.08
 
 # A shorter override cooldown makes repeated, legitimate transition signals respond
 # faster while still blocking accidental double-trigger echoes from the same event.
-NEW_LEVEL_OVERRIDE_COOLDOWN = 0.30
+NEW_LEVEL_OVERRIDE_COOLDOWN = 0.22
 
 # Scan regions for new-level and upgrade red icons (pixel coordinates)
 NEW_LEVEL_RED_ICON_X_MIN = 40
@@ -392,28 +392,28 @@ ADAPTIVE_TUNER_UPGRADE_DECREMENT = 0.001    # Upgrade interval decrement on high
 # Range limits for adaptive delays
 # Do not let the tuner slow clicks back to the older, more conservative envelope;
 # this narrower range preserves speed while still giving it room to recover from misses.
-ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.042
+ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.040
 
 # Cap the upper click delay lower than before so the tuner cannot drift into visibly
 # sluggish input timing after a few bad samples.
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.10
+ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.085
 
 # Movement correction still needs a small floor for cursor verification to remain stable.
 ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.002
 
 # Reduce the maximum movement delay so the tuner keeps cursor travel responsive.
-ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.010
+ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.008
 
-ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL = 0.006 # Minimum upgrade check interval floor
-ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL = 0.013 # Maximum upgrade check interval ceiling
+ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL = 0.0055 # Minimum upgrade check interval floor
+ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL = 0.011 # Maximum upgrade check interval ceiling
 
 # The search interval floor must stay above the capture-cache TTL so retry scans see
 # fresh frames, but it should still be aggressive once the screen is static.
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.035
+ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.030
 
 # Prevent the tuner from climbing back to the previously observed 140 ms search pace,
 # which materially slows upgrade-station reacquisition after a red-icon click.
-ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.11
+ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.09
 
 
 ###################################
@@ -466,7 +466,7 @@ AI_STATS_UPGRADE_MISS_STEP = 0.005           # Threshold reduction per miss even
 
 # Vision state persistence
 AI_VISION_STATE_FILE = f"{LOGS_DIR}/vision_state.json"  # File path for saving vision optimizer state
-AI_VISION_SAVE_INTERVAL = 2.0          # Seconds between vision state saves to disk
+AI_VISION_SAVE_INTERVAL = 5.0          # Seconds between vision state saves to disk
 
 # Historical Learning system
 # Disable historical timing replay while manual performance tuning is active. Persisted
@@ -484,25 +484,25 @@ AI_LEARNING_THREAD_JOIN_TIMEOUT = 1.0  # Timeout for learning thread shutdown
 # Learning range limits (clamping bounds for learned timing values)
 # Keep the learning clamps aligned with the new fast-response timing envelope so, if
 # learning is re-enabled later, it cannot immediately expand back into slow defaults.
-AI_LEARNING_MIN_CLICK_DELAY = 0.042
+AI_LEARNING_MIN_CLICK_DELAY = 0.040
 
 # Cap any future learned click delay near the same upper bound used by the tuner.
-AI_LEARNING_MAX_CLICK_DELAY = 0.10
+AI_LEARNING_MAX_CLICK_DELAY = 0.085
 
 AI_LEARNING_MIN_MOVE_DELAY = 0.002     # Minimum learned move delay
 
 # Match the adaptive-tuner movement ceiling so future learning stays within the same feel.
-AI_LEARNING_MAX_MOVE_DELAY = 0.010
+AI_LEARNING_MAX_MOVE_DELAY = 0.008
 
-AI_LEARNING_MIN_UPGRADE_INTERVAL = 0.006  # Minimum learned upgrade interval
-AI_LEARNING_MAX_UPGRADE_INTERVAL = 0.013  # Maximum learned upgrade interval
+AI_LEARNING_MIN_UPGRADE_INTERVAL = 0.0055  # Minimum learned upgrade interval
+AI_LEARNING_MAX_UPGRADE_INTERVAL = 0.011  # Maximum learned upgrade interval
 
 # Keep future learned search timings above the fresh-frame threshold but well below
 # the sluggish 140 ms profile currently stored in the old learning state.
-AI_LEARNING_MIN_SEARCH_INTERVAL = 0.035
+AI_LEARNING_MIN_SEARCH_INTERVAL = 0.030
 
 # Mirror the tuned upper ceiling so future learning cannot silently undo the faster scan loop.
-AI_LEARNING_MAX_SEARCH_INTERVAL = 0.11
+AI_LEARNING_MAX_SEARCH_INTERVAL = 0.09
 
 
 ###################################
