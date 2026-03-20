@@ -227,7 +227,7 @@ UPGRADE_CLICK_INTERVAL = 0.016      # Tap cadence during upgrade hold loop
 
 # Spam-click configuration for upgrade station interaction
 # Replaces the old click-and-hold mechanic with rapid sequential left clicks.
-SPAM_CLICK_DURATION = 6.0           # Total duration (seconds) to spam-click the upgrade station
+SPAM_CLICK_DURATION = 4.0           # Total duration (seconds) to spam-click the upgrade station
 SPAM_CLICK_DELAY = 0.011            # Delay (seconds) between individual spam clicks
 SPAM_CLICK_JITTER = 0               # Max random pixel offset to vary click position (0 = disabled)
 RAPID_CLICK_DOWN_UP_DELAY = 0.0015  # Button-hold dwell for the precise rapid-click path
