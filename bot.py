@@ -1365,6 +1365,15 @@ class EatventureBot:
             h_t, w_t = template.shape[:2]
             all_stations = []
             for cand_conf, cand_x, cand_y in all_stations_raw:
+                # HSV pre-filter: reject candidates without enough cyan pixels
+                if not self.image_matcher.check_upgrade_station_hsv(
+                    screenshot, cand_x, cand_y, h_t, w_t
+                ):
+                    logger.debug(
+                        "[UpgradeStation] HSV gate rejected candidate at (%s, %s) conf=%.2f",
+                        cand_x, cand_y, cand_conf,
+                    )
+                    continue
                 x1 = max(0, cand_x - w_t // 2)
                 y1 = max(0, cand_y - h_t // 2)
                 roi_slice = screenshot[y1:y1 + h_t, x1:x1 + w_t]
@@ -1870,6 +1879,15 @@ class EatventureBot:
                 )
                 
                 if found:
+                    # HSV pre-filter: reject candidates without enough cyan pixels
+                    if not self.image_matcher.check_upgrade_station_hsv(
+                        limited_screenshot, x, y, template.shape[0], template.shape[1]
+                    ):
+                        logger.debug(
+                            "handle_search_upgrade_station: HSV gate rejected at (%s, %s) conf=%.2f",
+                            x, y, confidence,
+                        )
+                        continue
                     # Gap 3 fix: strict forbidden zone guard immediately after detection.
                     # Without this, a forbidden station passes through refine + confidence
                     # update before being blocked by handle_hold_upgrade_station, which:

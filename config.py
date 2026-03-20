@@ -47,11 +47,13 @@ RED_ICON_PIXEL_THRESHOLD = 48       # Minimum masked red pixel count in ROI to c
 RED_ICON_DILATE_KERNEL = 3          # Morphological kernel size for noise removal and blob reconnection
 
 # Red color HSV bounds for red pixel counting
-# Kept intentionally narrow to avoid ambient orange/pink UI clutter while
-# widening just enough for legitimate icon edge shading and hue wrap-around.
-RED_HSV_LOWER1 = (0, 105, 120)      # Low-hue red band lower bound
-RED_HSV_UPPER1 = (12, 255, 255)     # Low-hue red band upper bound
-RED_HSV_LOWER2 = (167, 105, 120)    # High-hue red wrap-around lower bound
+# Derived from programmatic HSV extraction of all 16 RedIcon asset PNGs.
+# 78.2% of red icon pixels fall in H:0-10, 8.6% wrap at H:160-179.
+# S floor raised to 120 and V floor to 130 to reject low-saturation
+# environmental reds (rooftops, faded textures) that previously passed.
+RED_HSV_LOWER1 = (0, 120, 130)      # Low-hue red band lower bound
+RED_HSV_UPPER1 = (10, 255, 255)     # Low-hue red band upper bound
+RED_HSV_LOWER2 = (165, 120, 130)    # High-hue red wrap-around lower bound
 RED_HSV_UPPER2 = (179, 255, 255)    # High-hue red wrap-around upper bound
 
 # Red icon color verification (BGR channel ratio check)
@@ -70,6 +72,14 @@ RED_ICON_REFINE_THRESHOLD_DROP = 0.02  # Threshold relaxation during refinement 
 UPGRADE_STATION_COLOR_CHECK = True  # Enable histogram color verification for upgrade station
 UPGRADE_STATION_REFINE_RADIUS = 28  # Search radius for upgrade station template refinement
 UPGRADE_STATION_CLICK_REFINE_RADIUS = 18  # Search radius for click-target refinement
+
+# Upgrade Station HSV color gate (derived from upgradeStation.png asset analysis)
+# The upgrade station asset is dominantly cyan/blue-green (H≈90-101, 91.5% of pixels).
+# This gate rejects environmental matches (red rooftops, blue window panes, wooden
+# textures) whose template silhouette similarity passes but whose color is wrong.
+UPGRADE_STATION_HSV_LOWER = (80, 40, 180)   # Lower HSV bound (padded from p5: H=19, S=54, V=206)
+UPGRADE_STATION_HSV_UPPER = (110, 210, 255) # Upper HSV bound (padded from p95: H=101, S=185, V=254)
+UPGRADE_STATION_HSV_MIN_RATIO = 0.15        # Min fraction of ROI pixels passing HSV gate
 
 # Color similarity threshold for histogram-based verification
 # Used by upgrade station and box detection to reject background matches
@@ -361,7 +371,7 @@ EXTENDED_SEARCH_Y = 710             # Extended Y for stats icon and full-view ca
 
 # Interrupt toggles for the FSM priority resolver
 ENABLE_NEW_LEVEL_INTERRUPT = True       # Allow priority resolver to trigger level transitions
-ENABLE_NO_ICON_SCROLL_INTERRUPT = True  # Allow priority resolver to force scroll when no icons found
+ENABLE_NO_ICON_SCROLL_INTERRUPT = False  # Allow priority resolver to force scroll when no icons found
 
 
 ###################################

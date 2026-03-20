@@ -31,6 +31,34 @@ class ImageMatcher:
         kernel = np.ones((kernel_size, kernel_size), np.uint8)
         return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
+    def _build_upgrade_station_mask(self, hsv):
+        """HSV mask for the upgrade station's dominant cyan/blue-green color."""
+        lower = np.array(getattr(config, "UPGRADE_STATION_HSV_LOWER", (80, 40, 180)))
+        upper = np.array(getattr(config, "UPGRADE_STATION_HSV_UPPER", (110, 210, 255)))
+        return cv2.inRange(hsv, lower, upper)
+
+    def check_upgrade_station_hsv(self, image, x, y, template_h, template_w):
+        """
+        HSV color gate for upgrade station candidates.
+        Returns True if the ROI at (x, y) has enough cyan/blue-green pixels
+        to be a genuine upgrade station rather than an environmental match.
+        """
+        x1 = max(0, x - template_w // 2)
+        y1 = max(0, y - template_h // 2)
+        x2 = min(image.shape[1], x1 + template_w)
+        y2 = min(image.shape[0], y1 + template_h)
+        roi = image[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = self._build_upgrade_station_mask(hsv)
+        total_pixels = roi.shape[0] * roi.shape[1]
+        if total_pixels == 0:
+            return False
+        ratio = cv2.countNonZero(mask) / float(total_pixels)
+        min_ratio = float(getattr(config, "UPGRADE_STATION_HSV_MIN_RATIO", 0.15))
+        return ratio >= min_ratio
+
     def analyze_red_region(self, image, x, y, size=24, show_mask=False):
         roi = self._extract_square_roi(image, x, y, size)
         if roi.size == 0:
