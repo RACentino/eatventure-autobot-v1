@@ -380,7 +380,7 @@ EXTENDED_SEARCH_Y = 710             # Extended Y for stats icon and full-view ca
 
 # Interrupt toggles for the FSM priority resolver
 ENABLE_NEW_LEVEL_INTERRUPT = True       # Allow priority resolver to trigger level transitions
-ENABLE_NO_ICON_SCROLL_INTERRUPT = False  # Allow priority resolver to force scroll when no icons found
+ENABLE_NO_ICON_SCROLL_INTERRUPT = True  # Allow priority resolver to force scroll when no icons found
 
 
 ###################################
