@@ -43,7 +43,8 @@ NEW_LEVEL_THRESHOLD = 0.98          # Confidence for new level / travel button t
 # Red icon gate settings
 RED_ICON_MIN_MATCHES = 1            # Minimum number of simultaneous red icon matches required
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1  # Minimum matches for new-level red icon detection
-RED_ICON_PIXEL_THRESHOLD = 48       # Minimum masked red pixel count in ROI to confirm a genuine red blob
+RED_ICON_PIXEL_THRESHOLD = 55       # Minimum masked red pixel count in ROI to confirm a genuine red blob
+                                    # Raised from 48 to reject marginal/flickering detections during UI transitions
 RED_ICON_DILATE_KERNEL = 3          # Morphological kernel size for noise removal and blob reconnection
 
 # Red color HSV bounds for red pixel counting
@@ -73,13 +74,15 @@ UPGRADE_STATION_COLOR_CHECK = True  # Enable histogram color verification for up
 UPGRADE_STATION_REFINE_RADIUS = 28  # Search radius for upgrade station template refinement
 UPGRADE_STATION_CLICK_REFINE_RADIUS = 18  # Search radius for click-target refinement
 
-# Upgrade Station HSV color gate (derived from upgradeStation.png asset analysis)
-# The upgrade station asset is dominantly cyan/blue-green (H≈90-101, 91.5% of pixels).
-# This gate rejects environmental matches (red rooftops, blue window panes, wooden
-# textures) whose template silhouette similarity passes but whose color is wrong.
-UPGRADE_STATION_HSV_LOWER = (80, 40, 180)   # Lower HSV bound (padded from p5: H=19, S=54, V=206)
-UPGRADE_STATION_HSV_UPPER = (110, 210, 255) # Upper HSV bound (padded from p95: H=101, S=185, V=254)
-UPGRADE_STATION_HSV_MIN_RATIO = 0.15        # Min fraction of ROI pixels passing HSV gate
+# Upgrade Station HSV color gate (derived from upgradeStation.png plus demo-frame verification)
+# Windows PrintWindow capture keeps frames in BGR, but runtime station pixels still cluster
+# tightly around a bright cyan band. The prior window was wide enough that pale cyan UI
+# panels and background highlights could satisfy the gate with only ~40% ROI coverage.
+# These tighter bounds preserve true station ROIs (~70-77% runtime pass ratio) while
+# forcing mixed/background matches well below the acceptance floor.
+UPGRADE_STATION_HSV_LOWER = (90, 100, 195)  # Runtime-safe lower bound for the station's cyan core
+UPGRADE_STATION_HSV_UPPER = (106, 210, 255) # Tight upper hue cap to exclude greener/bluer lookalikes
+UPGRADE_STATION_HSV_MIN_RATIO = 0.55        # Require majority ROI coverage from the station color band
 
 # Color similarity threshold for histogram-based verification
 # Used by upgrade station and box detection to reject background matches
@@ -215,6 +218,12 @@ STATE_MIN_INTERVALS = {
     "FIND_RED_ICONS": 0.032,
     "OPEN_BOXES": 0.016,
     "SCROLL": 0.016,
+    # Upgrade-phase floors: prevent the priority resolver from firing mid-interaction.
+    # The resolver runs before each handler tick via state_machine.update(), so a 200ms
+    # floor ensures the active upgrade flow completes without a second red icon interrupting.
+    "SEARCH_UPGRADE_STATION": 0.200,
+    "HOLD_UPGRADE_STATION": 0.200,
+    "CHECK_UNLOCK": 0.150,
 }
 
 # Red icon click offset (applied after detection)
@@ -245,7 +254,7 @@ RAPID_CLICK_SPIN_THRESHOLD = 0.0010  # Final busy-wait window before each schedu
 
 # Upgrade-station retries must wait long enough to beat the capture cache, but not
 # so long that the bot stares at a settled screen without refreshing its search.
-UPGRADE_SEARCH_INTERVAL = 0.040
+UPGRADE_SEARCH_INTERVAL = 0.080     # Raised from 0.040 to give the game UI time to render the station between retries
 
 STATS_UPGRADE_CLICK_DURATION = 2    # Duration (seconds) of rapid stat upgrade tap loop
 STATS_UPGRADE_CLICK_DELAY = 0.009   # Delay between individual stat upgrade taps
@@ -253,7 +262,7 @@ STATS_ICON_PADDING = 20             # Pixel padding for stats icon bounding box
 
 # Idle clicks are only there to keep the UI awake. This settle is shortened so the
 # bot can resume scanning faster once the tap lands, while still waiting out tap blur.
-IDLE_CLICK_SETTLE_DELAY = 0.032
+IDLE_CLICK_SETTLE_DELAY = 0.080     # Raised from 0.032 to let the upgrade overlay dismiss before the next scan
 
 # A slightly shorter cooldown keeps the keep-alive tap available sooner in sparse
 # screens without turning it into a noisy extra action on every pass.
@@ -272,7 +281,7 @@ UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 1    # Attempt number at which relaxed
 # Performance caching
 # The screenshot cache should only coalesce calls that happen on the same visual
 # frame. Cutting this to 15 ms keeps scans fresh while still avoiding duplicate captures.
-CAPTURE_CACHE_TTL = 0.015
+CAPTURE_CACHE_TTL = 0.025           # Raised from 0.015 so handler + priority resolver share one frame per tick
 
 # New-level red icon checks benefit from the same policy: keep tiny same-frame reuse,
 # but force a new capture quickly once the UI has had time to change.
@@ -280,7 +289,7 @@ NEW_LEVEL_RED_ICON_CACHE_TTL = 0.018
 
 # Keep the temporal stability window long enough to ride out short CV flicker, but
 # shorter than before so stale icon history does not slow reacquisition after scrolls.
-RED_ICON_STABILITY_CACHE_TTL = 0.75
+RED_ICON_STABILITY_CACHE_TTL = 1.2  # Raised from 0.75 to require longer sustained presence before actionability
 
 # Tighten the spatial radius slightly so confirmation stays decisive and tied to the
 # same on-screen icon instead of blending nearby red noise into one track.
@@ -288,11 +297,11 @@ RED_ICON_STABILITY_RADIUS = 10
 
 # Two confirmations plus the existing color/pixel gates shortens click latency
 # materially while staying guarded against single-frame red noise.
-RED_ICON_STABILITY_MIN_HITS = 2
+RED_ICON_STABILITY_MIN_HITS = 3     # Raised from 2 to require 3 confirmations, preventing premature interrupts
 
 # A smaller history buffer matches the shorter TTL and keeps the temporal gate focused
 # on recent evidence instead of carrying too much already-obsolete icon state.
-RED_ICON_STABILITY_MAX_HISTORY = 6
+RED_ICON_STABILITY_MAX_HISTORY = 8  # Raised from 6 to support the longer stability TTL window
 
 
 ###################################
