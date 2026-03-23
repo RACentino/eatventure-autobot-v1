@@ -68,32 +68,62 @@ class WindowCapture:
         
         if max_y is not None:
             height = min(height, max_y)
-        
-        hwndDC = win32gui.GetWindowDC(self.hwnd)
-        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-        saveDC = mfcDC.CreateCompatibleDC()
-        
-        saveBitMap = win32ui.CreateBitmap()
-        saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-        saveDC.SelectObject(saveBitMap)
-        
-        print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-        if print_result != 1:
-            logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
 
-        bmpstr = saveBitMap.GetBitmapBits(True)
-        img = np.frombuffer(bmpstr, dtype=np.uint8)
-        img.shape = (height, width, 4)
-        
-        win32gui.DeleteObject(saveBitMap.GetHandle())
-        saveDC.DeleteDC()
-        mfcDC.DeleteDC()
-        win32gui.ReleaseDC(self.hwnd, hwndDC)
-        
-        img = img[:, :, :3]
-        img = np.ascontiguousarray(img)
-        
-        return img
+        if width <= 0 or height <= 0:
+            raise RuntimeError(
+                f"Window '{self.window_title}' has invalid capture bounds: width={width}, height={height}"
+            )
+
+        hwndDC = None
+        mfcDC = None
+        saveDC = None
+        saveBitMap = None
+
+        try:
+            hwndDC = win32gui.GetWindowDC(self.hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
+
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+            saveDC.SelectObject(saveBitMap)
+
+            print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+            if print_result != 1:
+                logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
+
+            bmpstr = saveBitMap.GetBitmapBits(True)
+            expected_size = width * height * 4
+            if len(bmpstr) != expected_size:
+                raise RuntimeError(
+                    f"Capture buffer size mismatch for '{self.window_title}': "
+                    f"expected {expected_size}, got {len(bmpstr)}"
+                )
+
+            img = np.frombuffer(bmpstr, dtype=np.uint8)
+            img.shape = (height, width, 4)
+            return np.ascontiguousarray(img[:, :, :3])
+        finally:
+            if saveBitMap is not None:
+                try:
+                    win32gui.DeleteObject(saveBitMap.GetHandle())
+                except Exception:
+                    pass
+            if saveDC is not None:
+                try:
+                    saveDC.DeleteDC()
+                except Exception:
+                    pass
+            if mfcDC is not None:
+                try:
+                    mfcDC.DeleteDC()
+                except Exception:
+                    pass
+            if hwndDC is not None:
+                try:
+                    win32gui.ReleaseDC(self.hwnd, hwndDC)
+                except Exception:
+                    pass
     
     def is_window_active(self):
         return win32gui.IsWindow(self.hwnd) if self.hwnd else False

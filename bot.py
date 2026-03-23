@@ -380,7 +380,7 @@ class EatventureBot:
             )
             return State.CHECK_NEW_LEVEL
 
-        priority_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+        priority_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
         priority_hit = self._detect_new_level_priority(
             screenshot=priority_screenshot,
             max_y=config.EXTENDED_SEARCH_Y,
@@ -500,15 +500,15 @@ class EatventureBot:
 
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
-        cached = self._capture_cache.get(cache_key)
-        now = time.monotonic()
-        if not force and cached and now - cached[0] <= self._capture_cache_ttl:
-            return cached[1]
-
         with self._capture_lock:
+            now = time.monotonic()
+            cached = self._capture_cache.get(cache_key)
+            if not force and cached and now - cached[0] <= self._capture_cache_ttl:
+                return cached[1]
+
             frame = self.window_capture.capture(max_y=max_y)
-        self._capture_cache[cache_key] = (now, frame)
-        return frame
+            self._capture_cache[cache_key] = (time.monotonic(), frame)
+            return frame
 
     def _clear_capture_cache(self):
         self._capture_cache.clear()
@@ -657,7 +657,7 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self._capture(max_y=target_max_y, force=force)
 
-        if screenshot.shape[0] < required_bottom and max_y is None:
+        if screenshot.shape[0] < required_bottom:
             recapture_max_y = max(target_max_y, required_bottom)
             screenshot = self._capture(max_y=recapture_max_y, force=force)
             target_max_y = recapture_max_y
@@ -1479,7 +1479,6 @@ class EatventureBot:
             )
 
         return clicked_targets
-        # Gap 1 fix: dead code block removed here (duplicate if/return from prior refactor)
 
 
     def _iter_red_icon_templates(self):
@@ -1663,11 +1662,6 @@ class EatventureBot:
             )
             return State.SCROLL
 
-        # STEP 4: No targets (Fallback scan then search)
-        # Gap 2 fix: capture the return value so a forbidden-only upgrade-station redirect
-        # (check_fallbacks returns State.SCROLL) is propagated explicitly rather than
-        # falling through accidentally. This also ensures _no_red_scroll_cycle_pending is
-        # set correctly via the full _scan_and_click_non_red_assets path before we scroll.
         fallback_state = self.check_fallbacks()
         if fallback_state is not None:
             logger.info("Fallback scan triggered state redirect to: %s", fallback_state)
@@ -2007,7 +2001,7 @@ class EatventureBot:
         
         # Use spam-click instead of hold — rapid sequential left clicks
         # with interrupt awareness via the critical interrupt callback.
-        self.mouse_controller.spam_click_at(
+        spam_click_success = self.mouse_controller.spam_click_at(
             x, y,
             duration=config.SPAM_CLICK_DURATION,
             click_delay=config.SPAM_CLICK_DELAY,
@@ -2018,6 +2012,12 @@ class EatventureBot:
 
         elapsed_time = time.monotonic() - start_time
         logger.info(f"Spam-clicking complete: duration {elapsed_time:.1f}s")
+
+        if not spam_click_success:
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return State.CHECK_NEW_LEVEL
+            logger.warning("Upgrade station rapid-click sequence aborted; re-validating target")
+            return State.SEARCH_UPGRADE_STATION
         
         self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
@@ -2046,11 +2046,20 @@ class EatventureBot:
         self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
         
         logger.info("✓ Stats icon found, upgrading")
-        self.mouse_controller.click(config.STATS_UPGRADE_BUTTON_POS[0], config.STATS_UPGRADE_BUTTON_POS[1], relative=True)
-        # Use standard non-interruptible sleep
+        opened_menu = self.mouse_controller.click(
+            config.STATS_UPGRADE_BUTTON_POS[0],
+            config.STATS_UPGRADE_BUTTON_POS[1],
+            relative=True,
+        )
+        if not opened_menu:
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return State.CHECK_NEW_LEVEL
+            logger.warning("Stats upgrade menu click failed; continuing without stat spam")
+            return State.OPEN_BOXES
+
         self.sleep(config.STATE_DELAY)
-        
-        self.mouse_controller.spam_click_at(
+
+        stats_click_success = self.mouse_controller.spam_click_at(
             config.STATS_UPGRADE_POS[0],
             config.STATS_UPGRADE_POS[1],
             duration=config.STATS_UPGRADE_CLICK_DURATION,
@@ -2059,7 +2068,13 @@ class EatventureBot:
             relative=True,
             interrupt_check=lambda: self.check_critical_interrupts(raise_exception=False),
         )
-        
+
+        if not stats_click_success:
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return State.CHECK_NEW_LEVEL
+            logger.warning("Stats upgrade click burst aborted; continuing to box handling")
+            return State.OPEN_BOXES
+
         self._click_idle()
         logger.info("========== STAT UPGRADE COMPLETED ==========")
         return State.OPEN_BOXES
@@ -2080,6 +2095,8 @@ class EatventureBot:
         
         box_names = ["box1", "box2", "box3", "box4", "box5"]
         boxes_found = 0
+        detected_box = False
+        best_box_confidence = None
         
         for box_name in box_names:
             if box_name in self.templates:
@@ -2095,14 +2112,19 @@ class EatventureBot:
                 )
                 
                 if found:
+                    detected_box = True
                     if self.mouse_controller.is_in_forbidden_zone(x, y):
                         logger.debug(f"{box_name} in forbidden zone, skipping")
                     else:
-                        self.mouse_controller.click(x, y, relative=True)
-                        boxes_found += 1
-                        self.vision_optimizer.update_box_confidence(confidence)
-                else:
-                    self.vision_optimizer.update_box_miss()
+                        if self.mouse_controller.click(x, y, relative=True):
+                            boxes_found += 1
+                            if best_box_confidence is None or confidence > best_box_confidence:
+                                best_box_confidence = confidence
+
+        if best_box_confidence is not None:
+            self.vision_optimizer.update_box_confidence(best_box_confidence)
+        elif not detected_box:
+            self.vision_optimizer.update_box_miss()
         
         if self._should_interrupt_for_new_level(
             max_y=config.MAX_SEARCH_Y,

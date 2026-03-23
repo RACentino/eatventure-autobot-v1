@@ -20,8 +20,6 @@ except ImportError:
     print("Please run: pip install pynput")
     sys.exit(1)
 
-from pynput import keyboard
-
 import config
 from bot import EatventureBot
 
@@ -95,13 +93,21 @@ def setup_logging():
     
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "_eatventure_handler", False):
+            root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+    console_handler._eatventure_handler = True
+    file_handler._eatventure_handler = True
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
 
 
 def main():
-    global cursor_showing_enabled
-    
     print("=" * 60)
     print("Eatventure Bot - Screen Automation Tool")
     print("=" * 60)

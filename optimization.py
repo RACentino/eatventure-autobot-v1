@@ -3,6 +3,7 @@ import logging
 import threading
 import json
 import os
+import tempfile
 import config
 
 logger = logging.getLogger(__name__)
@@ -70,35 +71,66 @@ class VisionPersistence:
         self.path = path
         self.save_interval = save_interval
         self._last_save_time = 0.0
+        self._lock = threading.RLock()
 
     def load(self):
         if not self.path:
             return {}
-        if not os.path.exists(self.path):
-            return {}
-        try:
-            with open(self.path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except json.JSONDecodeError as exc:
-            logger.warning(
-                "Failed to load vision state from %s: %s. Using defaults.",
-                self.path,
-                exc,
-            )
-            return {}
+        with self._lock:
+            if not os.path.exists(self.path):
+                return {}
+            try:
+                with open(self.path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Failed to load vision state from %s: %s. Using defaults.",
+                    self.path,
+                    exc,
+                )
+                return {}
+        return data if isinstance(data, dict) else {}
 
     def save(self, state, force=False):
         if not self.path:
-            return
+            return False
+
         now = time.monotonic()
-        if not force and self.save_interval > 0 and now - self._last_save_time < self.save_interval:
-            return
-        directory = os.path.dirname(self.path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-        self._last_save_time = now
+        with self._lock:
+            if not force and self.save_interval > 0 and now - self._last_save_time < self.save_interval:
+                return False
+
+            directory = os.path.dirname(self.path)
+            target_dir = directory or "."
+            temp_path = None
+            try:
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=target_dir,
+                    prefix=".state-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temp_path = handle.name
+                    json.dump(state, handle, indent=2, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+                os.replace(temp_path, self.path)
+                self._last_save_time = time.monotonic()
+                return True
+            except (OSError, TypeError, ValueError) as exc:
+                logger.error("Failed to persist state to %s: %s", self.path, exc)
+                if temp_path:
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                return False
 
 
 class VisionOptimizer:
@@ -274,7 +306,7 @@ class HistoricalLearner:
         self.min_improvement_ratio = max(0.0, float(getattr(config, "AI_LEARNING_MIN_IMPROVEMENT_RATIO", 0.03)))
         self.apply_cooldown = max(0.0, float(getattr(config, "AI_LEARNING_APPLY_COOLDOWN", 1.2)))
         self._last_apply_time = 0.0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
         self._records = []
@@ -448,13 +480,14 @@ class HistoricalLearner:
     def _persist(self, force=False):
         if not self.persistence:
             return
-        state = {
-            "records": self._records[-config.AI_LEARNING_RECORDS_LIMIT:],
-            "total_completions": self._total_completions,
-            "last_pair_processed": self._last_pair_processed,
-            "last_batch_processed": self._last_batch_processed,
-            "tuned_behavior": self._tuned_behavior,
-        }
+        with self._lock:
+            state = {
+                "records": self._records[-config.AI_LEARNING_RECORDS_LIMIT:],
+                "total_completions": self._total_completions,
+                "last_pair_processed": self._last_pair_processed,
+                "last_batch_processed": self._last_batch_processed,
+                "tuned_behavior": self._tuned_behavior,
+            }
         self.persistence.save(state, force=force)
 
     def reset(self):
