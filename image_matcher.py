@@ -85,6 +85,18 @@ class ImageMatcher:
 
         return {"pixel_count": pixel_count, "red_ratio": red_ratio, "red_mean": red_mean}
 
+    def build_red_template_signature(self, template, mask=None):
+        opaque_mask = mask.copy() if mask is not None else np.full(template.shape[:2], 255, dtype=np.uint8)
+        hsv = cv2.cvtColor(template, cv2.COLOR_BGR2HSV)
+        red_mask = self._build_red_mask(hsv)
+        red_mask = cv2.bitwise_and(red_mask, opaque_mask)
+        return {
+            "opaque_mask": opaque_mask,
+            "opaque_pixels": int(cv2.countNonZero(opaque_mask)),
+            "red_mask": red_mask,
+            "red_pixels": int(cv2.countNonZero(red_mask)),
+        }
+
     def is_red_dominant(self, image, x, y, size=12, min_ratio=1.15, min_mean=35):
         roi = self._extract_square_roi(image, x, y, size)
         if roi.size == 0:
@@ -161,14 +173,14 @@ class ImageMatcher:
         
         return False, confidence, 0, 0
     
-    def _check_color_similarity(self, screenshot, template, location, mask=None):
+    def measure_color_similarity(self, screenshot, template, location, mask=None):
         x, y = location
         h, w = template.shape[:2]
         
         roi = screenshot[y:y+h, x:x+w]
         
         if roi.shape[:2] != template.shape[:2]:
-            return True
+            return 1.0
         
         if mask is not None:
             template_masked = cv2.bitwise_and(template, template, mask=mask)
@@ -196,10 +208,108 @@ class ImageMatcher:
         corr_g = cv2.compareHist(hist_template_g, hist_roi_g, cv2.HISTCMP_CORREL)
         corr_r = cv2.compareHist(hist_template_r, hist_roi_r, cv2.HISTCMP_CORREL)
         
-        avg_corr = (corr_b + corr_g + corr_r) / 3
-        
+        return float((corr_b + corr_g + corr_r) / 3)
+
+    def _check_color_similarity(self, screenshot, template, location, mask=None):
+        avg_corr = self.measure_color_similarity(screenshot, template, location, mask=mask)
         color_threshold = getattr(config, "COLOR_SIMILARITY_THRESHOLD", 0.7)
         return avg_corr >= color_threshold
+
+    def analyze_red_template_candidate(self, screenshot, x, y, template, mask=None, signature=None, max_offset=1):
+        h, w = template.shape[:2]
+        if h <= 0 or w <= 0:
+            return {
+                "coverage": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "iou": 0.0,
+                "color_similarity": 0.0,
+                "runtime_red_pixels": 0,
+                "score": -1.0,
+                "x1": 0,
+                "y1": 0,
+            }
+
+        signature = signature or self.build_red_template_signature(template, mask=mask)
+        opaque_pixels = signature.get("opaque_pixels", 0)
+        template_red_pixels = signature.get("red_pixels", 0)
+        if opaque_pixels <= 0 or template_red_pixels <= 0:
+            return {
+                "coverage": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "iou": 0.0,
+                "color_similarity": 0.0,
+                "runtime_red_pixels": 0,
+                "score": -1.0,
+                "x1": 0,
+                "y1": 0,
+            }
+
+        best = None
+        base_x1 = int(round(float(x) - (float(w) / 2.0)))
+        base_y1 = int(round(float(y) - (float(h) / 2.0)))
+        offset_limit = max(0, int(max_offset))
+
+        for dx in range(-offset_limit, offset_limit + 1):
+            for dy in range(-offset_limit, offset_limit + 1):
+                x1 = base_x1 + dx
+                y1 = base_y1 + dy
+                x2 = x1 + w
+                y2 = y1 + h
+                if x1 < 0 or y1 < 0 or x2 > screenshot.shape[1] or y2 > screenshot.shape[0]:
+                    continue
+
+                roi = screenshot[y1:y2, x1:x2]
+                if roi.shape[:2] != (h, w):
+                    continue
+
+                hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                runtime_red_mask = self._build_red_mask(hsv)
+                runtime_red_mask = cv2.bitwise_and(runtime_red_mask, signature["opaque_mask"])
+                runtime_red_pixels = int(cv2.countNonZero(runtime_red_mask))
+                overlap_mask = cv2.bitwise_and(runtime_red_mask, signature["red_mask"])
+                overlap_pixels = int(cv2.countNonZero(overlap_mask))
+                union_pixels = int(
+                    cv2.countNonZero(cv2.bitwise_or(runtime_red_mask, signature["red_mask"]))
+                )
+
+                coverage = runtime_red_pixels / float(opaque_pixels)
+                precision = overlap_pixels / float(runtime_red_pixels) if runtime_red_pixels else 0.0
+                recall = overlap_pixels / float(template_red_pixels) if template_red_pixels else 0.0
+                iou = overlap_pixels / float(union_pixels) if union_pixels else 0.0
+                color_similarity = self.measure_color_similarity(
+                    screenshot,
+                    template,
+                    (x1, y1),
+                    mask=mask,
+                )
+                score = precision + recall + iou + (color_similarity * 0.5)
+                candidate = {
+                    "coverage": float(coverage),
+                    "precision": float(precision),
+                    "recall": float(recall),
+                    "iou": float(iou),
+                    "color_similarity": float(color_similarity),
+                    "runtime_red_pixels": runtime_red_pixels,
+                    "score": float(score),
+                    "x1": int(x1),
+                    "y1": int(y1),
+                }
+                if best is None or candidate["score"] > best["score"]:
+                    best = candidate
+
+        return best or {
+            "coverage": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "iou": 0.0,
+            "color_similarity": 0.0,
+            "runtime_red_pixels": 0,
+            "score": -1.0,
+            "x1": 0,
+            "y1": 0,
+        }
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown", area_tolerance=0.15):
         thresh = threshold if threshold else self.threshold

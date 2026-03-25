@@ -43,8 +43,8 @@ NEW_LEVEL_THRESHOLD = 0.98          # Confidence for new level / travel button t
 # Red icon gate settings
 RED_ICON_MIN_MATCHES = 1            # Minimum number of simultaneous red icon matches required
 NEW_LEVEL_RED_ICON_MIN_MATCHES = 1  # Minimum matches for new-level red icon detection
-RED_ICON_PIXEL_THRESHOLD = 55       # Minimum masked red pixel count in ROI to confirm a genuine red blob
-                                    # Raised from 48 to reject marginal/flickering detections during UI transitions
+RED_ICON_PIXEL_THRESHOLD = 52       # Minimum masked red pixel count in ROI to confirm a genuine red blob
+                                    # Kept just above the smallest true template footprint so structural filters, not a blunt pixel floor, do the false-positive rejection
 RED_ICON_DILATE_KERNEL = 3          # Morphological kernel size for noise removal and blob reconnection
 
 # Red color HSV bounds for red pixel counting
@@ -60,8 +60,18 @@ RED_HSV_UPPER2 = (179, 255, 255)    # High-hue red wrap-around upper bound
 # Red icon color verification (BGR channel ratio check)
 RED_ICON_COLOR_CHECK = True         # Enable red-dominance verification after template match
 RED_ICON_COLOR_MIN_RATIO = 1.35     # Red channel must exceed max(G,B) by this factor
+RED_ICON_COLOR_MAX_RATIO = 3.60     # Reject overly solid-red badges that lack the icon family's white/red balance
 RED_ICON_COLOR_MIN_MEAN = 55        # Minimum absolute red channel mean intensity
 RED_ICON_COLOR_SAMPLE_SIZE = 24     # Pixel ROI half-size for color verification
+
+# Red icon structural verification (template-shape gate)
+RED_ICON_TEMPLATE_VERIFY = True         # Re-check matched candidates against the template's red-mask footprint
+RED_ICON_TEMPLATE_VERIFY_MAX_OFFSET = 1 # Search +/- this many pixels when aligning a matched candidate to its template ROI
+RED_ICON_TEMPLATE_MIN_COVERAGE = 0.28   # Runtime red coverage inside the template mask must stay above this floor
+RED_ICON_TEMPLATE_MIN_PRECISION = 0.55  # Runtime red pixels must mostly land where the template expects them
+RED_ICON_TEMPLATE_MIN_RECALL = 0.55     # The candidate must recover enough of the template's red footprint
+RED_ICON_TEMPLATE_MIN_IOU = 0.38        # Overlap floor between runtime and template red masks
+RED_ICON_TEMPLATE_COLOR_SIMILARITY = 0.72  # Histogram correlation floor between the candidate ROI and the matched template
 
 # Red icon position refinement
 RED_ICON_VERIFY_PADDING = 24        # Pixel padding around detection point for presence verification

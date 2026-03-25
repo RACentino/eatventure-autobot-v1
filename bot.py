@@ -53,6 +53,7 @@ class EatventureBot:
         ]
         self.templates = self.load_templates()
         self.available_red_icon_templates = self._build_available_red_icon_templates()
+        self._red_template_signatures = self._build_red_template_signatures()
         self._red_template_hit_counts = {}
         self._red_template_priority = []
         self._red_template_last_seen = {}
@@ -705,6 +706,16 @@ class EatventureBot:
                 passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
                 if not passed_color_gate:
                     continue
+                passed_template_gate, _ = self._passes_red_icon_template_gate(
+                    screenshot,
+                    abs_x,
+                    abs_y,
+                    template_name,
+                    template,
+                    mask,
+                )
+                if not passed_template_gate:
+                    continue
                 self._merge_detection(
                     detections,
                     buckets,
@@ -841,6 +852,16 @@ class EatventureBot:
                     passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
                     if not passed_color_gate:
                         continue
+                    passed_template_gate, _ = self._passes_red_icon_template_gate(
+                        screenshot,
+                        abs_x,
+                        abs_y,
+                        template_name,
+                        template,
+                        mask,
+                    )
+                    if not passed_template_gate:
+                        continue
                     best_confidence = max(best_confidence, conf)
                     template_hits[template_name] = template_hits.get(template_name, 0) + 1
 
@@ -942,6 +963,16 @@ class EatventureBot:
             passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
             if not passed_color_gate:
                 continue
+            passed_template_gate, _ = self._passes_red_icon_template_gate(
+                screenshot,
+                abs_x,
+                abs_y,
+                template_name,
+                template,
+                mask,
+            )
+            if not passed_template_gate:
+                continue
             if best_match is None or confidence > best_match[2]:
                 best_match = (abs_x, abs_y, confidence)
 
@@ -989,6 +1020,17 @@ class EatventureBot:
             for conf, x, y in icons:
                 passed, pixel_count = self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color)
                 if not passed:
+                    continue
+                passed_template_gate, _ = self._passes_red_icon_template_gate(
+                    screenshot,
+                    x,
+                    y,
+                    template_name,
+                    template,
+                    mask,
+                    relaxed=relaxed_color,
+                )
+                if not passed_template_gate:
                     continue
                 self._merge_detection(
                     detections,
@@ -1063,6 +1105,15 @@ class EatventureBot:
             if (
                 abs(abs_x - x) <= config.RED_ICON_VERIFY_TOLERANCE
                 and abs(abs_y - y) <= config.RED_ICON_VERIFY_TOLERANCE
+                and self._passes_red_icon_template_gate(
+                    target_screenshot,
+                    abs_x,
+                    abs_y,
+                    template_name,
+                    template,
+                    mask,
+                    relaxed=relaxed_color,
+                )[0]
             ):
                 return True
 
@@ -1089,16 +1140,18 @@ class EatventureBot:
 
         threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 48)
         min_ratio = getattr(config, "RED_ICON_COLOR_MIN_RATIO", 1.35)
+        max_ratio = getattr(config, "RED_ICON_COLOR_MAX_RATIO", 999.0)
         min_mean = getattr(config, "RED_ICON_COLOR_MIN_MEAN", 55)
         if relaxed:
             threshold = max(1, int(round(threshold * 0.8)))
             min_ratio *= 0.92
+            max_ratio *= 1.08
             min_mean *= 0.9
 
         if pixel_count < threshold:
             return False, pixel_count
 
-        if metrics["red_ratio"] < min_ratio or metrics["red_mean"] < min_mean:
+        if metrics["red_ratio"] < min_ratio or metrics["red_ratio"] > max_ratio or metrics["red_mean"] < min_mean:
             logger.debug(
                 "[RedGate] Masked dominance rejected candidate at (%s, %s) px=%d ratio=%.3f mean=%.1f",
                 x,
@@ -1535,6 +1588,66 @@ class EatventureBot:
                 template, mask = self.templates[template_name]
                 available.append((template_name, template, mask))
         return available
+
+    def _build_red_template_signatures(self):
+        signatures = {}
+        for template_name, template, mask in self.available_red_icon_templates:
+            signatures[template_name] = self.image_matcher.build_red_template_signature(
+                template,
+                mask=mask,
+            )
+        return signatures
+
+    def _passes_red_icon_template_gate(self, screenshot, x, y, template_name, template, mask, relaxed=False):
+        if not getattr(config, "RED_ICON_TEMPLATE_VERIFY", True):
+            return True, {}
+
+        signature = getattr(self, "_red_template_signatures", {}).get(template_name)
+        if signature is None:
+            signature = self.image_matcher.build_red_template_signature(template, mask=mask)
+
+        metrics = self.image_matcher.analyze_red_template_candidate(
+            screenshot,
+            x,
+            y,
+            template,
+            mask=mask,
+            signature=signature,
+            max_offset=getattr(config, "RED_ICON_TEMPLATE_VERIFY_MAX_OFFSET", 1),
+        )
+
+        min_coverage = float(getattr(config, "RED_ICON_TEMPLATE_MIN_COVERAGE", 0.28))
+        min_precision = float(getattr(config, "RED_ICON_TEMPLATE_MIN_PRECISION", 0.55))
+        min_recall = float(getattr(config, "RED_ICON_TEMPLATE_MIN_RECALL", 0.55))
+        min_iou = float(getattr(config, "RED_ICON_TEMPLATE_MIN_IOU", 0.38))
+        min_color_similarity = float(getattr(config, "RED_ICON_TEMPLATE_COLOR_SIMILARITY", 0.72))
+        if relaxed:
+            min_coverage *= 0.9
+            min_precision *= 0.95
+            min_recall *= 0.95
+            min_iou *= 0.9
+            min_color_similarity *= 0.95
+
+        passed = (
+            metrics["coverage"] >= min_coverage
+            and metrics["precision"] >= min_precision
+            and metrics["recall"] >= min_recall
+            and metrics["iou"] >= min_iou
+            and metrics["color_similarity"] >= min_color_similarity
+        )
+        if not passed:
+            logger.debug(
+                "[RedTemplateGate] Rejected %s at (%s, %s): coverage=%.3f precision=%.3f recall=%.3f iou=%.3f color=%.3f",
+                template_name,
+                x,
+                y,
+                metrics["coverage"],
+                metrics["precision"],
+                metrics["recall"],
+                metrics["iou"],
+                metrics["color_similarity"],
+            )
+        return passed, metrics
 
     def get_runtime_behavior_snapshot(self):
         return {

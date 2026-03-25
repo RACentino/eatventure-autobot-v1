@@ -56,7 +56,7 @@ def test_red_icon_gate(bgr, opaque_mask):
     total_opaque = int(np.sum(opaque_mask))
     ratio = red_count / total_opaque if total_opaque > 0 else 0
     
-    # The gate requires RED_ICON_PIXEL_THRESHOLD pixels (default 48)
+    # The gate requires RED_ICON_PIXEL_THRESHOLD pixels from config.py.
     threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 48)
     
     return {
