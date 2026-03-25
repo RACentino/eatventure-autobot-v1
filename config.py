@@ -32,7 +32,7 @@ LOGS_DIR = "logs"                   # Folder for bot logs, vision state, and lea
 MATCH_THRESHOLD = 0.98              # Default threshold passed to ImageMatcher constructor
 
 # Per-asset detection thresholds
-RED_ICON_THRESHOLD = 0.935          # Minimum confidence to accept a red icon match
+RED_ICON_THRESHOLD = 0.92           # Runtime probe frames cluster near 0.92-0.934, so keep the floor low enough to admit valid icons before structural gates decide
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.94 # Confidence for red-icon-based new-level detection
 STATS_RED_ICON_THRESHOLD = 0.97     # Confidence for stats upgrade icon detection
 UPGRADE_STATION_THRESHOLD = 0.95    # Confidence for upgrade station template match
@@ -71,7 +71,7 @@ RED_ICON_TEMPLATE_MIN_COVERAGE = 0.28   # Runtime red coverage inside the templa
 RED_ICON_TEMPLATE_MIN_PRECISION = 0.55  # Runtime red pixels must mostly land where the template expects them
 RED_ICON_TEMPLATE_MIN_RECALL = 0.55     # The candidate must recover enough of the template's red footprint
 RED_ICON_TEMPLATE_MIN_IOU = 0.38        # Overlap floor between runtime and template red masks
-RED_ICON_TEMPLATE_COLOR_SIMILARITY = 0.72  # Histogram correlation floor between the candidate ROI and the matched template
+RED_ICON_TEMPLATE_COLOR_SIMILARITY = 0.42  # Lowered from the overly strict 0.72; runtime demo frames pass near 0.42-0.43 while known bad samples remain below this floor
 
 # Red icon position refinement
 RED_ICON_VERIFY_PADDING = 24        # Pixel padding around detection point for presence verification
@@ -158,15 +158,15 @@ SCROLL_INCREMENT_STEP = 2           # Amplitude increment per cycle pair
 # This is the first post-drag "thinking" micro-pause. It only covers the tiny
 # release-and-stop moment after the pointer finishes the drag, before CV should
 # trust the next frame at all.
-SCROLL_RELEASE_THINK_DELAY = 0.004
+SCROLL_RELEASE_THINK_DELAY = 0.008
 
 # This is the main visual settle buffer after any scroll. It gives the emulator
 # and game one clean frame to stop smearing so the next scan sees settled assets.
-POST_SCROLL_VISION_THINK_DELAY = 0.024
+POST_SCROLL_VISION_THINK_DELAY = 0.038
 
 # This second micro-pause is intentionally separate so later tuning can widen or
 # shrink the final confirmation window without touching the raw drag settle time.
-POST_SCROLL_CONFIRM_THINK_DELAY = 0.006
+POST_SCROLL_CONFIRM_THINK_DELAY = 0.010
 
 # Reversal scans happen when the content is already near-stationary, so they need
 # less waiting than a full scroll settle, but still benefit from one deliberate beat.
@@ -174,7 +174,7 @@ OSCILLATION_REVERSAL_THINK_DELAY = 0.012
 
 # The oscillating search already waits through POST_SCROLL_SETTLE after every drag.
 # Keep this extra gap tiny; it is only there to avoid scanning on the exact release tick.
-SCROLL_INTERVAL_PAUSE = 0.002
+SCROLL_INTERVAL_PAUSE = 0.004
 
 # Compose the full post-scroll vision settle from two explicit micro-pause stages:
 # one for frame stabilization and one for the final confirm-before-scan beat.
@@ -185,11 +185,11 @@ CYCLE_PAUSE_DURATION = OSCILLATION_REVERSAL_THINK_DELAY
 
 # A more aggressive drag cuts exploration latency sharply, but 110 ms is still
 # long enough for the interpolated movement to remain smooth instead of flicking.
-SCROLL_DURATION = 0.11
+SCROLL_DURATION = 0.16
 
 # Twelve steps preserves a smooth linear glide at the shorter duration while
 # reducing overhead compared with the original wider, slower motion profile.
-SCROLL_STEP_COUNT = 12
+SCROLL_STEP_COUNT = 16
 
 # The drag path already includes explicit settle windows; this minimum interval only
 # prevents back-to-back scroll commands from stacking on the same scheduler tick.
@@ -461,8 +461,9 @@ AI_BOX_MISS_WINDOW = 3                  # Consecutive misses before threshold de
 AI_BOX_MISS_STEP = 0.005                # Threshold reduction per miss event
 
 # Red icon detection AI bounds
-AI_RED_ICON_THRESHOLD_MIN = 0.935       # Keep adaptive red-icon matching inside the stricter accuracy floor
-AI_RED_ICON_THRESHOLD_MAX = 0.97        # Maximum adaptive threshold for red icon detection
+AI_RED_ICON_THRESHOLD_MIN = 0.91        # Allow adaptive degradation below the base floor after repeated misses
+AI_RED_ICON_THRESHOLD_MAX = 0.95        # Prevent the optimizer from ratcheting red-icon confidence back into a brittle range
+AI_RED_ICON_BOOTSTRAP_MAX = 0.94        # Cap persisted startup state so stale runs cannot relaunch with an already-overstrict red threshold
 AI_RED_ICON_MARGIN = 0.02               # Confidence margin subtracted during threshold update
 AI_RED_ICON_MISS_WINDOW = 3             # Consecutive misses before threshold degradation
 AI_RED_ICON_MISS_STEP = 0.004           # Threshold reduction per miss event
@@ -585,4 +586,74 @@ FORBIDDEN_ZONES = [
         "x_min": 0, "x_max": 360, "y_min": 0, "y_max": 70
     }
 ]
+
+
+def build_scroll_timing_report():
+    release_ms = float(SCROLL_SETTLE_DELAY) * 1000.0
+    vision_ms = float(POST_SCROLL_VISION_THINK_DELAY) * 1000.0
+    confirm_ms = float(POST_SCROLL_CONFIRM_THINK_DELAY) * 1000.0
+    interval_ms = float(SCROLL_INTERVAL_PAUSE) * 1000.0
+    cache_ttl_ms = float(CAPTURE_CACHE_TTL) * 1000.0
+    drag_ms = float(SCROLL_DURATION) * 1000.0
+    step_count = int(SCROLL_STEP_COUNT)
+
+    post_scroll_ms = float(POST_SCROLL_SETTLE) * 1000.0
+    pre_scan_budget_ms = release_ms + post_scroll_ms + interval_ms
+    fresh_frame_margin_ms = pre_scan_budget_ms - cache_ttl_ms
+    ms_per_step = drag_ms / step_count if step_count > 0 else 0.0
+
+    return {
+        "drag_duration_ms": round(drag_ms, 2),
+        "drag_step_count": step_count,
+        "drag_ms_per_step": round(ms_per_step, 2),
+        "release_settle_ms": round(release_ms, 2),
+        "vision_settle_ms": round(vision_ms, 2),
+        "confirm_settle_ms": round(confirm_ms, 2),
+        "interval_pause_ms": round(interval_ms, 2),
+        "post_scroll_settle_ms": round(post_scroll_ms, 2),
+        "pre_scan_budget_ms": round(pre_scan_budget_ms, 2),
+        "capture_cache_ttl_ms": round(cache_ttl_ms, 2),
+        "fresh_frame_margin_ms": round(fresh_frame_margin_ms, 2),
+        "fresh_frame_safe": fresh_frame_margin_ms > 0.0,
+    }
+
+
+def run_scroll_timing_report_cli(argv=None):
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Report effective scroll settle timing for the CV scan path")
+    parser.add_argument("--json", action="store_true", help="Print the report as JSON")
+    args = parser.parse_args(argv)
+
+    report = build_scroll_timing_report()
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["fresh_frame_safe"] else 1
+
+    print("=" * 72)
+    print("SCROLL TIMING REPORT")
+    print("=" * 72)
+    print(f"Drag duration:           {report['drag_duration_ms']:.2f} ms")
+    print(f"Drag steps:              {report['drag_step_count']}")
+    print(f"Drag ms per step:        {report['drag_ms_per_step']:.2f} ms")
+    print(f"Release settle:          {report['release_settle_ms']:.2f} ms")
+    print(f"Vision settle:           {report['vision_settle_ms']:.2f} ms")
+    print(f"Confirm settle:          {report['confirm_settle_ms']:.2f} ms")
+    print(f"Interval pause:          {report['interval_pause_ms']:.2f} ms")
+    print(f"Total post-scroll wait:  {report['pre_scan_budget_ms']:.2f} ms")
+    print(f"Capture cache TTL:       {report['capture_cache_ttl_ms']:.2f} ms")
+    print(f"Fresh-frame margin:      {report['fresh_frame_margin_ms']:.2f} ms")
+    print()
+    if report["fresh_frame_safe"]:
+        print("PASS: Post-scroll wait exceeds capture-cache TTL, so the next scan can request a fresh frame.")
+        return 0
+
+    print("FAIL: Post-scroll wait does not exceed capture-cache TTL; the next scan may reuse a stale frame.")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_scroll_timing_report_cli())
 

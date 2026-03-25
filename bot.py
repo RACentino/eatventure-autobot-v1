@@ -1,34 +1,1129 @@
 import json
-import os
-import time
 import logging
+import os
+import tempfile
 import threading
-from datetime import datetime
+import time
 from contextlib import contextmanager
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Callable, List, Optional, Tuple
 
-from window_capture import WindowCapture
-from image_matcher import ImageMatcher
-from mouse_controller import MouseController
-from state_machine import StateMachine, State
-from telegram_notifier import TelegramNotifier
-from asset_scanner import AssetScanner
-from search_utils import OscillatingSearcher
+import numpy as np
+
 import config
+from image_matcher import AssetScanner, ImageMatcher
+from mouse_controller import MouseController
+from telegram_notifier import TelegramNotifier
+from window_capture import WindowCapture
 
 logger = logging.getLogger(__name__)
 
 
+class State(Enum):
+    FIND_RED_ICONS = auto()
+    CLICK_RED_ICON = auto()
+    CHECK_UNLOCK = auto()
+    SEARCH_UPGRADE_STATION = auto()
+    HOLD_UPGRADE_STATION = auto()
+    OPEN_BOXES = auto()
+    UPGRADE_STATS = auto()
+    SCROLL = auto()
+    CHECK_NEW_LEVEL = auto()
+    TRANSITION_LEVEL = auto()
+    WAIT_FOR_UNLOCK = auto()
+
+
+class StateMachine:
+    def __init__(self, initial_state=State.FIND_RED_ICONS):
+        self.current_state = initial_state
+        self.previous_state = None
+        self.state_handlers = {}
+        self.priority_resolver = None
+        logger.info(f"State machine initialized in state: {initial_state.name}")
+
+    def register_handler(self, state, handler):
+        self.state_handlers[state] = handler
+        logger.debug(f"Registered handler for state: {state.name}")
+
+    def set_priority_resolver(self, resolver):
+        self.priority_resolver = resolver
+        logger.debug("Priority resolver registered")
+
+    def transition(self, new_state):
+        if new_state != self.current_state:
+            logger.info(f"State transition: {self.current_state.name} -> {new_state.name}")
+            self.previous_state = self.current_state
+            self.current_state = new_state
+
+    def update(self):
+        if self.priority_resolver is not None:
+            try:
+                priority_state = self.priority_resolver(self.current_state)
+            except Exception:
+                logger.exception("Priority resolver failed")
+                priority_state = None
+
+            if priority_state is not None and isinstance(priority_state, State):
+                self.transition(priority_state)
+
+        if self.current_state in self.state_handlers:
+            handler = self.state_handlers[self.current_state]
+            next_state = handler(self.current_state)
+
+            if next_state is not None and isinstance(next_state, State):
+                self.transition(next_state)
+
+            return True
+
+        logger.warning(f"No handler registered for state: {self.current_state.name}")
+        return False
+
+    def get_state(self):
+        return self.current_state
+
+    def get_state_name(self):
+        return self.current_state.name
+
+
+class AdaptiveTuner:
+    def __init__(self):
+        self.enabled = config.ADAPTIVE_TUNER_ENABLED
+        self.alpha = config.ADAPTIVE_TUNER_ALPHA
+        self.click_success_rate = 1.0
+        self.search_success_rate = 1.0
+        self.click_delay = config.CLICK_DELAY
+        self.move_delay = config.MOUSE_MOVE_DELAY
+        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
+        self.search_interval = config.UPGRADE_SEARCH_INTERVAL
+
+    def _ema(self, current, new_value):
+        return (1 - self.alpha) * current + self.alpha * new_value
+
+    def record_click_result(self, success):
+        if not self.enabled:
+            return
+        self.click_success_rate = self._ema(self.click_success_rate, 1.0 if success else 0.0)
+        self._adjust_click_timing()
+
+    def record_search_result(self, success):
+        if not self.enabled:
+            return
+        self.search_success_rate = self._ema(self.search_success_rate, 1.0 if success else 0.0)
+        self._adjust_search_timing()
+
+    def _adjust_click_timing(self):
+        if self.click_success_rate < config.ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD:
+            self.click_delay = min(
+                self.click_delay + config.ADAPTIVE_TUNER_CLICK_DELAY_STEP,
+                config.ADAPTIVE_TUNER_MAX_CLICK_DELAY,
+            )
+            self.move_delay = min(
+                self.move_delay + config.ADAPTIVE_TUNER_MOVE_DELAY_STEP,
+                config.ADAPTIVE_TUNER_MAX_MOVE_DELAY,
+            )
+        elif self.click_success_rate > config.ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD:
+            self.click_delay = max(
+                self.click_delay - config.ADAPTIVE_TUNER_CLICK_DECREMENT,
+                config.ADAPTIVE_TUNER_MIN_CLICK_DELAY,
+            )
+            self.move_delay = max(
+                self.move_delay - config.ADAPTIVE_TUNER_MOVE_DECREMENT,
+                config.ADAPTIVE_TUNER_MIN_MOVE_DELAY,
+            )
+
+    def _adjust_search_timing(self):
+        if self.search_success_rate < config.ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD:
+            self.search_interval = min(
+                self.search_interval + config.ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP,
+                config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL,
+            )
+            self.upgrade_click_interval = min(
+                self.upgrade_click_interval + config.ADAPTIVE_TUNER_UPGRADE_INTERVAL_STEP,
+                config.ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL,
+            )
+        elif self.search_success_rate > config.ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD:
+            self.search_interval = max(
+                self.search_interval - config.ADAPTIVE_TUNER_SEARCH_DECREMENT,
+                config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL,
+            )
+            self.upgrade_click_interval = max(
+                self.upgrade_click_interval - config.ADAPTIVE_TUNER_UPGRADE_DECREMENT,
+                config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
+            )
+
+    def reset(self):
+        self.click_success_rate = 1.0
+        self.search_success_rate = 1.0
+        self.click_delay = config.CLICK_DELAY
+        self.move_delay = config.MOUSE_MOVE_DELAY
+        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
+        self.search_interval = config.UPGRADE_SEARCH_INTERVAL
+        logger.info("AdaptiveTuner reset to defaults")
+
+
+class VisionPersistence:
+    def __init__(self, path, save_interval):
+        self.path = path
+        self.save_interval = save_interval
+        self._last_save_time = 0.0
+        self._lock = threading.RLock()
+
+    def load(self):
+        if not self.path:
+            return {}
+        with self._lock:
+            if not os.path.exists(self.path):
+                return {}
+            try:
+                with open(self.path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Failed to load vision state from %s: %s. Using defaults.",
+                    self.path,
+                    exc,
+                )
+                return {}
+        return data if isinstance(data, dict) else {}
+
+    def save(self, state, force=False):
+        if not self.path:
+            return False
+
+        now = time.monotonic()
+        with self._lock:
+            if not force and self.save_interval > 0 and now - self._last_save_time < self.save_interval:
+                return False
+
+            directory = os.path.dirname(self.path)
+            target_dir = directory or "."
+            temp_path = None
+            try:
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=target_dir,
+                    prefix=".state-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temp_path = handle.name
+                    json.dump(state, handle, indent=2, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+                os.replace(temp_path, self.path)
+                self._last_save_time = time.monotonic()
+                return True
+            except (OSError, TypeError, ValueError) as exc:
+                logger.error("Failed to persist state to %s: %s", self.path, exc)
+                if temp_path:
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                return False
+
+
+class VisionOptimizer:
+    def __init__(self, persistence=None):
+        self.enabled = config.AI_VISION_ENABLED
+        self.alpha = config.AI_VISION_ALPHA
+        self.alpha_max = config.AI_VISION_ALPHA_MAX
+        self.confidence_boost = config.AI_VISION_CONFIDENCE_BOOST
+        self.red_icon_threshold = config.RED_ICON_THRESHOLD
+        self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
+        self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
+        self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.box_threshold = config.BOX_THRESHOLD
+        self.persistence = persistence
+        self._miss_counts = {
+            "red_icon": 0,
+            "new_level": 0,
+            "new_level_red_icon": 0,
+            "upgrade_station": 0,
+            "stats_upgrade": 0,
+            "box": 0,
+        }
+
+    def _ema(self, current, new_value, alpha=None):
+        blend = self.alpha if alpha is None else alpha
+        return (1 - blend) * current + blend * new_value
+
+    def _adaptive_alpha(self, confidence):
+        if confidence <= 0:
+            return self.alpha
+        boost = (
+            max(0.0, min(1.0, (confidence - config.AI_VISION_CONFIDENCE_THRESHOLD)))
+            * self.confidence_boost
+        )
+        return min(self.alpha + boost, self.alpha_max)
+
+    def _update_threshold(self, name, confidence, min_th, max_th):
+        if not self.enabled or confidence <= 0:
+            return
+        self._miss_counts[name] = 0
+        current_th = getattr(self, f"{name}_threshold")
+        target = max(min_th, min(confidence, max_th))
+        new_th = self._ema(current_th, target, self._adaptive_alpha(confidence))
+        setattr(self, f"{name}_threshold", new_th)
+        self._persist()
+
+    def _update_miss(self, name, min_th, step, window):
+        if not self.enabled:
+            return
+        self._miss_counts[name] += 1
+        if self._miss_counts[name] < window:
+            return
+        self._miss_counts[name] = 0
+        current_th = getattr(self, f"{name}_threshold")
+        target = max(min_th, current_th - step)
+        setattr(self, f"{name}_threshold", self._ema(current_th, target, self.alpha_max))
+        self._persist()
+
+    def update_red_icon_confidences(self, confidences):
+        if not self.enabled or not confidences:
+            return
+        avg_conf = sum(confidences) / len(confidences)
+        target = max(
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            min(avg_conf - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
+        )
+        self.red_icon_threshold = self._ema(
+            self.red_icon_threshold,
+            target,
+            self._adaptive_alpha(avg_conf),
+        )
+        self._persist()
+
+    def update_red_icon_scan(self, confidences):
+        if not self.enabled:
+            return
+        if confidences:
+            self._miss_counts["red_icon"] = 0
+            self.update_red_icon_confidences(confidences)
+            return
+
+        self._update_miss(
+            "red_icon",
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            config.AI_RED_ICON_MISS_STEP,
+            config.AI_RED_ICON_MISS_WINDOW,
+        )
+
+    def update_new_level_confidence(self, confidence):
+        self._update_threshold(
+            "new_level",
+            confidence,
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_THRESHOLD_MAX,
+        )
+
+    def update_new_level_miss(self):
+        self._update_miss(
+            "new_level",
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_MISS_STEP,
+            config.AI_NEW_LEVEL_MISS_WINDOW,
+        )
+
+    def update_new_level_red_icon_confidence(self, confidence):
+        self._update_threshold(
+            "new_level_red_icon",
+            confidence,
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX,
+        )
+
+    def update_new_level_red_icon_miss(self):
+        self._update_miss(
+            "new_level_red_icon",
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_RED_ICON_MISS_STEP,
+            config.AI_NEW_LEVEL_RED_ICON_MISS_WINDOW,
+        )
+
+    def update_upgrade_station_confidence(self, confidence):
+        self._update_threshold(
+            "upgrade_station",
+            confidence,
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            config.AI_UPGRADE_STATION_THRESHOLD_MAX,
+        )
+
+    def update_upgrade_station_miss(self):
+        self._update_miss(
+            "upgrade_station",
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            config.AI_UPGRADE_STATION_MISS_STEP,
+            config.AI_UPGRADE_STATION_MISS_WINDOW,
+        )
+
+    def update_stats_upgrade_confidence(self, confidence):
+        self._update_threshold(
+            "stats_upgrade",
+            confidence,
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            config.AI_STATS_UPGRADE_THRESHOLD_MAX,
+        )
+
+    def update_stats_upgrade_miss(self):
+        self._update_miss(
+            "stats_upgrade",
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            config.AI_STATS_UPGRADE_MISS_STEP,
+            config.AI_STATS_UPGRADE_MISS_WINDOW,
+        )
+
+    def update_box_confidence(self, confidence):
+        self._update_threshold(
+            "box",
+            confidence,
+            config.AI_BOX_THRESHOLD_MIN,
+            config.AI_BOX_THRESHOLD_MAX,
+        )
+
+    def update_box_miss(self):
+        self._update_miss(
+            "box",
+            config.AI_BOX_THRESHOLD_MIN,
+            config.AI_BOX_MISS_STEP,
+            config.AI_BOX_MISS_WINDOW,
+        )
+
+    def reset(self):
+        self.red_icon_threshold = config.RED_ICON_THRESHOLD
+        self.new_level_threshold = config.NEW_LEVEL_THRESHOLD
+        self.new_level_red_icon_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        self.upgrade_station_threshold = config.UPGRADE_STATION_THRESHOLD
+        self.stats_upgrade_threshold = config.STATS_RED_ICON_THRESHOLD
+        self.box_threshold = config.BOX_THRESHOLD
+        for key in self._miss_counts:
+            self._miss_counts[key] = 0
+        self._persist(force=True)
+        logger.info("VisionOptimizer reset to defaults")
+
+    def apply_persisted_state(self, state):
+        if not state:
+            return
+        clamps = {
+            "red_icon_threshold": (
+                config.AI_RED_ICON_THRESHOLD_MIN,
+                config.AI_RED_ICON_THRESHOLD_MAX,
+            ),
+            "new_level_threshold": (
+                config.AI_NEW_LEVEL_THRESHOLD_MIN,
+                config.AI_NEW_LEVEL_THRESHOLD_MAX,
+            ),
+            "new_level_red_icon_threshold": (
+                config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+                config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX,
+            ),
+            "upgrade_station_threshold": (
+                config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+                config.AI_UPGRADE_STATION_THRESHOLD_MAX,
+            ),
+            "stats_upgrade_threshold": (
+                config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+                config.AI_STATS_UPGRADE_THRESHOLD_MAX,
+            ),
+            "box_threshold": (
+                config.AI_BOX_THRESHOLD_MIN,
+                config.AI_BOX_THRESHOLD_MAX,
+            ),
+        }
+        for key, (minimum, maximum) in clamps.items():
+            if key not in state:
+                continue
+            if key == "red_icon_threshold":
+                bootstrap_max = float(getattr(config, "AI_RED_ICON_BOOTSTRAP_MAX", maximum))
+                maximum = min(maximum, bootstrap_max)
+            value = float(state[key])
+            clamped = max(minimum, min(maximum, value))
+            if clamped != value:
+                logger.info("Clamped persisted %s from %.4f to %.4f", key, value, clamped)
+            setattr(self, key, clamped)
+
+    def _persist(self, force=False):
+        if not self.persistence:
+            return
+        state = {
+            "red_icon_threshold": self.red_icon_threshold,
+            "new_level_threshold": self.new_level_threshold,
+            "new_level_red_icon_threshold": self.new_level_red_icon_threshold,
+            "upgrade_station_threshold": self.upgrade_station_threshold,
+            "stats_upgrade_threshold": self.stats_upgrade_threshold,
+            "box_threshold": self.box_threshold,
+        }
+        self.persistence.save({key: float(value) for key, value in state.items()}, force=force)
+
+
+class HistoricalLearner:
+    def __init__(self, bot, persistence=None):
+        self.bot = bot
+        self.persistence = persistence
+        self.enabled = config.AI_LEARNING_ENABLED
+        self.interval = max(0.01, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
+        self.pair_window = max(2, int(getattr(config, "AI_LEARNING_PAIR_WINDOW", 2)))
+        self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
+        self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
+        self.top_k = max(1, int(getattr(config, "AI_LEARNING_PROFILE_BLEND_TOP_K", 3)))
+        self.min_improvement_ratio = max(
+            0.0,
+            float(getattr(config, "AI_LEARNING_MIN_IMPROVEMENT_RATIO", 0.03)),
+        )
+        self.apply_cooldown = max(0.0, float(getattr(config, "AI_LEARNING_APPLY_COOLDOWN", 1.2)))
+        self._last_apply_time = 0.0
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._records = []
+        self._total_completions = 0
+        self._last_pair_processed = 0
+        self._last_batch_processed = 0
+
+        persisted = self.persistence.load() if self.persistence else {}
+        if persisted:
+            self._records = list(persisted.get("records", []))[-100:]
+            self._total_completions = int(persisted.get("total_completions", len(self._records)))
+            self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
+            self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
+            self._tuned_behavior = persisted.get("tuned_behavior", {})
+
+            if self._tuned_behavior:
+                logger.info("Historical learner applying persisted behavior profile")
+                self.bot.apply_learned_behavior(self._tuned_behavior, reason="persisted")
+
+            max_pair_processed = self._total_completions // self.pair_window
+            max_batch_processed = self._total_completions // self.batch_window
+            self._last_pair_processed = min(self._last_pair_processed, max_pair_processed)
+            self._last_batch_processed = min(self._last_batch_processed, max_batch_processed)
+        else:
+            self._tuned_behavior = {}
+
+    def start(self):
+        if not self.enabled:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="historical_learner", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=config.AI_LEARNING_THREAD_JOIN_TIMEOUT)
+        self._persist()
+
+    def record_completion(self, time_spent, source):
+        if not self.enabled or time_spent <= 0:
+            return
+        snapshot = self.bot.get_runtime_behavior_snapshot()
+        record = {
+            "timestamp": time.time(),
+            "time_spent": float(time_spent),
+            "source": source,
+            "behavior": snapshot,
+        }
+        with self._lock:
+            self._records.append(record)
+            self._records = self._records[-config.AI_LEARNING_RECORDS_LIMIT:]
+            self._total_completions += 1
+        self._persist()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self._run_learning_cycle()
+            except Exception:
+                logger.exception("Historical learner cycle failed; continuing")
+            time.sleep(max(0.01, self.interval))
+
+    def _run_learning_cycle(self):
+        with self._lock:
+            records = list(self._records)
+            total_completions = int(self._total_completions)
+
+        if self._is_apply_cooldown_active():
+            self._persist()
+            return
+
+        if (
+            total_completions >= self.pair_window
+            and total_completions // self.pair_window > self._last_pair_processed
+        ):
+            pair_records = records[-self.pair_window:]
+            profile = self._build_profile(pair_records)
+            self._apply_profile_if_improved(profile, pair_records, f"pair-{self.pair_window}")
+            self._last_pair_processed = total_completions // self.pair_window
+
+        if self._is_apply_cooldown_active():
+            self._persist()
+            return
+
+        if (
+            total_completions >= self.batch_window
+            and total_completions // self.batch_window > self._last_batch_processed
+        ):
+            batch_records = records[-self.batch_window:]
+            profile = self._build_profile(batch_records)
+            self._apply_profile_if_improved(profile, batch_records, f"batch-{self.batch_window}")
+            self._last_batch_processed = total_completions // self.batch_window
+
+        self._persist()
+
+    def _is_apply_cooldown_active(self):
+        if self.apply_cooldown <= 0:
+            return False
+        return (time.monotonic() - self._last_apply_time) < self.apply_cooldown
+
+    def _build_profile(self, records):
+        valid = [
+            record
+            for record in records
+            if record.get("time_spent", 0) > 0 and record.get("behavior")
+        ]
+        if not valid:
+            return None
+        ranked = sorted(valid, key=lambda item: item.get("time_spent", float("inf")))
+        top = ranked[: self.top_k]
+        profile = {
+            "click_delay": 0.0,
+            "move_delay": 0.0,
+            "upgrade_click_interval": 0.0,
+            "search_interval": 0.0,
+        }
+        for record in top:
+            behavior = record.get("behavior") or {}
+            for key in profile:
+                profile[key] += float(behavior.get(key, 0.0))
+        count = float(len(top))
+        return {key: value / count for key, value in profile.items()}
+
+    def _apply_profile_if_improved(self, profile, records, label):
+        if not profile or not records:
+            return
+        durations = [
+            record.get("time_spent", 0.0)
+            for record in records
+            if record.get("time_spent", 0.0) > 0
+        ]
+        if not durations:
+            return
+        best_time = min(durations)
+        avg_time = sum(durations) / len(durations)
+        if avg_time <= 0:
+            return
+        improvement_ratio = (avg_time - best_time) / avg_time
+        if improvement_ratio < self.min_improvement_ratio:
+            return
+        self._apply_best_record({"behavior": profile, "time_spent": best_time}, label)
+        self._last_apply_time = time.monotonic()
+
+    def _ema(self, current, target):
+        return (1 - self.ema_alpha) * current + self.ema_alpha * target
+
+    def _clamp(self, value, minimum, maximum):
+        return max(minimum, min(maximum, value))
+
+    def _apply_best_record(self, record, label):
+        behavior = record.get("behavior") or {}
+        if not behavior:
+            return
+
+        current = self.bot.get_runtime_behavior_snapshot()
+        tuned = {}
+        keys = ("click_delay", "move_delay", "upgrade_click_interval", "search_interval")
+        for key in keys:
+            if key not in behavior or key not in current:
+                continue
+            tuned[key] = self._ema(float(current[key]), float(behavior[key]))
+
+        tuned["click_delay"] = self._clamp(
+            tuned.get("click_delay", current["click_delay"]),
+            config.AI_LEARNING_MIN_CLICK_DELAY,
+            config.AI_LEARNING_MAX_CLICK_DELAY,
+        )
+        tuned["move_delay"] = self._clamp(
+            tuned.get("move_delay", current["move_delay"]),
+            config.AI_LEARNING_MIN_MOVE_DELAY,
+            config.AI_LEARNING_MAX_MOVE_DELAY,
+        )
+        tuned["upgrade_click_interval"] = self._clamp(
+            tuned.get("upgrade_click_interval", current["upgrade_click_interval"]),
+            config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
+            config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
+        )
+        tuned["search_interval"] = self._clamp(
+            tuned.get("search_interval", current["search_interval"]),
+            config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+            config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+        )
+
+        self._tuned_behavior = tuned
+        self.bot.apply_learned_behavior(tuned, reason=label, best_time=record.get("time_spent", 0.0))
+
+    def _persist(self, force=False):
+        if not self.persistence:
+            return
+        with self._lock:
+            state = {
+                "records": self._records[-config.AI_LEARNING_RECORDS_LIMIT:],
+                "total_completions": self._total_completions,
+                "last_pair_processed": self._last_pair_processed,
+                "last_batch_processed": self._last_batch_processed,
+                "tuned_behavior": self._tuned_behavior,
+            }
+        self.persistence.save(state, force=force)
+
+    def reset(self):
+        with self._lock:
+            logger.info("HistoricalLearner: Resetting historical data and tuned behavior.")
+            self._records = []
+            self._total_completions = 0
+            self._last_pair_processed = 0
+            self._last_batch_processed = 0
+            self._tuned_behavior = {}
+            self._last_apply_time = 0.0
+
+            self._persist(force=True)
+
+            if self.bot and hasattr(self.bot, "apply_learned_behavior"):
+                self.bot.apply_learned_behavior({}, reason="reset")
+
+
+class OscillatingSearcher:
+    """
+    Refactored Algorithm Engine: Implements the strictly incremental Oscillating Search.
+    Follows a multi-step pattern (UP then DOWN) for each widening cycle with
+    precise settle-and-scan synchronization.
+    """
+
+    def __init__(self, bot: Any):
+        self.bot = bot
+        self.max_cycles = getattr(config, "MAX_SCROLL_CYCLES", 15)
+        self.scroll_increment = getattr(config, "SCROLL_INCREMENT_STEP", 1)
+        self.settle_duration = getattr(config, "POST_SCROLL_SETTLE", 0.45)
+
+    def execute_cycle(
+        self,
+        check_priority: Callable,
+        check_main_target: Callable,
+        check_fallbacks: Optional[Callable] = None,
+    ) -> Optional[Any]:
+        logger.info(f"[Search] Initializing Incremental Search (Limit: {self.max_cycles} cycles)")
+
+        initial_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
+        if initial_hit:
+            return initial_hit
+
+        for cycle_index in range(1, self.max_cycles + 1):
+            steps_in_leg = cycle_index * self.scroll_increment
+
+            logger.info(f"[Search] Cycle {cycle_index}: Starting DOWN leg ({steps_in_leg} steps)")
+            target_found = self._run_step_sequence(
+                steps_in_leg,
+                1,
+                check_priority,
+                check_main_target,
+                check_fallbacks,
+            )
+            if target_found:
+                return target_found
+
+            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.45))
+            boundary_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
+            if boundary_hit:
+                return boundary_hit
+
+            logger.info(f"[Search] Cycle {cycle_index}: Starting UP leg ({steps_in_leg} steps)")
+            target_found = self._run_step_sequence(
+                steps_in_leg,
+                -1,
+                check_priority,
+                check_main_target,
+                check_fallbacks,
+            )
+            if target_found:
+                return target_found
+
+            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.45))
+            cycle_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
+            if cycle_hit:
+                return cycle_hit
+
+        logger.warning(f"[Search] Logic exhausted after {self.max_cycles} cycles.")
+        return None
+
+    def _run_step_sequence(
+        self,
+        count: int,
+        direction: int,
+        p_check: Callable,
+        m_check: Callable,
+        f_check: Optional[Callable],
+    ) -> Optional[Any]:
+        for _ in range(count):
+            if not self.bot.running:
+                return None
+
+            if not self.perform_scroll(direction):
+                return None
+
+            settle_wait = self.settle_duration + getattr(config, "SCROLL_INTERVAL_PAUSE", 0.4)
+            self.bot.sleep(settle_wait)
+
+            red_interrupt = self.bot.check_intra_scroll_red_interrupt()
+            if red_interrupt:
+                return red_interrupt
+
+            hit = self._perform_vision_pass(p_check, m_check, f_check)
+            if hit:
+                return hit
+        return None
+
+    def _perform_vision_pass(
+        self,
+        p_check: Callable,
+        m_check: Callable,
+        f_check: Optional[Callable],
+    ) -> Optional[Any]:
+        priority_hit = p_check()
+        if priority_hit:
+            return priority_hit
+
+        main_hit = m_check()
+        if main_hit:
+            return main_hit
+
+        if f_check:
+            fallback_hit = f_check()
+            if fallback_hit:
+                return fallback_hit
+
+        return None
+
+    def perform_scroll(
+        self,
+        direction: Any,
+        distance_ratio: Optional[float] = None,
+        duration: Optional[float] = None,
+    ):
+        dir_int = self._map_direction(direction)
+        start_x, start_y = getattr(config, "SCROLL_START_POS", (180, 390))
+
+        ratio = distance_ratio or getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
+        pixel_distance = int(getattr(config, "SCROLL_PIXEL_STEP", 175) * ratio)
+        end_y = start_y - (pixel_distance * dir_int)
+
+        scroll_duration = duration if duration is not None else getattr(config, "SCROLL_DURATION", 0.42)
+
+        success = self.bot.mouse_controller.drag(
+            start_x,
+            start_y,
+            start_x,
+            end_y,
+            duration=scroll_duration,
+            relative=True,
+            interrupt_check=lambda: self.bot.check_critical_interrupts(raise_exception=False),
+        )
+
+        if not success:
+            return False
+
+        if hasattr(self.bot, "_clear_capture_cache"):
+            self.bot._clear_capture_cache()
+
+        if hasattr(self.bot, "scroll_offset_units"):
+            self.bot.scroll_offset_units -= ratio * dir_int
+        return True
+
+    def _map_direction(self, direction: Any) -> int:
+        if isinstance(direction, int):
+            return direction
+        return {"DOWN": -1, "UP": 1}.get(str(direction).upper(), 1)
+
+
+class WorldCoordTracker:
+    """
+    Dynamic ROI Tracker: Tracks asset positions in world-coordinates
+    to calculate precise search ROIs as the screen scrolls.
+    """
+
+    def __init__(self):
+        self.tracked_assets = {}
+        self.next_id = 0
+
+    def register_asset(self, screen_x, screen_y, scroll_y, asset_type):
+        world_x = screen_x
+        world_y = screen_y + scroll_y
+        asset_id = self.next_id
+        self.tracked_assets[asset_id] = (world_x, world_y, asset_type)
+        self.next_id += 1
+        return asset_id
+
+    def get_screen_roi(self, asset_id, scroll_y, padding=50):
+        if asset_id not in self.tracked_assets:
+            return None
+        world_x, world_y, _ = self.tracked_assets[asset_id]
+        screen_x = world_x
+        screen_y = world_y - scroll_y
+
+        x_min = max(0, screen_x - padding)
+        x_max = screen_x + padding
+        y_min = max(0, screen_y - padding)
+        y_max = screen_y + padding
+
+        return (int(x_min), int(x_max), int(y_min), int(y_max))
+
+
+class ScrollHandler:
+    """
+    Navigation Handler: Exclusively controls all screen movement.
+    Maintains the current vertical scroll state and enforces smooth, steady linear glides.
+    """
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.mouse = bot.mouse_controller
+        self.current_scroll_y = 0
+
+    def scroll(self, distance: int, direction: str = "DOWN", duration: float = None):
+        if duration is None:
+            duration = getattr(config, "SCROLL_DURATION", 0.3)
+
+        start_pos = getattr(config, "SCROLL_START_POS", (180, 390))
+        start_x, start_y = start_pos
+
+        dir_mult = 1 if direction.upper() == "UP" else -1
+        end_y = start_y - (distance * dir_mult)
+
+        logger.info(f"[Scroll] Linear Glide: {distance}px {direction} (World Y Offset: {self.current_scroll_y})")
+
+        success = self.mouse.drag(
+            start_x,
+            start_y,
+            start_x,
+            end_y,
+            duration=duration,
+            relative=True,
+            interrupt_check=lambda: self.bot.check_critical_interrupts(raise_exception=False),
+        )
+
+        if success:
+            self.current_scroll_y += distance * dir_mult
+            self.bot.sleep(getattr(config, "SCROLL_SETTLE_DELAY", 0.15))
+
+        return success
+
+    def reset_offset(self):
+        self.current_scroll_y = 0
+
+
+class BaseHandler:
+    def __init__(self, bot, scroll_handler: ScrollHandler):
+        self.bot = bot
+        self.scroll_handler = scroll_handler
+        self.image_matcher = bot.image_matcher
+        self.templates = bot.templates
+        self.tracker = WorldCoordTracker()
+
+    def verify_bgr_match(self, screenshot, x, y, template_name, threshold=None):
+        if template_name not in self.templates:
+            return False
+
+        template, mask = self.templates[template_name]
+        threshold = threshold or getattr(config, "VERIFY_THRESHOLD", 0.96)
+
+        padding = getattr(config, "VERIFY_PADDING", 32)
+        x1, y1 = max(0, x - padding), max(0, y - padding)
+        x2 = min(screenshot.shape[1], x + padding)
+        y2 = min(screenshot.shape[0], y + padding)
+
+        roi = screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+
+        found, confidence, rx, ry = self.image_matcher.find_template(
+            roi,
+            template,
+            mask=mask,
+            threshold=threshold,
+            template_name=f"{template_name}-verify",
+        )
+
+        if found and abs(rx + x1 - x) < 5 and abs(ry + y1 - y) < 5:
+            return True
+        return False
+
+
+class RedIconHandler(BaseHandler):
+    """Isolated module for Red Icon processing."""
+
+    def __init__(self, bot, scroll_handler):
+        super().__init__(bot, scroll_handler)
+        self.red_icon_templates = [
+            "RedIcon",
+            "RedIcon2",
+            "RedIcon3",
+            "RedIcon4",
+            "RedIcon5",
+            "RedIcon6",
+            "RedIcon7",
+            "RedIcon8",
+            "RedIcon9",
+            "RedIcon10",
+            "RedIcon11",
+            "RedIcon12",
+            "RedIcon13",
+            "RedIcon14",
+            "RedIcon15",
+            "RedIconNoBG",
+        ]
+        self.active_targets = []
+
+    def process(self, screenshot: np.ndarray):
+        scroll_y = self.scroll_handler.current_scroll_y
+
+        if self._search_tracked_targets(screenshot, scroll_y):
+            return True
+
+        max_y = getattr(config, "MAX_SEARCH_Y", 660)
+        bands = [(0, 220), (220, 440), (440, max_y)]
+
+        for y_start, y_end in bands:
+            if self._scan_roi(screenshot, (0, screenshot.shape[1], y_start, y_end)):
+                return True
+        return False
+
+    def _search_tracked_targets(self, screenshot, scroll_y):
+        still_active = []
+        found_any = False
+
+        self.active_targets.sort(key=lambda target: target[1] - scroll_y)
+
+        for wx, wy, name in self.active_targets:
+            sx, sy = wx, wy - scroll_y
+
+            if 10 <= sy < getattr(config, "MAX_SEARCH_Y", 660) - 10:
+                roi_box = (
+                    max(0, sx - 45),
+                    min(screenshot.shape[1], sx + 45),
+                    max(0, sy - 45),
+                    min(screenshot.shape[0], sy + 45),
+                )
+
+                if not found_any and self._scan_roi(screenshot, roi_box):
+                    found_any = True
+                    continue
+                still_active.append((wx, wy, name))
+            elif -500 < sy < 1500:
+                still_active.append((wx, wy, name))
+
+        self.active_targets = still_active
+        return found_any
+
+    def _scan_roi(self, screenshot, roi_box):
+        x1, x2, y1, y2 = [int(value) for value in roi_box]
+        roi = screenshot[y1:y2, x1:x2]
+        if roi.size == 0:
+            return False
+
+        threshold = getattr(config, "RED_ICON_THRESHOLD", 0.94)
+        scroll_y = self.scroll_handler.current_scroll_y
+
+        found_icons = []
+        for name in self.red_icon_templates:
+            if name not in self.templates:
+                continue
+            template, mask = self.templates[name]
+
+            matches = self.image_matcher.find_all_templates(
+                roi,
+                template,
+                mask=mask,
+                threshold=threshold,
+            )
+
+            for conf, rx, ry in matches:
+                abs_x, abs_y = rx + x1, ry + y1
+                if self.bot._passes_red_color_gate(screenshot, abs_x, abs_y)[0]:
+                    found_icons.append((conf, abs_x, abs_y, name))
+
+        if not found_icons:
+            return False
+
+        found_icons.sort(key=lambda item: item[0], reverse=True)
+        for conf, x, y, name in found_icons:
+            if self.verify_bgr_match(screenshot, x, y, name):
+                self._add_to_tracker(x, y, scroll_y, name)
+
+                logger.info(f"[RedIcon] Whitelist Verified at ({x}, {y})")
+                if self.bot.mouse_controller.click(x, y, relative=True):
+                    return True
+        return False
+
+    def _add_to_tracker(self, sx, sy, scroll_y, name):
+        wx, wy = sx, sy + scroll_y
+        for twx, twy, tname in self.active_targets:
+            if abs(twx - wx) < 30 and abs(twy - wy) < 30:
+                return
+        self.active_targets.append((wx, wy, name))
+
+
+class UpgradeStationHandler(BaseHandler):
+    """Isolated module for Upgrade Station processing."""
+
+    def process(self, screenshot: np.ndarray):
+        search_roi = (0, screenshot.shape[1], 250, getattr(config, "MAX_SEARCH_Y", 660))
+        x1, x2, y1, y2 = search_roi
+        roi = screenshot[y1:y2, x1:x2]
+
+        stations = self.bot._find_upgrade_stations(roi)
+        for conf, rel_x, rel_y in stations:
+            abs_x, abs_y = rel_x + x1, rel_y + y1
+
+            if self.verify_bgr_match(screenshot, abs_x, abs_y, "upgradeStation"):
+                logger.info(f"[UpgradeStation] Whitelist Verified at ({abs_x}, {abs_y})")
+                if self.bot.mouse_controller.click(abs_x, abs_y, relative=True):
+                    return True
+        return False
+
+
+class BoxHandler(BaseHandler):
+    """Isolated module for Box processing."""
+
+    def process(self, screenshot: np.ndarray):
+        search_roi = (0, screenshot.shape[1], 150, getattr(config, "MAX_SEARCH_Y", 660))
+        x1, x2, y1, y2 = search_roi
+        roi = screenshot[y1:y2, x1:x2]
+
+        boxes = self.bot._find_boxes(roi)
+        for conf, rel_x, rel_y in boxes:
+            abs_x, abs_y = rel_x + x1, rel_y + y1
+
+            for index in range(1, 6):
+                if self.verify_bgr_match(screenshot, abs_x, abs_y, f"box{index}"):
+                    logger.info(f"[Box] Whitelist Verified: box{index} at ({abs_x}, {abs_y})")
+                    if self.bot.mouse_controller.click(abs_x, abs_y, relative=True):
+                        return True
+                    break
+        return False
+
+
 class LevelCompleteInterrupt(Exception):
     """Raised when a new level is detected to immediately halt standard gameplay."""
-    pass
 
 
 class BotStoppedInterrupt(Exception):
     """Raised when the bot is stopped to immediately halt all actions."""
-    pass
 
-
-from optimization import AdaptiveTuner, VisionOptimizer, VisionPersistence, HistoricalLearner
 
 class EatventureBot:
     def __init__(self):

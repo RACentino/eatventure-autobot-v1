@@ -1,7 +1,16 @@
-import cv2
-import numpy as np
+import argparse
+import json
 import logging
 import os
+import re
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import cv2
+import numpy as np
+
 import config
 
 logger = logging.getLogger(__name__)
@@ -429,3 +438,699 @@ class ImageMatcher:
                 filtered.append((conf, x, y, w, h))
         
         return filtered
+
+
+class AssetScanner:
+    def __init__(self, image_matcher, max_workers=None):
+        self.image_matcher = image_matcher
+        cpu_count = os.cpu_count() or 1
+        self.max_workers = max_workers or min(32, cpu_count + 4)
+        self._template_cache = {}
+        self._asset_index_cache = {}
+        self._cache_lock = threading.RLock()
+
+    def scan(self, assets_dir, required_templates=None):
+        assets_path = Path(assets_dir)
+        if not assets_path.exists():
+            logger.error(f"Assets directory not found: {assets_path}")
+            return {}
+
+        required_set = set(required_templates or [])
+        template_files = self._collect_template_files(assets_path, required_set)
+
+        templates = {}
+        if not template_files:
+            return templates
+
+        if len(template_files) == 1:
+            template_name, template_data = self._load_template(template_files[0])
+            if template_data is not None:
+                templates[template_name] = template_data
+                logger.info(f"Loaded template: {template_name}")
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(self._load_template, template_file): template_file
+                    for template_file in template_files
+                }
+                for future in as_completed(futures):
+                    template_file = futures[future]
+                    try:
+                        template_name, template_data = future.result()
+                    except Exception as exc:
+                        logger.error(f"Failed to load template {template_file}: {exc}")
+                        continue
+
+                    if template_data is None:
+                        continue
+
+                    templates[template_name] = template_data
+                    logger.info(f"Loaded template: {template_name}")
+
+        if required_set:
+            missing = sorted(required_set.difference(templates.keys()))
+            if missing:
+                logger.warning(f"Missing {len(missing)} required templates: {', '.join(missing)}")
+
+        return templates
+
+    def _normalize_key(self, name):
+        return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+    def _collect_template_files(self, assets_path, required_set):
+        indexed = self._index_assets_dir(assets_path)
+        if required_set:
+            template_files = []
+            for template_name in required_set:
+                indexed_path = indexed.get(template_name.lower())
+                if indexed_path is None:
+                    indexed_path = indexed.get(self._normalize_key(template_name))
+                if indexed_path is not None:
+                    template_files.append(indexed_path)
+        else:
+            template_files = list(indexed.values())
+        template_files = sorted(set(template_files), key=lambda path: str(path).lower())
+        return template_files
+
+    def _index_assets_dir(self, assets_path):
+        assets_key = str(assets_path)
+        try:
+            mtime = assets_path.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        with self._cache_lock:
+            cached = self._asset_index_cache.get(assets_key)
+            if cached and cached["mtime"] == mtime:
+                return cached["index"]
+
+        indexed = {}
+        for template_path in assets_path.rglob("*"):
+            if not template_path.is_file() or template_path.suffix.lower() != ".png":
+                continue
+            stem = template_path.stem
+            indexed.setdefault(stem.lower(), template_path)
+            indexed.setdefault(self._normalize_key(stem), template_path)
+
+        with self._cache_lock:
+            self._asset_index_cache[assets_key] = {"mtime": mtime, "index": indexed}
+        return indexed
+
+    def _load_template(self, template_file):
+        template_name = template_file.stem
+        try:
+            mtime = template_file.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        key = str(template_file)
+        with self._cache_lock:
+            cached = self._template_cache.get(key)
+            if cached and cached["mtime"] == mtime:
+                return template_name, cached["data"]
+
+        template_img = self.image_matcher.load_template(template_file)
+        with self._cache_lock:
+            self._template_cache[key] = {"mtime": mtime, "data": template_img}
+        return template_name, template_img
+
+
+def parse_hsv_triplet(value):
+    parts = [int(part.strip()) for part in value.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("HSV bounds must be comma-separated triplets")
+    h, s, v = parts
+    if not (0 <= h <= 179 and 0 <= s <= 255 and 0 <= v <= 255):
+        raise argparse.ArgumentTypeError("HSV bounds must stay within OpenCV ranges")
+    return h, s, v
+
+
+def apply_probe_overrides(args):
+    overrides = {
+        "RED_ICON_THRESHOLD": args.threshold,
+        "RED_ICON_PIXEL_THRESHOLD": args.pixel_threshold,
+        "RED_ICON_COLOR_MIN_RATIO": args.ratio_threshold,
+        "RED_ICON_COLOR_MAX_RATIO": args.max_ratio_threshold,
+        "RED_ICON_COLOR_MIN_MEAN": args.mean_threshold,
+        "RED_ICON_TEMPLATE_MIN_COVERAGE": args.coverage_threshold,
+        "RED_ICON_TEMPLATE_MIN_PRECISION": args.precision_threshold,
+        "RED_ICON_TEMPLATE_MIN_RECALL": args.recall_threshold,
+        "RED_ICON_TEMPLATE_MIN_IOU": args.iou_threshold,
+        "RED_ICON_TEMPLATE_COLOR_SIMILARITY": args.color_similarity_threshold,
+        "RED_HSV_LOWER1": args.red_hsv_lower1,
+        "RED_HSV_UPPER1": args.red_hsv_upper1,
+        "RED_HSV_LOWER2": args.red_hsv_lower2,
+        "RED_HSV_UPPER2": args.red_hsv_upper2,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            setattr(config, key, value)
+
+
+def load_red_templates(assets_dir, matcher):
+    templates = []
+    for path in sorted(Path(assets_dir).glob("RedIcon*.png")):
+        template, mask = matcher.load_template(path)
+        signature = matcher.build_red_template_signature(template, mask=mask)
+        templates.append((path.stem, template, mask, signature))
+    return templates
+
+
+def merge_detection(detections, buckets, x, y, template_name, confidence, metrics):
+    proximity = config.RED_ICON_MERGE_PROXIMITY
+    bucket_size = config.RED_ICON_MERGE_BUCKET_SIZE
+    bucket_x = x // bucket_size
+    bucket_y = y // bucket_size
+    payload = {
+        "template": template_name,
+        "confidence": float(confidence),
+        "pixel_count": int(metrics["pixel_count"]),
+        "red_ratio": float(metrics["red_ratio"]),
+        "red_mean": float(metrics["red_mean"]),
+        "coverage": float(metrics.get("coverage", 0.0)),
+        "precision": float(metrics.get("precision", 0.0)),
+        "recall": float(metrics.get("recall", 0.0)),
+        "iou": float(metrics.get("iou", 0.0)),
+        "color_similarity": float(metrics.get("color_similarity", 0.0)),
+    }
+
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for px, py in buckets.get((bucket_x + dx, bucket_y + dy), []):
+                if abs(x - px) < proximity and abs(y - py) < proximity:
+                    detections[(px, py)].append(payload)
+                    return
+
+    detections[(x, y)] = [payload]
+    buckets.setdefault((bucket_x, bucket_y), []).append((x, y))
+
+
+def passes_red_gate(matcher, frame, x, y):
+    metrics = matcher.analyze_red_region(
+        frame,
+        x,
+        y,
+        size=config.RED_ICON_COLOR_SAMPLE_SIZE,
+        show_mask=False,
+    )
+    if metrics["pixel_count"] < config.RED_ICON_PIXEL_THRESHOLD:
+        return False, "pixel", metrics
+    if metrics["red_ratio"] > config.RED_ICON_COLOR_MAX_RATIO:
+        return False, "dominance", metrics
+    if (
+        metrics["red_ratio"] < config.RED_ICON_COLOR_MIN_RATIO
+        or metrics["red_mean"] < config.RED_ICON_COLOR_MIN_MEAN
+    ):
+        return False, "dominance", metrics
+    return True, "pass", metrics
+
+
+def passes_template_gate(matcher, frame, x, y, template, mask, signature):
+    metrics = matcher.analyze_red_template_candidate(
+        frame,
+        x,
+        y,
+        template,
+        mask=mask,
+        signature=signature,
+        max_offset=config.RED_ICON_TEMPLATE_VERIFY_MAX_OFFSET,
+    )
+    passes = (
+        metrics["coverage"] >= config.RED_ICON_TEMPLATE_MIN_COVERAGE
+        and metrics["precision"] >= config.RED_ICON_TEMPLATE_MIN_PRECISION
+        and metrics["recall"] >= config.RED_ICON_TEMPLATE_MIN_RECALL
+        and metrics["iou"] >= config.RED_ICON_TEMPLATE_MIN_IOU
+        and metrics["color_similarity"] >= config.RED_ICON_TEMPLATE_COLOR_SIMILARITY
+    )
+    return passes, metrics
+
+
+def detect_red_icons(frame, matcher, templates, threshold, min_distance, max_y):
+    working = frame if max_y is None else frame[:max_y, :]
+    detections = {}
+    buckets = {}
+    stats = {
+        "raw_template_hits": 0,
+        "pixel_rejects": 0,
+        "dominance_rejects": 0,
+        "template_rejects": 0,
+        "accepted_candidates": 0,
+        "final_detections": [],
+    }
+
+    for template_name, template, mask, signature in templates:
+        hits = matcher.find_all_templates(
+            working,
+            template,
+            mask=mask,
+            threshold=threshold,
+            min_distance=min_distance,
+            template_name=template_name,
+        )
+        stats["raw_template_hits"] += len(hits)
+
+        for confidence, x, y in hits:
+            passed, reason, metrics = passes_red_gate(matcher, working, x, y)
+            if not passed:
+                stats[f"{reason}_rejects"] += 1
+                continue
+            passed_template, template_metrics = passes_template_gate(
+                matcher,
+                working,
+                x,
+                y,
+                template,
+                mask,
+                signature,
+            )
+            if not passed_template:
+                stats["template_rejects"] += 1
+                continue
+            stats["accepted_candidates"] += 1
+            merge_detection(
+                detections,
+                buckets,
+                x,
+                y,
+                template_name,
+                confidence,
+                {
+                    **metrics,
+                    "coverage": template_metrics["coverage"],
+                    "precision": template_metrics["precision"],
+                    "recall": template_metrics["recall"],
+                    "iou": template_metrics["iou"],
+                    "color_similarity": template_metrics["color_similarity"],
+                },
+            )
+
+    for (x, y), matches in detections.items():
+        best = max(matches, key=lambda item: item["confidence"])
+        stats["final_detections"].append(
+            {
+                "x": int(x),
+                "y": int(y),
+                "confidence": round(float(best["confidence"]), 4),
+                "pixel_count": int(max(item["pixel_count"] for item in matches)),
+                "red_ratio": round(float(max(item["red_ratio"] for item in matches)), 4),
+                "red_mean": round(float(max(item["red_mean"] for item in matches)), 2),
+                "coverage": round(float(max(item["coverage"] for item in matches)), 4),
+                "precision": round(float(max(item["precision"] for item in matches)), 4),
+                "recall": round(float(max(item["recall"] for item in matches)), 4),
+                "iou": round(float(max(item["iou"] for item in matches)), 4),
+                "color_similarity": round(float(max(item["color_similarity"] for item in matches)), 4),
+                "templates": sorted({item["template"] for item in matches}),
+            }
+        )
+
+    stats["final_detections"].sort(key=lambda item: item["confidence"], reverse=True)
+    return stats
+
+
+def iter_probe_frames(input_path, frame_step, max_frames):
+    path = Path(input_path)
+    if path.is_dir():
+        yielded = 0
+        for image_path in sorted(path.glob("*")):
+            if image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp"}:
+                continue
+            frame = cv2.imread(str(image_path))
+            if frame is None:
+                continue
+            yield {"label": image_path.name, "frame": frame}
+            yielded += 1
+            if max_frames is not None and yielded >= max_frames:
+                return
+        return
+
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+        frame = cv2.imread(str(path))
+        if frame is not None:
+            yield {"label": path.name, "frame": frame}
+        return
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise FileNotFoundError(f"Unable to open input: {path}")
+
+    yielded = 0
+    index = 0
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        if index % frame_step == 0:
+            yield {"label": f"{path.name}:frame-{index}", "frame": frame}
+            yielded += 1
+            if max_frames is not None and yielded >= max_frames:
+                break
+        index += 1
+    capture.release()
+
+
+def build_probe_parser(parser):
+    parser.description = "Probe red icon HSV and confidence settings on sample frames"
+    parser.add_argument("--input", required=True, help="Image, directory of images, or video to probe")
+    parser.add_argument(
+        "--assets-dir",
+        default=config.ASSETS_DIR,
+        help="Directory containing RedIcon*.png templates",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=config.RED_ICON_THRESHOLD,
+        help="Template confidence threshold",
+    )
+    parser.add_argument(
+        "--pixel-threshold",
+        type=int,
+        default=config.RED_ICON_PIXEL_THRESHOLD,
+        help="Minimum masked red pixel count",
+    )
+    parser.add_argument(
+        "--ratio-threshold",
+        type=float,
+        default=config.RED_ICON_COLOR_MIN_RATIO,
+        help="Minimum masked red dominance ratio",
+    )
+    parser.add_argument(
+        "--max-ratio-threshold",
+        type=float,
+        default=config.RED_ICON_COLOR_MAX_RATIO,
+        help="Maximum masked red dominance ratio",
+    )
+    parser.add_argument(
+        "--mean-threshold",
+        type=float,
+        default=config.RED_ICON_COLOR_MIN_MEAN,
+        help="Minimum masked red channel mean",
+    )
+    parser.add_argument(
+        "--coverage-threshold",
+        type=float,
+        default=config.RED_ICON_TEMPLATE_MIN_COVERAGE,
+        help="Minimum template-mask red coverage",
+    )
+    parser.add_argument(
+        "--precision-threshold",
+        type=float,
+        default=config.RED_ICON_TEMPLATE_MIN_PRECISION,
+        help="Minimum template-mask precision",
+    )
+    parser.add_argument(
+        "--recall-threshold",
+        type=float,
+        default=config.RED_ICON_TEMPLATE_MIN_RECALL,
+        help="Minimum template-mask recall",
+    )
+    parser.add_argument(
+        "--iou-threshold",
+        type=float,
+        default=config.RED_ICON_TEMPLATE_MIN_IOU,
+        help="Minimum template-mask IoU",
+    )
+    parser.add_argument(
+        "--color-similarity-threshold",
+        type=float,
+        default=config.RED_ICON_TEMPLATE_COLOR_SIMILARITY,
+        help="Minimum template color histogram correlation",
+    )
+    parser.add_argument(
+        "--red-hsv-lower1",
+        type=parse_hsv_triplet,
+        default=config.RED_HSV_LOWER1,
+        help="Low red lower HSV bound",
+    )
+    parser.add_argument(
+        "--red-hsv-upper1",
+        type=parse_hsv_triplet,
+        default=config.RED_HSV_UPPER1,
+        help="Low red upper HSV bound",
+    )
+    parser.add_argument(
+        "--red-hsv-lower2",
+        type=parse_hsv_triplet,
+        default=config.RED_HSV_LOWER2,
+        help="High red lower HSV bound",
+    )
+    parser.add_argument(
+        "--red-hsv-upper2",
+        type=parse_hsv_triplet,
+        default=config.RED_HSV_UPPER2,
+        help="High red upper HSV bound",
+    )
+    parser.add_argument("--frame-step", type=int, default=45, help="Video frame sampling interval")
+    parser.add_argument("--max-frames", type=int, default=8, help="Maximum sampled frames to analyze")
+    parser.add_argument(
+        "--max-y",
+        type=int,
+        default=config.MAX_SEARCH_Y,
+        help="Crop frames to this Y limit before detection",
+    )
+    parser.add_argument(
+        "--min-distance",
+        type=int,
+        default=config.RED_ICON_MIN_DISTANCE,
+        help="Minimum template match spacing",
+    )
+    parser.add_argument("--json-out", help="Optional path to write the analysis summary as JSON")
+
+
+def run_red_icon_probe_cli(argv=None):
+    parser = argparse.ArgumentParser()
+    build_probe_parser(parser)
+    args = parser.parse_args(argv)
+    apply_probe_overrides(args)
+
+    matcher = ImageMatcher(config.MATCH_THRESHOLD)
+    templates = load_red_templates(args.assets_dir, matcher)
+    if not templates:
+        raise FileNotFoundError(f"No RedIcon*.png templates found in {args.assets_dir}")
+
+    summary = {
+        "config": {
+            "threshold": config.RED_ICON_THRESHOLD,
+            "pixel_threshold": config.RED_ICON_PIXEL_THRESHOLD,
+            "ratio_threshold": config.RED_ICON_COLOR_MIN_RATIO,
+            "max_ratio_threshold": config.RED_ICON_COLOR_MAX_RATIO,
+            "mean_threshold": config.RED_ICON_COLOR_MIN_MEAN,
+            "coverage_threshold": config.RED_ICON_TEMPLATE_MIN_COVERAGE,
+            "precision_threshold": config.RED_ICON_TEMPLATE_MIN_PRECISION,
+            "recall_threshold": config.RED_ICON_TEMPLATE_MIN_RECALL,
+            "iou_threshold": config.RED_ICON_TEMPLATE_MIN_IOU,
+            "color_similarity_threshold": config.RED_ICON_TEMPLATE_COLOR_SIMILARITY,
+            "red_hsv_lower1": config.RED_HSV_LOWER1,
+            "red_hsv_upper1": config.RED_HSV_UPPER1,
+            "red_hsv_lower2": config.RED_HSV_LOWER2,
+            "red_hsv_upper2": config.RED_HSV_UPPER2,
+        },
+        "frames": [],
+    }
+
+    for frame_info in iter_probe_frames(args.input, args.frame_step, args.max_frames):
+        stats = detect_red_icons(
+            frame_info["frame"],
+            matcher,
+            templates,
+            threshold=config.RED_ICON_THRESHOLD,
+            min_distance=args.min_distance,
+            max_y=args.max_y,
+        )
+        stats["label"] = frame_info["label"]
+        summary["frames"].append(stats)
+
+    totals = {
+        "frame_count": len(summary["frames"]),
+        "raw_template_hits": sum(frame["raw_template_hits"] for frame in summary["frames"]),
+        "pixel_rejects": sum(frame["pixel_rejects"] for frame in summary["frames"]),
+        "dominance_rejects": sum(frame["dominance_rejects"] for frame in summary["frames"]),
+        "template_rejects": sum(frame["template_rejects"] for frame in summary["frames"]),
+        "accepted_candidates": sum(frame["accepted_candidates"] for frame in summary["frames"]),
+        "final_detections": sum(len(frame["final_detections"]) for frame in summary["frames"]),
+    }
+    summary["totals"] = totals
+
+    print(json.dumps(summary, indent=2))
+    if args.json_out:
+        output_path = Path(args.json_out)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return 0
+
+
+def load_opaque(path):
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None, None
+    if len(img.shape) == 3 and img.shape[2] == 4:
+        alpha = img[:, :, 3]
+        bgr = img[:, :, :3]
+        mask = alpha > 0
+    else:
+        bgr = img
+        mask = np.ones(img.shape[:2], dtype=bool)
+    return bgr, mask
+
+
+def test_red_icon_gate(bgr, opaque_mask):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+    lower1 = np.array(config.RED_HSV_LOWER1)
+    upper1 = np.array(config.RED_HSV_UPPER1)
+    lower2 = np.array(config.RED_HSV_LOWER2)
+    upper2 = np.array(config.RED_HSV_UPPER2)
+
+    mask1 = cv2.inRange(hsv, lower1, upper1)
+    mask2 = cv2.inRange(hsv, lower2, upper2)
+    combined = cv2.bitwise_or(mask1, mask2)
+
+    opaque_uint8 = opaque_mask.astype(np.uint8) * 255
+    combined = cv2.bitwise_and(combined, opaque_uint8)
+
+    red_count = cv2.countNonZero(combined)
+    total_opaque = int(np.sum(opaque_mask))
+    ratio = red_count / total_opaque if total_opaque > 0 else 0
+    threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 48)
+
+    return {
+        "red_pixels": red_count,
+        "total_opaque": total_opaque,
+        "ratio": ratio,
+        "passes_threshold": red_count >= threshold,
+        "threshold": threshold,
+    }
+
+
+def test_upgrade_station_gate(bgr, opaque_mask):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+
+    lower = np.array(getattr(config, "UPGRADE_STATION_HSV_LOWER", (80, 40, 180)))
+    upper = np.array(getattr(config, "UPGRADE_STATION_HSV_UPPER", (110, 210, 255)))
+
+    mask = cv2.inRange(hsv, lower, upper)
+
+    opaque_uint8 = opaque_mask.astype(np.uint8) * 255
+    mask = cv2.bitwise_and(mask, opaque_uint8)
+
+    cyan_count = cv2.countNonZero(mask)
+    total_opaque = int(np.sum(opaque_mask))
+    ratio = cyan_count / total_opaque if total_opaque > 0 else 0
+    min_ratio = float(getattr(config, "UPGRADE_STATION_HSV_MIN_RATIO", 0.15))
+
+    return {
+        "cyan_pixels": cyan_count,
+        "total_opaque": total_opaque,
+        "ratio": ratio,
+        "passes_ratio": ratio >= min_ratio,
+        "min_ratio": min_ratio,
+    }
+
+
+def run_hsv_gate_validation_cli(argv=None):
+    parser = argparse.ArgumentParser(description="Validate HSV color gates against the bot's asset images")
+    parser.add_argument(
+        "--assets-dir",
+        default=config.ASSETS_DIR,
+        help="Directory containing the asset PNGs to validate",
+    )
+    args = parser.parse_args(argv)
+
+    assets_dir = Path(args.assets_dir)
+    print("=" * 70)
+    print("HSV COLOR GATE VALIDATION")
+    print(f"Assets directory: {assets_dir}")
+    print("=" * 70)
+
+    print("\nRed Icon HSV Config:")
+    print(f"  Band 1: {config.RED_HSV_LOWER1} - {config.RED_HSV_UPPER1}")
+    print(f"  Band 2: {config.RED_HSV_LOWER2} - {config.RED_HSV_UPPER2}")
+    print(f"  Pixel Threshold: {config.RED_ICON_PIXEL_THRESHOLD}")
+
+    print("\nUpgrade Station HSV Config:")
+    print(f"  Range: {config.UPGRADE_STATION_HSV_LOWER} - {config.UPGRADE_STATION_HSV_UPPER}")
+    print(f"  Min Ratio: {config.UPGRADE_STATION_HSV_MIN_RATIO}")
+
+    passed = 0
+    failed = 0
+    total = 0
+
+    print(f"\n{'-' * 70}")
+    print("RED ICON ASSETS")
+    print(f"{'-' * 70}")
+
+    for path in sorted(assets_dir.glob("*.png")):
+        if not path.name.lower().startswith("redicon"):
+            continue
+
+        bgr, opaque_mask = load_opaque(path)
+        if bgr is None:
+            print(f"  SKIP {path.name} (could not load)")
+            continue
+
+        total += 1
+        result = test_red_icon_gate(bgr, opaque_mask)
+        status = "PASS" if result["passes_threshold"] else "FAIL"
+        if result["passes_threshold"]:
+            passed += 1
+        else:
+            failed += 1
+
+        print(
+            f"  [{status}] {path.name:25s}  red_px={result['red_pixels']:4d}/{result['total_opaque']:4d}  "
+            f"ratio={result['ratio']:.1%}  (threshold={result['threshold']})"
+        )
+
+    print(f"\n{'-' * 70}")
+    print("UPGRADE STATION ASSETS")
+    print(f"{'-' * 70}")
+
+    for path in sorted(assets_dir.glob("*.png")):
+        if "upgrade" not in path.name.lower():
+            continue
+
+        bgr, opaque_mask = load_opaque(path)
+        if bgr is None:
+            print(f"  SKIP {path.name} (could not load)")
+            continue
+
+        total += 1
+        result = test_upgrade_station_gate(bgr, opaque_mask)
+        status = "PASS" if result["passes_ratio"] else "FAIL"
+        if result["passes_ratio"]:
+            passed += 1
+        else:
+            failed += 1
+
+        print(
+            f"  [{status}] {path.name:25s}  cyan_px={result['cyan_pixels']:4d}/{result['total_opaque']:5d}  "
+            f"ratio={result['ratio']:.1%}  (min={result['min_ratio']:.0%})"
+        )
+
+    print(f"\n{'=' * 70}")
+    print(f"SUMMARY: {passed}/{total} passed, {failed}/{total} failed")
+    if failed > 0:
+        print("WARNING: Some assets FAILED their HSV gate!")
+        return 1
+
+    print("All assets passed their respective HSV color gates.")
+    return 0
+
+
+def run_cli(argv=None):
+    parser = argparse.ArgumentParser(description="Image matching utilities")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    build_probe_parser(subparsers.add_parser("probe-red-icons"))
+    subparsers.add_parser("validate-hsv-gates", help="Validate HSV gates against asset PNGs")
+    args, remaining = parser.parse_known_args(argv)
+
+    if args.command == "probe-red-icons":
+        return run_red_icon_probe_cli(remaining)
+    if args.command == "validate-hsv-gates":
+        return run_hsv_gate_validation_cli(remaining)
+    parser.error(f"Unknown command: {args.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_cli(sys.argv[1:]))
