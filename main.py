@@ -133,6 +133,7 @@ def run_self_tests():
     if not _load_pywin32():
         return 1
 
+    import json
     import shutil
     import types
     import unittest
@@ -140,7 +141,7 @@ def run_self_tests():
     import cv2
     import numpy as np
 
-    from bot import EatventureBot, State, VisionPersistence
+    from bot import EatventureBot, HistoricalLearner, State, VisionPersistence
     from image_matcher import ImageMatcher
     from mouse_controller import MouseController
 
@@ -216,6 +217,58 @@ def run_self_tests():
 
             self.assertTrue(saved)
             self.assertEqual(persistence.load(), {"threshold": 0.95})
+
+    class HistoricalLearnerBootstrapTests(unittest.TestCase):
+        def test_disabled_learning_does_not_apply_persisted_profile(self):
+            temp_dir = make_test_dir("test-learning-disabled")
+            state_path = temp_dir / "learning_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "behavior": {
+                                    "click_delay": 0.04,
+                                    "move_delay": 0.002,
+                                    "upgrade_click_interval": 0.01,
+                                    "search_interval": 0.08,
+                                },
+                                "source": "test",
+                                "time_spent": 5.0,
+                                "timestamp": 1.0,
+                            }
+                        ],
+                        "total_completions": 1,
+                        "last_pair_processed": 0,
+                        "last_batch_processed": 0,
+                        "tuned_behavior": {
+                            "click_delay": 0.04,
+                            "move_delay": 0.002,
+                            "upgrade_click_interval": 0.01,
+                            "search_interval": 0.08,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            applied = []
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: applied.append((args, kwargs)),
+                get_runtime_behavior_snapshot=lambda: {},
+            )
+            persistence = VisionPersistence(str(state_path), save_interval=0.0)
+            original_enabled = config.AI_LEARNING_ENABLED
+            try:
+                config.AI_LEARNING_ENABLED = False
+                learner = HistoricalLearner(bot, persistence)
+            finally:
+                config.AI_LEARNING_ENABLED = original_enabled
+
+            self.assertEqual(applied, [])
+            self.assertEqual(learner._records, [])
+            self.assertEqual(learner._total_completions, 0)
+            self.assertEqual(learner._tuned_behavior, {})
 
     class BotRegressionTests(unittest.TestCase):
         def test_new_level_red_icon_recaptures_when_frame_is_too_short(self):
@@ -370,6 +423,7 @@ def run_self_tests():
     for case in (
         TimingControllerTests,
         VisionPersistenceTests,
+        HistoricalLearnerBootstrapTests,
         BotRegressionTests,
         RedIconGateTests,
     ):

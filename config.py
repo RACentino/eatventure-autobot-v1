@@ -1,3 +1,5 @@
+from pathlib import Path
+
 ###################################
 ###    WINDOW & UI SETTINGS     ###
 ###################################
@@ -19,9 +21,11 @@ ShowForbiddenArea = False           # Enables a transparent red overlay showing 
 ###   DIRECTORY & FILE PATHS    ###
 ###################################
 
-TEMPLATES_DIR = "templates"         # Folder containing template images for matching
-ASSETS_DIR = "Assets"               # Folder containing game asset sub-templates
-LOGS_DIR = "logs"                   # Folder for bot logs, vision state, and learning state
+PROJECT_ROOT = Path(__file__).resolve().parent
+TEMPLATES_DIR = str(PROJECT_ROOT / "templates")  # Folder containing template images for matching
+ASSETS_DIR = str(PROJECT_ROOT / "Assets")        # Folder containing game asset sub-templates
+LOGS_DIR = str(PROJECT_ROOT / "logs")            # Folder for bot logs and transient diagnostics
+MEMORY_DIR = str(PROJECT_ROOT / "memory")        # Folder for persistent AI vision/history state
 
 
 ###################################
@@ -493,17 +497,18 @@ AI_STATS_UPGRADE_MISS_WINDOW = 3             # Consecutive misses before thresho
 AI_STATS_UPGRADE_MISS_STEP = 0.005           # Threshold reduction per miss event
 
 # Vision state persistence
-AI_VISION_STATE_FILE = f"{LOGS_DIR}/vision_state.json"  # File path for saving vision optimizer state
+AI_VISION_STATE_FILE = str(Path(MEMORY_DIR) / "vision_state.json")  # File path for saving vision optimizer state
 AI_VISION_SAVE_INTERVAL = 15.0         # Batch persistence more coarsely to keep the hot path focused on CV/input
 
 # Historical Learning system
-# Disable historical timing replay while manual performance tuning is active. Persisted
-# learned profiles are applied on startup and can silently restore slower search values.
-AI_LEARNING_ENABLED = False
+# Keep historical learning disabled during manual performance tuning. The persistence
+# path stays configured under the dedicated memory directory so the data remains
+# isolated from logs and can be re-enabled later without another migration.
+AI_LEARNING_ENABLED = True
 
-# Blank the learning-state path so no old timing profile is reloaded over the tuned
-# config defaults, and no new runtime profile is saved while benchmarking these values.
-AI_LEARNING_STATE_FILE = ""
+# Historical learner state persists separately from logs. Disabled startup skips
+# auto-applying this file until learning is explicitly re-enabled.
+AI_LEARNING_STATE_FILE = str(Path(MEMORY_DIR) / "learning_state.json")
 
 AI_LEARNING_SAVE_INTERVAL = 2.5        # Seconds between learning state saves to disk
 AI_LEARNING_RECORDS_LIMIT = 80         # Maximum historical records retained

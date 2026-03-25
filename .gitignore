@@ -32,6 +32,7 @@ wheels/
 
 # Project specific
 logs/
+memory/
 screenshots/
 *.log
 .gemini/

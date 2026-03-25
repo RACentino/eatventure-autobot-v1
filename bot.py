@@ -487,7 +487,7 @@ class HistoricalLearner:
         self._last_pair_processed = 0
         self._last_batch_processed = 0
 
-        persisted = self.persistence.load() if self.persistence else {}
+        persisted = self.persistence.load() if self.enabled and self.persistence else {}
         if persisted:
             self._records = list(persisted.get("records", []))[-100:]
             self._total_completions = int(persisted.get("total_completions", len(self._records)))
