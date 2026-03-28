@@ -55,13 +55,17 @@ class MouseController:
         self._mouse_action_lock = threading.RLock()
 
     def _check_interrupts(self):
-        """Calls the guard function. If it returns True, the action layer refuses to proceed."""
+        """Calls the guard function. Returns True if an interrupt is pending.
+
+        The bot's check_critical_interrupts (with raise_exception=True, the default)
+        will raise LevelCompleteInterrupt directly — so in the normal flow, this
+        method never returns True because the exception propagates out.  When the
+        callback is invoked with raise_exception=False (e.g. inside drag interrupt
+        checks), we return True so the caller can abort its operation gracefully.
+        """
         if self.interrupt_callback and self.interrupt_callback():
-            # The bot will raise the actual exception in the callback or we can do it here.
-            # Requirement says: 'If check_critical_interrupts() returns True, raise custom exception'
-            # We'll let the bot's callback handle the raising if it wants, 
-            # but to be safe we can raise a generic one if it just returns True.
-            pass
+            return True
+        return False
 
     def _sleep(self, duration):
         """Helper to sleep while remaining interrupt-aware."""

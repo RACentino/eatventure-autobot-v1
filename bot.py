@@ -1222,7 +1222,6 @@ class EatventureBot:
         logger.info("Bot initialized successfully")
 
     def _record_new_level_interrupt(self, source, confidence, x, y):
-        # ... existing logic ...
         if self._should_ignore_new_level_signal(source=source):
             logger.debug(
                 "Ignoring background %s signal while in %s",
@@ -1607,9 +1606,10 @@ class EatventureBot:
             return frame
 
     def _clear_capture_cache(self):
-        self._capture_cache.clear()
-        self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
-        self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+        with self._capture_lock:
+            self._capture_cache.clear()
+            self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+            self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
 
     def _sleep_until(self, target_time):
         now = time.monotonic()
@@ -2265,10 +2265,7 @@ class EatventureBot:
         Categorizes coordinates into safe_assets and forbidden_assets.
         'Slow is Smooth, Smooth is Fast' - Deliberately sort coordinates before action.
         """
-        # Step 4: Pad the Execution Delays
-        delay = getattr(config, "ASSET_SEGREGATION_DELAY", 0.04)
-        if delay > 0:
-            time.sleep(delay)
+        # Segregation is pure computation — no sleep needed (MAJ-004 fix)
             
         safe_assets = []
         forbidden_assets = []
@@ -3052,7 +3049,7 @@ class EatventureBot:
         if clicked_unlock:
             if self._sleep_with_interrupt(config.STATE_DELAY):
                 return State.CHECK_NEW_LEVEL
-            return self.handle_search_upgrade_station(current_state)
+            return State.SEARCH_UPGRADE_STATION
 
         return State.SEARCH_UPGRADE_STATION
     
@@ -3439,28 +3436,31 @@ class EatventureBot:
         logger.info(f"Verification Success: Secondary check confirmed {found} [conf: {confidence:.2f}]")
 
         # 3. Transition Sequence (Strictly Chronological)
+        # CRIT-003 fix: suppress interrupts during transition clicks to prevent
+        # LevelCompleteInterrupt from firing mid-sequence and causing double-transitions.
         logger.info(">>> TRANSITION SEQUENCE: Executing strictly linear path")
 
-        # Step 1: Acknowledge Level Completion
-        logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
-        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
-        time.sleep(config.NEW_LEVEL_BUTTON_DELAY)
+        with self.suppress_interrupts():
+            # Step 1: Acknowledge Level Completion
+            logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
+            self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+            time.sleep(config.NEW_LEVEL_BUTTON_DELAY)
 
-        # Step 2: Animation Buffer
-        logger.info("Step 2: Animation Buffer (%ss)", config.TRANSITION_POST_CLICK_DELAY)
-        time.sleep(config.TRANSITION_POST_CLICK_DELAY)
+            # Step 2: Animation Buffer
+            logger.info("Step 2: Animation Buffer (%ss)", config.TRANSITION_POST_CLICK_DELAY)
+            time.sleep(config.TRANSITION_POST_CLICK_DELAY)
 
-        # Step 3: Confirm Travel
-        # Attempt dynamic detection
-        found_nl, conf_nl, x_nl, y_nl = self._detect_new_level(force=True)
-        if found_nl:
-            logger.info("Step 3: Confirm Travel - Clicking detected travel button at (%s, %s)", x_nl, y_nl)
-            self.mouse_controller.click(x_nl, y_nl, relative=True)
-        else:
-            logger.info("Step 3: Confirm Travel - Clicking config travel positions (backup)")
-            self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
-            time.sleep(0.1) # Small gap between backup clicks
-            self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+            # Step 3: Confirm Travel
+            # Attempt dynamic detection
+            found_nl, conf_nl, x_nl, y_nl = self._detect_new_level(force=True)
+            if found_nl:
+                logger.info("Step 3: Confirm Travel - Clicking detected travel button at (%s, %s)", x_nl, y_nl)
+                self.mouse_controller.click(x_nl, y_nl, relative=True)
+            else:
+                logger.info("Step 3: Confirm Travel - Clicking config travel positions (backup)")
+                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
+                time.sleep(0.1) # Small gap between backup clicks
+                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
 
         # Step 4: Bookkeeping
         logger.info("Step 4: Executing transition bookkeeping")

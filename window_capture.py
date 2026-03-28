@@ -3,6 +3,7 @@ import win32ui
 import win32con
 import win32api
 import ctypes
+import time
 import numpy as np
 import logging
 import threading
@@ -190,12 +191,6 @@ class ForbiddenAreaOverlay:
                 128,  # 50% transparency
                 win32con.LWA_ALPHA
             )
-            win32gui.SetLayeredWindowAttributes(
-                self.overlay_hwnd,
-                0,
-                128,
-                win32con.LWA_ALPHA
-            )
             
             win32gui.ShowWindow(self.overlay_hwnd, win32con.SW_SHOW)
             win32gui.UpdateWindow(self.overlay_hwnd)
@@ -221,7 +216,6 @@ class ForbiddenAreaOverlay:
                     logger.error(f"Error in overlay update loop: {e}")
                     break
                 
-                import time
                 time.sleep(0.1)
                 
         except Exception as e:
