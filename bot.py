@@ -468,7 +468,7 @@ class HistoricalLearner:
         self.bot = bot
         self.persistence = persistence
         self.enabled = config.AI_LEARNING_ENABLED
-        self.interval = max(0.01, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
+        self.interval = max(config.LEARNING_LOOP_MIN_SLEEP, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
         self.pair_window = max(2, int(getattr(config, "AI_LEARNING_PAIR_WINDOW", 2)))
         self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
         self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
@@ -543,7 +543,7 @@ class HistoricalLearner:
                 self._run_learning_cycle()
             except Exception:
                 logger.exception("Historical learner cycle failed; continuing")
-            time.sleep(max(0.01, self.interval))
+            time.sleep(max(config.LEARNING_LOOP_MIN_SLEEP, self.interval))
 
     def _run_learning_cycle(self):
         with self._lock:
@@ -707,9 +707,9 @@ class OscillatingSearcher:
 
     def __init__(self, bot: Any):
         self.bot = bot
-        self.max_cycles = getattr(config, "MAX_SCROLL_CYCLES", 15)
-        self.scroll_increment = getattr(config, "SCROLL_INCREMENT_STEP", 1)
-        self.settle_duration = getattr(config, "POST_SCROLL_SETTLE", 0.45)
+        self.max_cycles = config.MAX_SCROLL_CYCLES
+        self.scroll_increment = config.SCROLL_INCREMENT_STEP
+        self.settle_duration = config.POST_SCROLL_SETTLE
 
     def execute_cycle(
         self,
@@ -737,7 +737,7 @@ class OscillatingSearcher:
             if target_found:
                 return target_found
 
-            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.45))
+            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.080))
             boundary_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
             if boundary_hit:
                 return boundary_hit
@@ -753,7 +753,7 @@ class OscillatingSearcher:
             if target_found:
                 return target_found
 
-            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.45))
+            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.080))
             cycle_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
             if cycle_hit:
                 return cycle_hit
@@ -776,7 +776,7 @@ class OscillatingSearcher:
             if not self.perform_scroll(direction):
                 return None
 
-            settle_wait = self.settle_duration + getattr(config, "SCROLL_INTERVAL_PAUSE", 0.4)
+            settle_wait = self.settle_duration + getattr(config, "SCROLL_INTERVAL_PAUSE", 0.048)
             self.bot.sleep(settle_wait)
 
             red_interrupt = self.bot.check_intra_scroll_red_interrupt()
@@ -1305,11 +1305,11 @@ class EatventureBot:
             # YIELD PRIORITY: Back off if main thread is in critical interaction
             active_state = self.state_machine.get_state()
             if active_state in (State.CLICK_RED_ICON, State.HOLD_UPGRADE_STATION, State.TRANSITION_LEVEL):
-                time.sleep(max(interval, 0.2)) # Significant back-off duration
+                time.sleep(max(interval, config.MONITOR_YIELD_BACKOFF))
                 continue
 
             if self._new_level_event.is_set():
-                time.sleep(max(interval, 0.01))
+                time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
                 continue
 
             monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
@@ -1327,7 +1327,7 @@ class EatventureBot:
                     red_y,
                 )
                 self._record_new_level_interrupt("new level red icon", red_conf, red_x, red_y)
-                time.sleep(max(interval, 0.01))
+                time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
                 continue
 
             found, confidence, x, y = self._detect_new_level(
@@ -1339,7 +1339,7 @@ class EatventureBot:
                 logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
                 self._record_new_level_interrupt("new level button", confidence, x, y)
 
-            time.sleep(max(interval, 0.01))
+            time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
 
     def _apply_tuning(self):
         if not self.tuner.enabled:
@@ -1653,7 +1653,7 @@ class EatventureBot:
             return None
             
         target_time = time.monotonic() + duration
-        interval = max(0.01, config.NEW_LEVEL_INTERRUPT_INTERVAL)
+        interval = max(config.MONITOR_POLL_MIN_SLEEP, config.NEW_LEVEL_INTERRUPT_INTERVAL)
         
         while time.monotonic() < target_time:
             # Check for critical interrupts (like Level Complete)
@@ -3415,7 +3415,7 @@ class EatventureBot:
         self.mouse_controller.drag(
             start_x, start_y,
             start_x, start_y - config.SCROLL_VERIFICATION_DISTANCE,
-            duration=0.2,
+            duration=config.VERIFICATION_SCROLL_DURATION,
             relative=True
         )
         # Settle after scroll
@@ -3459,7 +3459,7 @@ class EatventureBot:
             else:
                 logger.info("Step 3: Confirm Travel - Clicking config travel positions (backup)")
                 self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
-                time.sleep(0.1) # Small gap between backup clicks
+                time.sleep(config.BACKUP_CLICK_GAP)
                 self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
 
         # Step 4: Bookkeeping
@@ -3567,11 +3567,11 @@ class EatventureBot:
         Minimizes time between station availability and interaction to near-zero.
         """
         self._click_idle()
-        max_duration = 5.0  # Smart Timeout: 5 seconds
+        max_duration = config.UNLOCK_HOT_LOOP_TIMEOUT
         start_time = time.monotonic()
-        polling_interval = 0.05  # 50ms tight loop
+        polling_interval = config.UNLOCK_POLL_INTERVAL
         
-        logger.info(">>> HOT LOOP: Polling for Unlock button (Max 5s duration)...")
+        logger.info(">>> HOT LOOP: Polling for Unlock button (Max %ss duration)...", max_duration)
 
         while time.monotonic() - start_time < max_duration:
             # 1. INTERRUPT CHECK: Ensure immediate stop
@@ -3602,8 +3602,8 @@ class EatventureBot:
                     self.mouse_controller.click(x, y, relative=True, wait_after=False)
                     
                     # STEP C: Verify click success (Check if button disappeared)
-                    # We wait 100ms for UI to register and then re-verify
-                    time.sleep(0.1)
+                    # We wait for UI to register and then re-verify
+                    time.sleep(config.UNLOCK_REGISTER_WAIT)
                     v_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
                     v_found, _, _, _ = self.image_matcher.find_template(
                         v_screenshot, template, mask=mask,
@@ -3673,7 +3673,7 @@ class EatventureBot:
         self.running = False
         self._new_level_monitor_stop.set()
         if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
-            self._new_level_monitor_thread.join(timeout=1.0)
+            self._new_level_monitor_thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
         self.historical_learner.stop()
         if self.overlay:
             self.overlay.stop()

@@ -82,10 +82,7 @@ class MouseController:
         return max(previous_deadline_ns + interval_ns, click_start_ns + interval_ns)
 
     def _rapid_click_hold_ns(self, click_interval):
-        requested_hold = max(
-            0.0,
-            float(getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.0)),
-        )
+        requested_hold = max(0.0, float(config.RAPID_CLICK_DOWN_UP_DELAY))
         if click_interval <= 0:
             return self._seconds_to_ns(requested_hold)
 
@@ -95,9 +92,7 @@ class MouseController:
         return self._seconds_to_ns(min(requested_hold, max_hold))
 
     def _wait_until_precise(self, deadline_ns, interrupt_check=None):
-        spin_threshold_ns = self._seconds_to_ns(
-            getattr(config, "RAPID_CLICK_SPIN_THRESHOLD", 0.0),
-        )
+        spin_threshold_ns = self._seconds_to_ns(config.RAPID_CLICK_SPIN_THRESHOLD)
 
         while True:
             self._check_interrupts()
@@ -243,8 +238,8 @@ class MouseController:
             )
             return False
 
-        retries = max(1, int(getattr(config, "MOUSE_CLICK_RETRY_COUNT", 1)))
-        settle_retry_delay = max(0.0, float(getattr(config, "MOUSE_CLICK_RETRY_SETTLE_DELAY", 0.0)))
+        retries = max(1, int(config.MOUSE_CLICK_RETRY_COUNT))
+        settle_retry_delay = max(0.0, float(config.MOUSE_CLICK_RETRY_SETTLE_DELAY))
 
         for attempt in range(retries):
             travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
@@ -256,7 +251,7 @@ class MouseController:
             self._correct_cursor_position(screen_x, screen_y)
             self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
             current = win32api.GetCursorPos()
-            tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+            tolerance = config.MOUSE_POSITION_TOLERANCE
             if abs(current[0] - screen_x) <= tolerance and abs(current[1] - screen_y) <= tolerance:
                 break
 
@@ -316,7 +311,7 @@ class MouseController:
         self._last_click_time = time.monotonic()
 
     def _ensure_min_click_interval(self):
-        min_interval = getattr(config, "MIN_CLICK_INTERVAL", 0.0)
+        min_interval = config.MIN_CLICK_INTERVAL
         if min_interval <= 0:
             return
         now = time.monotonic()
@@ -325,7 +320,7 @@ class MouseController:
             self._sleep(wait_time)
 
     def _ensure_min_drag_interval(self):
-        min_interval = getattr(config, "SCROLL_MIN_INTERVAL", 0.0)
+        min_interval = config.SCROLL_MIN_INTERVAL
         if min_interval <= 0:
             return
         now = time.monotonic()
@@ -335,11 +330,11 @@ class MouseController:
         self._last_drag_time = time.monotonic()
 
     def _correct_cursor_position(self, screen_x, screen_y):
-        retries = max(0, getattr(config, "MOUSE_TARGET_RETRIES", 0))
+        retries = max(0, config.MOUSE_TARGET_RETRIES)
         if retries <= 0:
             return
-        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
-        correction_delay = getattr(config, "MOUSE_TARGET_CORRECTION_DELAY", 0.0)
+        tolerance = config.MOUSE_POSITION_TOLERANCE
+        correction_delay = config.MOUSE_TARGET_CORRECTION_DELAY
         target = (int(screen_x), int(screen_y))
 
         for _ in range(retries):
@@ -355,16 +350,16 @@ class MouseController:
     def _should_move_cursor(self, screen_x, screen_y):
         if self._last_cursor_pos is None:
             return True
-        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+        tolerance = config.MOUSE_POSITION_TOLERANCE
         dx = abs(self._last_cursor_pos[0] - screen_x)
         dy = abs(self._last_cursor_pos[1] - screen_y)
         return dx > tolerance or dy > tolerance
 
     def _move_cursor(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
-        retries = max(1, getattr(config, "MOUSE_MOVE_RETRIES", 1))
-        retry_delay = getattr(config, "MOUSE_MOVE_RETRY_DELAY", 0.0)
-        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
+        retries = max(1, config.MOUSE_MOVE_RETRIES)
+        retry_delay = config.MOUSE_MOVE_RETRY_DELAY
+        tolerance = config.MOUSE_POSITION_TOLERANCE
 
         for _ in range(retries):
             win32api.SetCursorPos(target)
@@ -589,7 +584,7 @@ class MouseController:
             
             # Sleep in small chunks to allow interruption
             start_time = time.monotonic()
-            chunk_size = 0.1
+            chunk_size = config.HOLD_ITERATION_INTERVAL
             while time.monotonic() - start_time < duration:
                 if interrupt_check and interrupt_check():
                     logger.info("Hold interrupted by callback")
@@ -735,7 +730,9 @@ class MouseController:
             )
             return True
 
-    def drag(self, from_x, from_y, to_x, to_y, duration=0.3, relative=True, interrupt_check=None):
+    def drag(self, from_x, from_y, to_x, to_y, duration=None, relative=True, interrupt_check=None):
+        if duration is None:
+            duration = config.DEFAULT_DRAG_DURATION
         self._check_interrupts()
         with self._mouse_action_lock:
             if relative:
@@ -771,7 +768,7 @@ class MouseController:
             self._sleep(config.MOUSE_DOWN_UP_DELAY)
 
             steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
-            duration = max(duration, 0.001)
+            duration = max(duration, config.DRAG_MIN_DURATION)
             start_time = time.monotonic()
             interrupted = False
             current_x = int(screen_from_x)

@@ -216,7 +216,7 @@ class ForbiddenAreaOverlay:
                     logger.error(f"Error in overlay update loop: {e}")
                     break
                 
-                time.sleep(0.1)
+                time.sleep(config.OVERLAY_UPDATE_INTERVAL)
                 
         except Exception as e:
             logger.error(f"Failed to create overlay window: {e}")
