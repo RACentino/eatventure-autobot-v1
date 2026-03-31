@@ -23,6 +23,30 @@ class ImageMatcher:
         # Limit to 1 thread to prevent CPU starvation between monitor and worker threads
         cv2.setNumThreads(1)
 
+    def _sanitize_sqdiff_result(self, result, template_name="Unknown"):
+        if result.size == 0:
+            return result
+
+        invalid_mask = ~np.isfinite(result)
+        invalid_count = int(np.count_nonzero(invalid_mask))
+        if invalid_count == 0:
+            return result
+
+        sanitized = np.array(result, copy=True)
+        sanitized[invalid_mask] = 1.0
+        logger.debug("[%s] Sanitized %d non-finite SQDIFF cells", template_name, invalid_count)
+        return sanitized
+
+    def _resolve_sqdiff_match_limit(self, result_shape, min_distance):
+        height, width = result_shape[:2]
+        suppression = max(1, int(min_distance))
+        natural_limit = max(
+            1,
+            ((width + suppression - 1) // suppression) * ((height + suppression - 1) // suppression),
+        )
+        hard_limit = max(1, int(getattr(config, "TEMPLATE_MATCH_MAX_RESULTS", 2048)))
+        return min(natural_limit, hard_limit)
+
     def _extract_square_roi(self, image, x, y, size):
         half = max(1, size // 2)
         x1 = max(0, x - half)
@@ -163,10 +187,17 @@ class ImageMatcher:
             return False, 0.0, 0, 0
         
         result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
+        result = self._sanitize_sqdiff_result(result, template_name=template_name)
         
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        if not np.isfinite(min_val):
+            logger.debug("[%s] SQDIFF minimum is non-finite; rejecting candidate", template_name)
+            return False, 0.0, 0, 0
+        if min_loc[0] < 0 or min_loc[1] < 0:
+            logger.debug("[%s] SQDIFF minimum location is invalid: %s", template_name, min_loc)
+            return False, 0.0, 0, 0
         
-        confidence = 1 - min_val
+        confidence = max(0.0, 1 - float(min_val))
         
         if confidence >= thresh:
             h, w = template.shape[:2]
@@ -346,11 +377,13 @@ class ImageMatcher:
                 continue
             
             result = cv2.matchTemplate(screenshot, scaled_template, cv2.TM_SQDIFF_NORMED, mask=scaled_mask)
+            result = self._sanitize_sqdiff_result(result, template_name=template_name)
 
             fast_matches = self._find_sqdiff_matches(
                 result,
                 threshold=thresh,
                 min_distance=min_distance,
+                template_name=template_name,
             )
 
             h, w = scaled_template.shape[:2]
@@ -377,32 +410,52 @@ class ImageMatcher:
         
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
 
-    def _find_sqdiff_matches(self, result, threshold, min_distance):
+    def _find_sqdiff_matches(self, result, threshold, min_distance, template_name="Unknown"):
         if result.size == 0:
             return []
 
         max_error = 1 - threshold
-        if max_error < 0:
+        if not np.isfinite(max_error) or max_error < 0:
             return []
 
         suppression = max(1, int(min_distance))
-        working = result.copy()
+        working = np.array(result, copy=True)
         height, width = working.shape[:2]
+        match_limit = self._resolve_sqdiff_match_limit(working.shape, suppression)
         matches = []
 
-        while True:
+        while len(matches) < match_limit:
             min_val, _, min_loc, _ = cv2.minMaxLoc(working)
-            if min_val > max_error:
+            if not np.isfinite(min_val) or min_val > max_error:
                 break
 
             x, y = min_loc
-            matches.append((1 - min_val, x, y))
+            if x < 0 or y < 0 or x >= width or y >= height:
+                logger.warning(
+                    "[%s] SQDIFF minimum location %s is outside result bounds %sx%s",
+                    template_name,
+                    min_loc,
+                    width,
+                    height,
+                )
+                break
+
+            matches.append((1 - float(min_val), int(x), int(y)))
 
             x1 = max(0, x - suppression)
             x2 = min(width, x + suppression + 1)
             y1 = max(0, y - suppression)
             y2 = min(height, y + suppression + 1)
             working[y1:y2, x1:x2] = 1.0
+
+        if len(matches) >= match_limit:
+            min_val, _, _, _ = cv2.minMaxLoc(working)
+            if np.isfinite(min_val) and min_val <= max_error:
+                logger.warning(
+                    "[%s] SQDIFF extraction reached match cap (%s); truncating remaining candidates",
+                    template_name,
+                    match_limit,
+                )
 
         return matches
     

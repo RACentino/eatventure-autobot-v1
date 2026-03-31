@@ -1276,6 +1276,7 @@ class EatventureBot:
             return None
         interrupt = self._new_level_interrupt
         self._new_level_event.clear()
+        self._new_level_interrupt = None
         if interrupt and self._should_ignore_new_level_signal(source=interrupt.get("source")):
             return None
         return interrupt
@@ -1302,44 +1303,49 @@ class EatventureBot:
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
         while not self._new_level_monitor_stop.is_set():
-            # YIELD PRIORITY: Back off if main thread is in critical interaction
-            active_state = self.state_machine.get_state()
-            if active_state in (State.CLICK_RED_ICON, State.HOLD_UPGRADE_STATION, State.TRANSITION_LEVEL):
-                time.sleep(max(interval, config.MONITOR_YIELD_BACKOFF))
-                continue
+            try:
+                active_state = self.state_machine.get_state()
+                if active_state in (State.CLICK_RED_ICON, State.HOLD_UPGRADE_STATION, State.TRANSITION_LEVEL):
+                    time.sleep(max(interval, config.MONITOR_YIELD_BACKOFF))
+                    continue
 
-            if self._new_level_event.is_set():
-                time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
-                continue
+                if self._new_level_event.is_set():
+                    time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
+                    continue
 
-            monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
-            limited_screenshot = monitor_screenshot[:config.MAX_SEARCH_Y, :]
+                monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
+                limited_screenshot = monitor_screenshot[:config.MAX_SEARCH_Y, :]
 
-            red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
-                screenshot=monitor_screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
-                force=True,
-            )
-            if red_found:
-                logger.info(
-                    "Background monitor: new level red icon detected at (%s, %s)",
-                    red_x,
-                    red_y,
+                red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
+                    screenshot=monitor_screenshot,
+                    max_y=config.EXTENDED_SEARCH_Y,
+                    force=True,
                 )
-                self._record_new_level_interrupt("new level red icon", red_conf, red_x, red_y)
+                if red_found:
+                    logger.info(
+                        "Background monitor: new level red icon detected at (%s, %s)",
+                        red_x,
+                        red_y,
+                    )
+                    self._record_new_level_interrupt("new level red icon", red_conf, red_x, red_y)
+                    time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
+                    continue
+
+                found, confidence, x, y = self._detect_new_level(
+                    screenshot=limited_screenshot,
+                    max_y=config.MAX_SEARCH_Y,
+                    force=True,
+                )
+                if found:
+                    logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
+                    self._record_new_level_interrupt("new level button", confidence, x, y)
+
                 time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
-                continue
-
-            found, confidence, x, y = self._detect_new_level(
-                screenshot=limited_screenshot,
-                max_y=config.MAX_SEARCH_Y,
-                force=True,
-            )
-            if found:
-                logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
-                self._record_new_level_interrupt("new level button", confidence, x, y)
-
-            time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
+            except Exception:
+                if self._new_level_monitor_stop.is_set():
+                    break
+                logger.exception("Background new-level monitor cycle failed; continuing")
+                time.sleep(max(interval, config.MONITOR_YIELD_BACKOFF))
 
     def _apply_tuning(self):
         if not self.tuner.enabled:
@@ -1593,6 +1599,26 @@ class EatventureBot:
         # Logic: Transition to CHECK_NEW_LEVEL state which now handles verification and execution
         logger.info("Priority override: triggering CHECK_NEW_LEVEL sequence")
 
+    def _reset_runtime_interrupt_state(self, reset_completion=True):
+        self._new_level_event.clear()
+        self._new_level_interrupt = None
+        self._last_new_level_override_time = 0.0
+        self._last_new_level_fail_time = 0.0
+        self._last_transition_time = 0.0
+        self._no_red_scroll_cycle_pending = False
+        self.red_icons = []
+        self.current_red_icon_index = 0
+        self.red_icon_cycle_count = 0
+        self.wait_for_unlock_attempts = 0
+        self.work_done = False
+        self.upgrade_found_in_cycle = False
+        self._recent_red_icon_history = []
+        self._clear_capture_cache()
+        self._reset_search_cycle(reason="runtime reset")
+        if reset_completion:
+            self.completion_detected_time = None
+            self.completion_detected_by = None
+
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
         with self._capture_lock:
@@ -1708,7 +1734,8 @@ class EatventureBot:
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         now = time.monotonic()
         cached = self._new_level_cache
-        if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= self._capture_cache_ttl:
+        use_cache = screenshot is None and not force
+        if use_cache and cached["max_y"] == target_max_y and now - cached["timestamp"] <= self._capture_cache_ttl:
             return cached["result"]
 
         if screenshot is None:
@@ -1734,7 +1761,8 @@ class EatventureBot:
         target_max_y = max_y if max_y is not None else config.MAX_SEARCH_Y
         cached = self._new_level_red_icon_cache
         cache_ttl = config.NEW_LEVEL_RED_ICON_CACHE_TTL
-        if not force and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
+        use_cache = screenshot is None and not force
+        if use_cache and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
             return cached["result"]
 
         max_template_width = 0
@@ -3641,7 +3669,8 @@ class EatventureBot:
     def start(self):
         if self.running:
             return
-        
+
+        self._reset_runtime_interrupt_state(reset_completion=True)
         self.running = True
         logger.info("Bot started")
         
@@ -3669,15 +3698,17 @@ class EatventureBot:
     def stop(self):
         if not self.running:
             return
-            
+
         self.running = False
         self._new_level_monitor_stop.set()
         if self._new_level_monitor_thread and self._new_level_monitor_thread.is_alive():
             self._new_level_monitor_thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
+        self._new_level_monitor_thread = None
         self.historical_learner.stop()
         if self.overlay:
             self.overlay.stop()
             self.overlay = None
+        self._reset_runtime_interrupt_state(reset_completion=True)
         logger.info("Bot stopped")
 
     def step(self):

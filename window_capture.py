@@ -8,6 +8,8 @@ import numpy as np
 import logging
 import threading
 
+import config
+
 logger = logging.getLogger(__name__)
 
 def _set_dpi_awareness():
@@ -28,6 +30,10 @@ class WindowCapture:
         self.target_height = target_height
         self.find_window()
         self.resize_window()
+
+    def _ensure_window_handle(self):
+        if not self.hwnd or not win32gui.IsWindow(self.hwnd):
+            self.find_window()
     
     def find_window(self):
         self.hwnd = win32gui.FindWindow(None, self.window_title)
@@ -36,24 +42,25 @@ class WindowCapture:
         logger.info(f"Window found: {self.window_title} (HWND: {self.hwnd})")
     
     def resize_window(self):
-        if not self.hwnd:
-            return
+        self._ensure_window_handle()
         
         rect = win32gui.GetWindowRect(self.hwnd)
         x, y = rect[0], rect[1]
         
         SWP_NOZORDER = 0x0004
         SWP_SHOWWINDOW = 0x0040
-        ctypes.windll.user32.SetWindowPos(
+        success = ctypes.windll.user32.SetWindowPos(
             self.hwnd, 0, int(x), int(y), 
             int(self.target_width), int(self.target_height), 
             SWP_NOZORDER | SWP_SHOWWINDOW
         )
+        if not success:
+            logger.warning("SetWindowPos failed for hwnd %s", self.hwnd)
+            return
         logger.info(f"Window resized to {self.target_width}x{self.target_height}")
-    
+
     def get_window_rect(self):
-        if not self.hwnd:
-            self.find_window()
+        self._ensure_window_handle()
         
         rect = win32gui.GetClientRect(self.hwnd)
         x, y = win32gui.ClientToScreen(self.hwnd, (rect[0], rect[1]))
@@ -62,8 +69,7 @@ class WindowCapture:
         return x, y, width, height
     
     def capture(self, max_y=None):
-        if not self.hwnd:
-            self.find_window()
+        self._ensure_window_handle()
         
         x, y, width, height = self.get_window_rect()
         
@@ -137,6 +143,16 @@ class ForbiddenAreaOverlay:
         self.overlay_hwnd = None
         self.running = False
         self.thread = None
+
+    def _destroy_overlay_window(self):
+        hwnd = self.overlay_hwnd
+        self.overlay_hwnd = None
+        if not hwnd:
+            return
+        try:
+            win32gui.DestroyWindow(hwnd)
+        except Exception as exc:
+            logger.debug("Overlay destroy failed: %s", exc)
         
     def start(self):
         if not self.running:
@@ -147,12 +163,10 @@ class ForbiddenAreaOverlay:
     
     def stop(self):
         self.running = False
-        if self.overlay_hwnd:
-            try:
-                win32gui.DestroyWindow(self.overlay_hwnd)
-            except Exception as exc:
-                logger.debug("Overlay destroy failed: %s", exc)
-            self.overlay_hwnd = None
+        if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(timeout=max(0.1, float(getattr(config, "THREAD_JOIN_TIMEOUT", 1.0))))
+        self.thread = None
+        self._destroy_overlay_window()
         logger.info("Forbidden area overlay stopped")
     
     def _create_overlay(self):
@@ -222,6 +236,7 @@ class ForbiddenAreaOverlay:
             logger.error(f"Failed to create overlay window: {e}")
         finally:
             self.running = False
+            self._destroy_overlay_window()
     
     def _draw_zones(self):
         if not self.overlay_hwnd:

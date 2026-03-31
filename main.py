@@ -135,6 +135,7 @@ def run_self_tests():
 
     import json
     import shutil
+    import threading
     import types
     import unittest
 
@@ -358,6 +359,84 @@ def run_self_tests():
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.FIND_RED_ICONS)
 
+    class NewLevelCacheTests(unittest.TestCase):
+        def test_detect_new_level_uses_explicit_screenshot_over_cache(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot._capture_cache_ttl = 60.0
+            bot._new_level_cache = {
+                "timestamp": time.monotonic(),
+                "result": (False, 0.0, 0, 0),
+                "max_y": config.MAX_SEARCH_Y,
+            }
+            fresh_frame = object()
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_new_level_confidence=lambda *args, **kwargs: None,
+                update_new_level_miss=lambda *args, **kwargs: None,
+            )
+            bot._find_new_level = (
+                lambda screenshot, threshold=None:
+                (True, 0.99, 11, 22) if screenshot is fresh_frame else (False, 0.0, 0, 0)
+            )
+
+            result = EatventureBot._detect_new_level(
+                bot,
+                screenshot=fresh_frame,
+                max_y=config.MAX_SEARCH_Y,
+            )
+
+            self.assertEqual(result, (True, 0.99, 11, 22))
+
+        def test_detect_new_level_red_icon_uses_explicit_screenshot_over_cache(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot._last_new_level_fail_time = 0.0
+            bot._new_level_red_icon_cache = {
+                "timestamp": time.monotonic(),
+                "result": (False, 0.0, 0, 0),
+                "max_y": config.EXTENDED_SEARCH_Y,
+            }
+            bot.available_red_icon_templates = [("RedIcon", np.zeros((2, 2, 3), dtype=np.uint8), None)]
+            bot._iter_red_icon_templates = lambda: bot.available_red_icon_templates
+            bot.image_matcher = types.SimpleNamespace(
+                find_all_templates=lambda *args, **kwargs: [(0.97, 2, 2)]
+            )
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_new_level_red_icon_confidence=lambda *args, **kwargs: None,
+                update_new_level_red_icon_miss=lambda *args, **kwargs: None,
+            )
+            bot._passes_red_color_gate = lambda *args, **kwargs: (True, 99)
+            bot._passes_red_icon_template_gate = lambda *args, **kwargs: (True, {})
+            bot._merge_detection = EatventureBot._merge_detection.__get__(bot, EatventureBot)
+            bot._update_red_template_priority = lambda *args, **kwargs: None
+
+            screenshot = np.zeros(
+                (config.NEW_LEVEL_RED_ICON_Y_MAX + 10, config.NEW_LEVEL_RED_ICON_X_MAX + 10, 3),
+                dtype=np.uint8,
+            )
+
+            result = EatventureBot._detect_new_level_red_icon(
+                bot,
+                screenshot=screenshot,
+                max_y=config.EXTENDED_SEARCH_Y,
+            )
+
+            self.assertTrue(result[0])
+
+    class InterruptStateTests(unittest.TestCase):
+        def test_consume_new_level_interrupt_clears_payload(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot._new_level_event = threading.Event()
+            bot._new_level_event.set()
+            bot._new_level_interrupt = {"source": "test"}
+            bot._should_ignore_new_level_signal = lambda *args, **kwargs: False
+
+            result = EatventureBot._consume_new_level_interrupt(bot)
+
+            self.assertEqual(result, {"source": "test"})
+            self.assertFalse(bot._new_level_event.is_set())
+            self.assertIsNone(bot._new_level_interrupt)
+
     class RedIconGateTests(unittest.TestCase):
         @staticmethod
         def _make_red_icon_bot():
@@ -425,6 +504,8 @@ def run_self_tests():
         VisionPersistenceTests,
         HistoricalLearnerBootstrapTests,
         BotRegressionTests,
+        NewLevelCacheTests,
+        InterruptStateTests,
         RedIconGateTests,
     ):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
@@ -456,6 +537,7 @@ def run_bot():
 
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
+    bot = None
 
     try:
         bot = EatventureBot()
@@ -469,6 +551,11 @@ def run_bot():
 
         while not should_exit:
             if bot.running:
+                if not bot.window_capture.is_window_active():
+                    logger.error("Window '%s' is no longer active; stopping bot", config.WINDOW_TITLE)
+                    should_exit = True
+                    bot.stop()
+                    continue
                 bot.step()
             if config.MAIN_LOOP_DELAY > 0:
                 time.sleep(config.MAIN_LOOP_DELAY)
@@ -484,6 +571,12 @@ def run_bot():
         listener.stop()
         return 1
     finally:
+        if bot is not None:
+            try:
+                bot.stop()
+            except Exception as exc:
+                logging.error("Failed to stop bot cleanly during shutdown: %s", exc, exc_info=True)
+        bot_instance = None
         listener.stop()
 
     return 0
