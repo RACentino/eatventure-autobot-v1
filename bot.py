@@ -443,7 +443,11 @@ class VisionOptimizer:
             if key == "red_icon_threshold":
                 bootstrap_max = float(getattr(config, "AI_RED_ICON_BOOTSTRAP_MAX", maximum))
                 maximum = min(maximum, bootstrap_max)
-            value = float(state[key])
+            try:
+                value = float(state[key])
+            except (TypeError, ValueError):
+                logger.warning("Ignoring persisted %s value %r because it is not numeric", key, state[key])
+                continue
             clamped = max(minimum, min(maximum, value))
             if clamped != value:
                 logger.info("Clamped persisted %s from %.4f to %.4f", key, value, clamped)
@@ -486,14 +490,27 @@ class HistoricalLearner:
         self._total_completions = 0
         self._last_pair_processed = 0
         self._last_batch_processed = 0
+        self._tuned_behavior = {}
 
         persisted = self.persistence.load() if self.enabled and self.persistence else {}
         if persisted:
-            self._records = list(persisted.get("records", []))[-100:]
-            self._total_completions = int(persisted.get("total_completions", len(self._records)))
-            self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
-            self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
-            self._tuned_behavior = persisted.get("tuned_behavior", {})
+            self._records = self._sanitize_records(persisted.get("records", []))
+            self._total_completions = max(
+                len(self._records),
+                self._coerce_non_negative_int(
+                    persisted.get("total_completions", len(self._records)),
+                    default=len(self._records),
+                ),
+            )
+            self._last_pair_processed = self._coerce_non_negative_int(
+                persisted.get("last_pair_processed", 0),
+            )
+            self._last_batch_processed = self._coerce_non_negative_int(
+                persisted.get("last_batch_processed", 0),
+            )
+            self._tuned_behavior = self._sanitize_behavior_profile(
+                persisted.get("tuned_behavior", {}),
+            )
 
             if self._tuned_behavior:
                 logger.info("Historical learner applying persisted behavior profile")
@@ -503,8 +520,83 @@ class HistoricalLearner:
             max_batch_processed = self._total_completions // self.batch_window
             self._last_pair_processed = min(self._last_pair_processed, max_pair_processed)
             self._last_batch_processed = min(self._last_batch_processed, max_batch_processed)
-        else:
-            self._tuned_behavior = {}
+
+    def _coerce_non_negative_int(self, value, default=0):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, parsed)
+
+    def _sanitize_behavior_profile(self, behavior):
+        if not isinstance(behavior, dict):
+            return {}
+
+        bounds = {
+            "click_delay": (
+                config.AI_LEARNING_MIN_CLICK_DELAY,
+                config.AI_LEARNING_MAX_CLICK_DELAY,
+            ),
+            "move_delay": (
+                config.AI_LEARNING_MIN_MOVE_DELAY,
+                config.AI_LEARNING_MAX_MOVE_DELAY,
+            ),
+            "upgrade_click_interval": (
+                config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
+                config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
+            ),
+            "search_interval": (
+                config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+                config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+            ),
+        }
+        sanitized = {}
+        for key, (minimum, maximum) in bounds.items():
+            if key not in behavior:
+                continue
+            try:
+                value = float(behavior[key])
+            except (TypeError, ValueError):
+                logger.warning("Ignoring persisted learning value %s=%r because it is not numeric", key, behavior[key])
+                continue
+            sanitized[key] = self._clamp(value, minimum, maximum)
+        return sanitized
+
+    def _sanitize_records(self, records):
+        if not isinstance(records, list):
+            return []
+
+        sanitized = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            behavior = self._sanitize_behavior_profile(record.get("behavior", {}))
+            if not behavior:
+                continue
+
+            try:
+                time_spent = float(record.get("time_spent", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if time_spent <= 0:
+                continue
+
+            try:
+                timestamp = float(record.get("timestamp", time.time()))
+            except (TypeError, ValueError):
+                timestamp = time.time()
+
+            sanitized.append(
+                {
+                    "timestamp": timestamp,
+                    "time_spent": time_spent,
+                    "source": str(record.get("source", "unknown")),
+                    "behavior": behavior,
+                }
+            )
+
+        return sanitized[-config.AI_LEARNING_RECORDS_LIMIT:]
 
     def start(self):
         if not self.enabled:
@@ -524,7 +616,9 @@ class HistoricalLearner:
     def record_completion(self, time_spent, source):
         if not self.enabled or time_spent <= 0:
             return
-        snapshot = self.bot.get_runtime_behavior_snapshot()
+        snapshot = self._sanitize_behavior_profile(self.bot.get_runtime_behavior_snapshot())
+        if not snapshot:
+            return
         record = {
             "timestamp": time.time(),
             "time_spent": float(time_spent),
@@ -1197,6 +1291,7 @@ class EatventureBot:
         self._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         self._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
         self._capture_lock = threading.Lock()
+        self._interrupt_lock = threading.RLock()
         self._new_level_event = threading.Event()
         self._new_level_interrupt = None
         self._suppress_interrupts = False
@@ -1230,15 +1325,24 @@ class EatventureBot:
             )
             return
 
-        self._new_level_interrupt = {
+        self._set_new_level_interrupt({
             "source": source,
             "confidence": confidence,
             "x": x,
             "y": y,
             "timestamp": time.monotonic(),
-        }
-        self._new_level_event.set()
+        })
         self._mark_restaurant_completed(source, confidence)
+
+    def _set_new_level_interrupt(self, interrupt):
+        with self._interrupt_lock:
+            self._new_level_interrupt = dict(interrupt) if isinstance(interrupt, dict) else interrupt
+            self._new_level_event.set()
+
+    def _clear_new_level_interrupt(self):
+        with self._interrupt_lock:
+            self._new_level_event.clear()
+            self._new_level_interrupt = None
 
     def check_critical_interrupts(self, raise_exception=True):
         """
@@ -1272,11 +1376,16 @@ class EatventureBot:
             time.sleep(duration)
 
     def _consume_new_level_interrupt(self):
-        if not self._new_level_event.is_set():
-            return None
-        interrupt = self._new_level_interrupt
-        self._new_level_event.clear()
-        self._new_level_interrupt = None
+        with self._interrupt_lock:
+            if not self._new_level_event.is_set():
+                return None
+            interrupt = (
+                dict(self._new_level_interrupt)
+                if isinstance(self._new_level_interrupt, dict)
+                else self._new_level_interrupt
+            )
+            self._new_level_event.clear()
+            self._new_level_interrupt = None
         if interrupt and self._should_ignore_new_level_signal(source=interrupt.get("source")):
             return None
         return interrupt
@@ -1600,8 +1709,7 @@ class EatventureBot:
         logger.info("Priority override: triggering CHECK_NEW_LEVEL sequence")
 
     def _reset_runtime_interrupt_state(self, reset_completion=True):
-        self._new_level_event.clear()
-        self._new_level_interrupt = None
+        self._clear_new_level_interrupt()
         self._last_new_level_override_time = 0.0
         self._last_new_level_fail_time = 0.0
         self._last_transition_time = 0.0
@@ -1653,10 +1761,19 @@ class EatventureBot:
             
             remaining = max(0, target_time - now)
             time.sleep(min(interval, remaining))
-            if self._new_level_event.is_set():
-                interrupt = self._new_level_interrupt
-                if interrupt and self._should_ignore_new_level_signal(source=interrupt.get("source")):
-                    self._new_level_event.clear()
+            interrupt = None
+            with self._interrupt_lock:
+                if self._new_level_event.is_set():
+                    interrupt = (
+                        dict(self._new_level_interrupt)
+                        if isinstance(self._new_level_interrupt, dict)
+                        else self._new_level_interrupt
+                    )
+                    if interrupt is None:
+                        self._new_level_event.clear()
+            if interrupt:
+                if self._should_ignore_new_level_signal(source=interrupt.get("source")):
+                    self._clear_new_level_interrupt()
                     now = time.monotonic()
                     continue
                 return True
@@ -1922,6 +2039,54 @@ class EatventureBot:
             logger.info("Restaurant completion detected via %s", source)
         else:
             logger.info("Restaurant completion detected via %s (confidence %.3f)", source, confidence)
+
+    def _abort_transition(self, reason):
+        logger.warning("New-level transition aborted: %s", reason)
+        self._last_new_level_fail_time = time.monotonic()
+        self.completion_detected_time = None
+        self.completion_detected_by = None
+        return State.FIND_RED_ICONS
+
+    def _click_transition_target(self, x, y, label, wait_after=True):
+        success = self.mouse_controller.click(
+            x,
+            y,
+            relative=True,
+            wait_after=wait_after,
+        )
+        if not success:
+            logger.warning("%s click failed at (%s, %s)", label, x, y)
+        return success
+
+    def _execute_transition_travel_clicks(self):
+        found_nl, _, x_nl, y_nl = self._detect_new_level(force=True)
+        if found_nl:
+            logger.info(
+                "Step 3: Confirm Travel - Clicking detected travel button at (%s, %s)",
+                x_nl,
+                y_nl,
+            )
+            if self._click_transition_target(x_nl, y_nl, "Detected travel button"):
+                return True
+            logger.warning(
+                "Detected travel button click failed at (%s, %s); falling back to configured travel positions",
+                x_nl,
+                y_nl,
+            )
+
+        logger.info("Step 3: Confirm Travel - Clicking config travel positions (backup)")
+        if not self._click_transition_target(
+            config.NEW_LEVEL_POS[0],
+            config.NEW_LEVEL_POS[1],
+            "Configured travel button",
+        ):
+            return False
+        time.sleep(config.BACKUP_CLICK_GAP)
+        return self._click_transition_target(
+            config.LEVEL_TRANSITION_POS[0],
+            config.LEVEL_TRANSITION_POS[1],
+            "Configured level transition button",
+        )
 
     def _find_new_level(self, screenshot, threshold=None):
         if "newLevel" not in self.templates:
@@ -3432,7 +3597,7 @@ class EatventureBot:
         Requirement: Robust Two-Step Verification for New Level.
         Eliminates false positives via a scroll-up check before execution.
         """
-        self._new_level_event.clear() # Clear the interrupt signal
+        self._clear_new_level_interrupt()
         self._click_idle()
         logger.info(">>> VERIFICATION PHASE: New Level Trigger Detected")
 
@@ -3440,12 +3605,17 @@ class EatventureBot:
         logger.info("Verification: Performing single scroll down to verify trigger")
         start_x, start_y = config.SCROLL_START_POS
         # Dragging from start_y to start_y - distance scrolls the CONTENT DOWN (finger moves up)
-        self.mouse_controller.drag(
+        drag_success = self.mouse_controller.drag(
             start_x, start_y,
             start_x, start_y - config.SCROLL_VERIFICATION_DISTANCE,
             duration=config.VERIFICATION_SCROLL_DURATION,
-            relative=True
+            relative=True,
+            interrupt_check=lambda: self.check_critical_interrupts(raise_exception=False),
         )
+        if not drag_success:
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return State.CHECK_NEW_LEVEL
+            return self._abort_transition("verification drag failed")
         # Settle after scroll
         time.sleep(config.POST_SCROLL_SETTLE)
 
@@ -3471,7 +3641,12 @@ class EatventureBot:
         with self.suppress_interrupts():
             # Step 1: Acknowledge Level Completion
             logger.info("Step 1: Clicking new level button acknowledgment at %s", config.NEW_LEVEL_BUTTON_POS)
-            self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+            if not self._click_transition_target(
+                config.NEW_LEVEL_BUTTON_POS[0],
+                config.NEW_LEVEL_BUTTON_POS[1],
+                "New level acknowledgment",
+            ):
+                return self._abort_transition("acknowledgment click failed")
             time.sleep(config.NEW_LEVEL_BUTTON_DELAY)
 
             # Step 2: Animation Buffer
@@ -3479,16 +3654,8 @@ class EatventureBot:
             time.sleep(config.TRANSITION_POST_CLICK_DELAY)
 
             # Step 3: Confirm Travel
-            # Attempt dynamic detection
-            found_nl, conf_nl, x_nl, y_nl = self._detect_new_level(force=True)
-            if found_nl:
-                logger.info("Step 3: Confirm Travel - Clicking detected travel button at (%s, %s)", x_nl, y_nl)
-                self.mouse_controller.click(x_nl, y_nl, relative=True)
-            else:
-                logger.info("Step 3: Confirm Travel - Clicking config travel positions (backup)")
-                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
-                time.sleep(config.BACKUP_CLICK_GAP)
-                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+            if not self._execute_transition_travel_clicks():
+                return self._abort_transition("travel confirmation click failed")
 
         # Step 4: Bookkeeping
         logger.info("Step 4: Executing transition bookkeeping")
@@ -3524,21 +3691,19 @@ class EatventureBot:
                 self._mark_restaurant_completed("new level button", confidence)
                 logger.info(f"New level button found at ({x}, {y}); clicking config.NEW_LEVEL_BUTTON_POS at {config.NEW_LEVEL_BUTTON_POS}")
                 
-                # Use fixed config positions as requested
-                self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
+                if not self._click_transition_target(
+                    config.NEW_LEVEL_BUTTON_POS[0],
+                    config.NEW_LEVEL_BUTTON_POS[1],
+                    "New level acknowledgment",
+                ):
+                    return self._abort_transition("acknowledgment click failed")
 
                 button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
                 if button_delay > 0:
                     time.sleep(button_delay)
 
-                logger.info(f"Clicking new level position at {config.NEW_LEVEL_POS}")
-                self.mouse_controller.click(config.NEW_LEVEL_POS[0], config.NEW_LEVEL_POS[1], relative=True)
-                
-                if button_delay > 0:
-                    time.sleep(button_delay)
-
-                logger.info(f"Clicking level transition position at {config.LEVEL_TRANSITION_POS}")
-                self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
+                if not self._execute_transition_travel_clicks():
+                    return self._abort_transition("travel confirmation click failed")
 
                 if config.TRANSITION_POST_CLICK_DELAY > 0:
                     if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):

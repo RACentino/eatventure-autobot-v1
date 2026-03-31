@@ -142,7 +142,7 @@ def run_self_tests():
     import cv2
     import numpy as np
 
-    from bot import EatventureBot, HistoricalLearner, State, VisionPersistence
+    from bot import EatventureBot, HistoricalLearner, State, VisionOptimizer, VisionPersistence
     from image_matcher import ImageMatcher
     from mouse_controller import MouseController
 
@@ -219,6 +219,27 @@ def run_self_tests():
             self.assertTrue(saved)
             self.assertEqual(persistence.load(), {"threshold": 0.95})
 
+    class VisionBootstrapValidationTests(unittest.TestCase):
+        def test_apply_persisted_state_ignores_non_numeric_values(self):
+            optimizer = VisionOptimizer()
+            defaults = {
+                "red_icon_threshold": optimizer.red_icon_threshold,
+                "new_level_threshold": optimizer.new_level_threshold,
+                "box_threshold": optimizer.box_threshold,
+            }
+
+            optimizer.apply_persisted_state(
+                {
+                    "red_icon_threshold": "not-a-number",
+                    "new_level_threshold": None,
+                    "box_threshold": "0.95",
+                }
+            )
+
+            self.assertEqual(optimizer.red_icon_threshold, defaults["red_icon_threshold"])
+            self.assertEqual(optimizer.new_level_threshold, defaults["new_level_threshold"])
+            self.assertAlmostEqual(optimizer.box_threshold, 0.95)
+
     class HistoricalLearnerBootstrapTests(unittest.TestCase):
         def test_disabled_learning_does_not_apply_persisted_profile(self):
             temp_dir = make_test_dir("test-learning-disabled")
@@ -270,6 +291,62 @@ def run_self_tests():
             self.assertEqual(learner._records, [])
             self.assertEqual(learner._total_completions, 0)
             self.assertEqual(learner._tuned_behavior, {})
+
+        def test_malformed_learning_state_is_sanitized(self):
+            temp_dir = make_test_dir("test-learning-sanitized")
+            state_path = temp_dir / "learning_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            "bad-record",
+                            {
+                                "behavior": {
+                                    "click_delay": "0.04",
+                                    "move_delay": "bad",
+                                    "upgrade_click_interval": 0.01,
+                                    "search_interval": 0.08,
+                                },
+                                "source": 123,
+                                "time_spent": "9.5",
+                                "timestamp": "1.5",
+                            },
+                            {
+                                "behavior": {},
+                                "source": "ignored",
+                                "time_spent": 4.0,
+                                "timestamp": 2.0,
+                            },
+                        ],
+                        "total_completions": "bad-total",
+                        "last_pair_processed": "bad-pair",
+                        "last_batch_processed": -4,
+                        "tuned_behavior": {
+                            "click_delay": "0.03",
+                            "move_delay": "bad",
+                            "upgrade_click_interval": 0.01,
+                            "search_interval": 0.09,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            applied = []
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: applied.append((args, kwargs)),
+                get_runtime_behavior_snapshot=lambda: {},
+            )
+            learner = HistoricalLearner(bot, VisionPersistence(str(state_path), save_interval=0.0))
+
+            self.assertEqual(len(learner._records), 1)
+            self.assertEqual(learner._records[0]["source"], "123")
+            self.assertEqual(learner._total_completions, 1)
+            self.assertEqual(learner._last_pair_processed, 0)
+            self.assertEqual(learner._last_batch_processed, 0)
+            self.assertEqual(len(applied), 1)
+            self.assertAlmostEqual(applied[0][0][0]["click_delay"], 0.03)
+            self.assertNotIn("move_delay", applied[0][0][0])
 
     class BotRegressionTests(unittest.TestCase):
         def test_new_level_red_icon_recaptures_when_frame_is_too_short(self):
@@ -359,6 +436,40 @@ def run_self_tests():
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.FIND_RED_ICONS)
 
+        def test_check_new_level_aborts_when_acknowledgement_click_fails(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot._interrupt_lock = threading.RLock()
+            bot._new_level_event = threading.Event()
+            bot._new_level_event.set()
+            bot._new_level_interrupt = {"source": "new level button"}
+            bot._clear_new_level_interrupt = EatventureBot._clear_new_level_interrupt.__get__(bot, EatventureBot)
+            bot._abort_transition = EatventureBot._abort_transition.__get__(bot, EatventureBot)
+            bot.suppress_interrupts = EatventureBot.suppress_interrupts.__get__(bot, EatventureBot)
+            bot._click_transition_target = EatventureBot._click_transition_target.__get__(bot, EatventureBot)
+            bot._execute_transition_travel_clicks = EatventureBot._execute_transition_travel_clicks.__get__(bot, EatventureBot)
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._detect_new_level_priority = lambda *args, **kwargs: ("new level button", 0.99, 11, 22)
+            bot._detect_new_level = lambda *args, **kwargs: (True, 0.99, 11, 22)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot.mouse_controller = types.SimpleNamespace(
+                drag=lambda *args, **kwargs: True,
+                click=lambda *args, **kwargs: False,
+            )
+            bot.completion_detected_time = object()
+            bot.completion_detected_by = "new level button"
+            bot._last_new_level_fail_time = 0.0
+            bot._suppress_interrupts = False
+
+            state = EatventureBot.handle_check_new_level(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._new_level_event.is_set())
+            self.assertIsNone(bot._new_level_interrupt)
+            self.assertIsNone(bot.completion_detected_time)
+            self.assertIsNone(bot.completion_detected_by)
+            self.assertGreater(bot._last_new_level_fail_time, 0.0)
+
     class NewLevelCacheTests(unittest.TestCase):
         def test_detect_new_level_uses_explicit_screenshot_over_cache(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -426,6 +537,7 @@ def run_self_tests():
     class InterruptStateTests(unittest.TestCase):
         def test_consume_new_level_interrupt_clears_payload(self):
             bot = EatventureBot.__new__(EatventureBot)
+            bot._interrupt_lock = threading.RLock()
             bot._new_level_event = threading.Event()
             bot._new_level_event.set()
             bot._new_level_interrupt = {"source": "test"}
@@ -502,6 +614,7 @@ def run_self_tests():
     for case in (
         TimingControllerTests,
         VisionPersistenceTests,
+        VisionBootstrapValidationTests,
         HistoricalLearnerBootstrapTests,
         BotRegressionTests,
         NewLevelCacheTests,
