@@ -1253,6 +1253,7 @@ class EatventureBot:
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
         self.max_wait_for_unlock_attempts = getattr(config, "WAIT_FOR_UNLOCK_MAX_ATTEMPTS", 50)
+        self.upgrade_station_pos = None
         
         # Legacy directional scroll state removed.
         # One-Scroll Rule: execute_oscillating_search() is the only scroll driver.
@@ -1490,13 +1491,75 @@ class EatventureBot:
         cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
         wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
         if wait_remaining > 0:
-            logger.debug(
-                "Applying forbidden-zone scroll redirect cooldown %.3fs",
-                wait_remaining,
-            )
-            self._sleep_with_interrupt(wait_remaining)
+            if self._uninterrupted_main_flow_enabled():
+                logger.debug(
+                    "Skipping forbidden-zone scroll redirect cooldown %.3fs to preserve main flow",
+                    wait_remaining,
+                )
+            else:
+                logger.debug(
+                    "Applying forbidden-zone scroll redirect cooldown %.3fs",
+                    wait_remaining,
+                )
+                self._sleep_with_interrupt(wait_remaining)
         self._last_forbidden_scroll_time = time.monotonic()
         return True
+
+    def _uninterrupted_main_flow_enabled(self):
+        return not bool(getattr(config, "ENABLE_NO_ICON_SCROLL_INTERRUPT", False))
+
+    def _advance_after_blocked_red_icon(self, reason):
+        logger.warning("%s", reason)
+        self.current_red_icon_index += 1
+        if self.current_red_icon_index < len(self.red_icons):
+            return State.CLICK_RED_ICON
+        return State.OPEN_BOXES
+
+    def _advance_after_blocked_station(self, reason):
+        logger.warning("%s", reason)
+        self.red_icon_processed_count += 1
+        self.current_red_icon_index += 1
+        self.upgrade_station_pos = None
+        self._last_upgrade_station_pos = None
+        if self.current_red_icon_index < len(self.red_icons):
+            return State.CLICK_RED_ICON
+        return State.OPEN_BOXES
+
+    def _recover_from_step_exception(self):
+        current_state = self.state_machine.get_state()
+        recovery_state = (
+            State.CHECK_NEW_LEVEL
+            if self._new_level_event.is_set()
+            or self.completion_detected_time is not None
+            or current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL)
+            else State.FIND_RED_ICONS
+        )
+
+        self._suppress_interrupts = False
+        self._no_red_scroll_cycle_pending = False
+        self.red_icons = []
+        self.current_red_icon_index = 0
+        self.red_icon_cycle_count = 0
+        self.wait_for_unlock_attempts = 0
+        self.work_done = False
+        self.upgrade_found_in_cycle = False
+        self.upgrade_station_pos = None
+        self._last_upgrade_station_pos = None
+        self._recent_red_icon_history = []
+        self._clear_capture_cache()
+        self._reset_search_cycle(reason="unexpected step exception")
+
+        if recovery_state != State.CHECK_NEW_LEVEL:
+            self._clear_new_level_interrupt()
+            self.completion_detected_time = None
+            self.completion_detected_by = None
+
+        logger.warning(
+            "Recovering bot main flow after unexpected step failure via %s",
+            recovery_state.name,
+        )
+        self.state_machine.transition(recovery_state)
+        return recovery_state
 
     def _is_asset_click_safe(self, asset_name, x, y):
         precheck_delay = max(0.0, float(getattr(config, "ASSET_BOUNDARY_PRECHECK_DELAY", 0.0)))
@@ -1720,6 +1783,8 @@ class EatventureBot:
         self.wait_for_unlock_attempts = 0
         self.work_done = False
         self.upgrade_found_in_cycle = False
+        self.upgrade_station_pos = None
+        self._last_upgrade_station_pos = None
         self._recent_red_icon_history = []
         self._clear_capture_cache()
         self._reset_search_cycle(reason="runtime reset")
@@ -2747,7 +2812,10 @@ class EatventureBot:
             # Condition 1 (The Fallback): IF ONLY forbidden assets detected -> Scroll
             elif forbidden_stations:
                 logger.warning("Fallback scan: ONLY forbidden upgrade stations detected; triggering Oscillating Search")
-                if self._redirect_forbidden_asset_to_scroll("Upgrade Station", forbidden_stations[0][1], forbidden_stations[0][2]):
+                self.vision_optimizer.update_upgrade_station_miss()
+                if self._uninterrupted_main_flow_enabled():
+                    logger.info("Fallback scan: preserving main flow and skipping forced scroll redirect for forbidden upgrade station")
+                elif self._redirect_forbidden_asset_to_scroll("Upgrade Station", forbidden_stations[0][1], forbidden_stations[0][2]):
                     return -1
             else:
                 self.vision_optimizer.update_upgrade_station_miss()
@@ -3047,11 +3115,17 @@ class EatventureBot:
             cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
             wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
             if wait_remaining > 0:
-                logger.debug(
-                    "Forbidden-only state detected; applying scroll reentry cooldown %.3fs",
-                    wait_remaining,
-                )
-                self._sleep_with_interrupt(wait_remaining)
+                if self._uninterrupted_main_flow_enabled():
+                    logger.debug(
+                        "Forbidden-only state detected; skipping scroll reentry cooldown %.3fs to preserve main flow",
+                        wait_remaining,
+                    )
+                else:
+                    logger.debug(
+                        "Forbidden-only state detected; applying scroll reentry cooldown %.3fs",
+                        wait_remaining,
+                    )
+                    self._sleep_with_interrupt(wait_remaining)
             self._last_forbidden_scroll_time = time.monotonic()
             logger.warning(
                 "⚠ %s targets currently inside Forbidden Zone with no safe counterpart. "
@@ -3190,6 +3264,10 @@ class EatventureBot:
         if not is_safe:
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
             self._add_to_blackout(x, y) # Blacklist the original detection point
+            if self._uninterrupted_main_flow_enabled():
+                return self._advance_after_blocked_red_icon(
+                    f"Red icon blocked by forbidden zone at ({click_x}, {click_y}); skipping to preserve main flow"
+                )
             if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
                 return State.SCROLL
             
@@ -3211,6 +3289,11 @@ class EatventureBot:
                     click_x,
                     click_y,
                 )
+                if self._uninterrupted_main_flow_enabled():
+                    self._add_to_blackout(x, y)
+                    return self._advance_after_blocked_red_icon(
+                        f"Red icon click canceled at ({click_x}, {click_y}); skipping blocked action to preserve main flow"
+                    )
                 if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
                     return State.SCROLL
 
@@ -3294,6 +3377,12 @@ class EatventureBot:
                             x, y,
                         )
                         self.vision_optimizer.update_upgrade_station_miss()
+                        self.tuner.record_search_result(False)
+                        self._apply_tuning()
+                        if self._uninterrupted_main_flow_enabled():
+                            return self._advance_after_blocked_station(
+                                f"Upgrade station at ({x}, {y}) blocked by forbidden zone during search; skipping to preserve main flow"
+                            )
                         if self._redirect_forbidden_asset_to_scroll("Upgrade Station (search)", x, y):
                             return State.SCROLL
                         continue  # Try next attempt if redirect cooldown blocked
@@ -3389,6 +3478,10 @@ class EatventureBot:
             return State.CHECK_NEW_LEVEL
         if not is_safe:
             logger.warning("Upgrade station position is in forbidden zone; redirecting to oscillating search")
+            if self._uninterrupted_main_flow_enabled():
+                return self._advance_after_blocked_station(
+                    f"Upgrade station at ({x}, {y}) blocked before spam-click; skipping to preserve main flow"
+                )
             if self._redirect_forbidden_asset_to_scroll("Upgrade Station", x, y):
                 return State.SCROLL
             return State.FIND_RED_ICONS
@@ -3414,6 +3507,10 @@ class EatventureBot:
         if not spam_click_success:
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return State.CHECK_NEW_LEVEL
+            if self._uninterrupted_main_flow_enabled():
+                return self._advance_after_blocked_station(
+                    "Upgrade station rapid-click sequence aborted; skipping blocked action to preserve main flow"
+                )
             logger.warning("Upgrade station rapid-click sequence aborted; re-validating target")
             return State.SEARCH_UPGRADE_STATION
         
@@ -3890,6 +3987,15 @@ class EatventureBot:
             # Bot was stopped, just exit the step
             logger.debug("BotStoppedInterrupt caught in step")
             pass
+        except Exception:
+            logger.exception(
+                "Unexpected exception during bot step in state %s",
+                self.state_machine.get_state_name(),
+            )
+            if self._uninterrupted_main_flow_enabled() and self.running:
+                self._recover_from_step_exception()
+                return
+            raise
 
     def run(self):
         self.start()

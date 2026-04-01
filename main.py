@@ -399,11 +399,185 @@ def run_self_tests():
             bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
             bot.red_icon_processed_count = 0
             bot.current_red_icon_index = 0
-
-            state = EatventureBot.handle_hold_upgrade_station(bot, None)
+            original_interrupt_mode = config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            try:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = True
+                state = EatventureBot.handle_hold_upgrade_station(bot, None)
+            finally:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = original_interrupt_mode
 
             self.assertEqual(state, State.SEARCH_UPGRADE_STATION)
             self.assertEqual(bot.current_red_icon_index, 0)
+
+        def test_click_red_icon_forbidden_skip_advances_queue_in_uninterrupted_mode(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_red_icon_confidences=lambda *args, **kwargs: None,
+            )
+            bot._is_red_icon_present_at = lambda *args, **kwargs: True
+            bot._refine_red_icon_position = lambda *args, **kwargs: ((10, 20), False, 0.0)
+            bot._is_asset_click_safe = lambda *args, **kwargs: False
+            blackout_hits = []
+            bot._add_to_blackout = lambda x, y: blackout_hits.append((x, y))
+            bot._redirect_forbidden_asset_to_scroll = (
+                lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected scroll redirect"))
+            )
+            bot.red_icons = [(0.99, 10, 20), (0.98, 30, 40)]
+            bot.current_red_icon_index = 0
+            bot.mouse_controller = types.SimpleNamespace(
+                click=lambda *args, **kwargs: False,
+                is_in_forbidden_zone=lambda *args, **kwargs: True,
+            )
+            bot.tuner = types.SimpleNamespace(record_click_result=lambda *args, **kwargs: None)
+            bot._apply_tuning = lambda *args, **kwargs: None
+
+            original_interrupt_mode = config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            try:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+                state = EatventureBot.handle_click_red_icon(bot, None)
+            finally:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = original_interrupt_mode
+
+            self.assertEqual(state, State.CLICK_RED_ICON)
+            self.assertEqual(bot.current_red_icon_index, 1)
+            self.assertEqual(blackout_hits, [(10, 20)])
+
+        def test_search_upgrade_station_forbidden_skip_advances_queue_in_uninterrupted_mode(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot.templates = {
+                "upgradeStation": (np.zeros((4, 4, 3), dtype=np.uint8), None),
+            }
+            bot.image_matcher = types.SimpleNamespace(
+                find_template=lambda *args, **kwargs: (True, 0.97, 50, 60),
+                check_upgrade_station_hsv=lambda *args, **kwargs: True,
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                is_in_forbidden_zone=lambda *args, **kwargs: True,
+            )
+            miss_counter = {"count": 0}
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_upgrade_station_miss=lambda: miss_counter.__setitem__("count", miss_counter["count"] + 1),
+                update_upgrade_station_confidence=lambda *args, **kwargs: None,
+            )
+            recorded_search_results = []
+            bot.tuner = types.SimpleNamespace(
+                search_interval=0.0,
+                record_search_result=lambda result: recorded_search_results.append(result),
+            )
+            bot._apply_tuning = lambda *args, **kwargs: None
+            bot.red_icons = [(0.99, 10, 20), (0.98, 30, 40)]
+            bot.current_red_icon_index = 0
+            bot.red_icon_processed_count = 0
+            bot.successful_red_icon_positions = []
+            bot.upgrade_found_in_cycle = False
+            bot.consecutive_failed_cycles = 0
+            bot._redirect_forbidden_asset_to_scroll = (
+                lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected scroll redirect"))
+            )
+
+            original_interrupt_mode = config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            try:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+                state = EatventureBot.handle_search_upgrade_station(bot, None)
+            finally:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = original_interrupt_mode
+
+            self.assertEqual(state, State.CLICK_RED_ICON)
+            self.assertEqual(bot.current_red_icon_index, 1)
+            self.assertEqual(bot.red_icon_processed_count, 1)
+            self.assertEqual(miss_counter["count"], 1)
+            self.assertEqual(recorded_search_results, [False])
+
+        def test_hold_upgrade_station_skips_after_abort_in_uninterrupted_mode(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot.upgrade_station_pos = (50, 50)
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot.vision_optimizer = types.SimpleNamespace(enabled=False)
+            bot._refine_template_position = lambda *args, **kwargs: ((50, 50), True)
+            bot._refine_upgrade_station_click_target = lambda *args, **kwargs: ((50, 50), True)
+            bot._last_upgrade_station_pos = None
+            bot._is_asset_click_safe = lambda *args, **kwargs: True
+            bot.mouse_controller = types.SimpleNamespace(spam_click_at=lambda *args, **kwargs: False)
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._sleep_with_interrupt = lambda *args, **kwargs: False
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot.red_icon_processed_count = 0
+            bot.current_red_icon_index = 0
+            bot.red_icons = [(0.99, 10, 20), (0.98, 30, 40)]
+
+            original_interrupt_mode = config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            try:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+                state = EatventureBot.handle_hold_upgrade_station(bot, None)
+            finally:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = original_interrupt_mode
+
+            self.assertEqual(state, State.CLICK_RED_ICON)
+            self.assertEqual(bot.current_red_icon_index, 1)
+            self.assertEqual(bot.red_icon_processed_count, 1)
+
+        def test_step_recovers_from_unexpected_exception_in_uninterrupted_mode(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.running = True
+            bot._apply_tuning = lambda *args, **kwargs: None
+            bot._enforce_state_min_interval = lambda *args, **kwargs: None
+            bot._interrupt_lock = threading.RLock()
+            bot._new_level_event = threading.Event()
+            bot._new_level_interrupt = None
+            bot._clear_new_level_interrupt = EatventureBot._clear_new_level_interrupt.__get__(bot, EatventureBot)
+            bot._capture_lock = threading.Lock()
+            bot._capture_cache = {}
+            bot._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+            bot._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
+            bot._suppress_interrupts = False
+            bot._no_red_scroll_cycle_pending = True
+            bot.red_icons = [(0.99, 10, 20)]
+            bot.current_red_icon_index = 0
+            bot.red_icon_cycle_count = 1
+            bot.wait_for_unlock_attempts = 1
+            bot.work_done = True
+            bot.upgrade_found_in_cycle = True
+            bot.upgrade_station_pos = (50, 50)
+            bot._last_upgrade_station_pos = (50, 50)
+            bot._recent_red_icon_history = [{"timestamp": time.monotonic(), "icons": []}]
+            bot.completion_detected_time = None
+            bot.completion_detected_by = None
+            bot._reset_search_cycle = lambda *args, **kwargs: None
+            transitions = []
+
+            class FailingStateMachine:
+                def update(self_inner):
+                    raise RuntimeError("boom")
+
+                def get_state_name(self_inner):
+                    return "FIND_RED_ICONS"
+
+                def get_state(self_inner):
+                    return State.FIND_RED_ICONS
+
+                def transition(self_inner, state):
+                    transitions.append(state)
+
+            bot.state_machine = FailingStateMachine()
+
+            original_interrupt_mode = config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            try:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = False
+                EatventureBot.step(bot)
+            finally:
+                config.ENABLE_NO_ICON_SCROLL_INTERRUPT = original_interrupt_mode
+
+            self.assertEqual(transitions, [State.FIND_RED_ICONS])
+            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(bot.current_red_icon_index, 0)
+            self.assertIsNone(bot.upgrade_station_pos)
 
         def test_open_boxes_counts_one_miss_per_empty_scan(self):
             bot = EatventureBot.__new__(EatventureBot)
