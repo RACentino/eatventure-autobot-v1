@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import time
+import ctypes
 from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum, auto
@@ -84,6 +85,44 @@ class StateMachine:
 
     def get_state_name(self):
         return self.current_state.name
+
+
+class WindowsTimerResolution:
+    def __init__(self):
+        self._enabled = False
+        self._period_ms = max(1, int(config.WINDOWS_TIMER_RESOLUTION_MS))
+        self._winmm = None
+        if os.name == "nt":
+            try:
+                self._winmm = ctypes.WinDLL("winmm")
+                self._winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
+                self._winmm.timeBeginPeriod.restype = ctypes.c_uint
+                self._winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+                self._winmm.timeEndPeriod.restype = ctypes.c_uint
+            except Exception:
+                self._winmm = None
+
+    def enable(self):
+        if self._enabled:
+            return
+        if not config.ENABLE_WINDOWS_TIMER_RESOLUTION:
+            return
+        if self._winmm is None:
+            return
+        result = self._winmm.timeBeginPeriod(self._period_ms)
+        if result == 0:
+            self._enabled = True
+            logger.info("Windows timer resolution enabled: %sms", self._period_ms)
+        else:
+            logger.warning("Failed to enable Windows timer resolution (code=%s)", result)
+
+    def disable(self):
+        if not self._enabled or self._winmm is None:
+            return
+        result = self._winmm.timeEndPeriod(self._period_ms)
+        if result != 0:
+            logger.warning("Failed to restore Windows timer resolution (code=%s)", result)
+        self._enabled = False
 
 
 class AdaptiveTuner:
@@ -441,7 +480,7 @@ class VisionOptimizer:
             if key not in state:
                 continue
             if key == "red_icon_threshold":
-                bootstrap_max = float(getattr(config, "AI_RED_ICON_BOOTSTRAP_MAX", maximum))
+                bootstrap_max = float(config.AI_RED_ICON_BOOTSTRAP_MAX)
                 maximum = min(maximum, bootstrap_max)
             try:
                 value = float(state[key])
@@ -472,16 +511,16 @@ class HistoricalLearner:
         self.bot = bot
         self.persistence = persistence
         self.enabled = config.AI_LEARNING_ENABLED
-        self.interval = max(config.LEARNING_LOOP_MIN_SLEEP, float(getattr(config, "AI_LEARNING_THREAD_INTERVAL", 0.05)))
-        self.pair_window = max(2, int(getattr(config, "AI_LEARNING_PAIR_WINDOW", 2)))
-        self.batch_window = max(2, int(getattr(config, "AI_LEARNING_BATCH_WINDOW", 7)))
-        self.ema_alpha = max(0.01, min(0.8, float(getattr(config, "AI_LEARNING_EMA_ALPHA", 0.18))))
-        self.top_k = max(1, int(getattr(config, "AI_LEARNING_PROFILE_BLEND_TOP_K", 3)))
+        self.interval = max(config.LEARNING_LOOP_MIN_SLEEP, float(config.AI_LEARNING_THREAD_INTERVAL))
+        self.pair_window = max(2, int(config.AI_LEARNING_PAIR_WINDOW))
+        self.batch_window = max(2, int(config.AI_LEARNING_BATCH_WINDOW))
+        self.ema_alpha = max(0.01, min(0.8, float(config.AI_LEARNING_EMA_ALPHA)))
+        self.top_k = max(1, int(config.AI_LEARNING_PROFILE_BLEND_TOP_K))
         self.min_improvement_ratio = max(
             0.0,
-            float(getattr(config, "AI_LEARNING_MIN_IMPROVEMENT_RATIO", 0.03)),
+            float(config.AI_LEARNING_MIN_IMPROVEMENT_RATIO),
         )
-        self.apply_cooldown = max(0.0, float(getattr(config, "AI_LEARNING_APPLY_COOLDOWN", 1.2)))
+        self.apply_cooldown = max(0.0, float(config.AI_LEARNING_APPLY_COOLDOWN))
         self._last_apply_time = 0.0
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -831,7 +870,7 @@ class OscillatingSearcher:
             if target_found:
                 return target_found
 
-            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.080))
+            self.bot.sleep(config.CYCLE_PAUSE_DURATION)
             boundary_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
             if boundary_hit:
                 return boundary_hit
@@ -847,7 +886,7 @@ class OscillatingSearcher:
             if target_found:
                 return target_found
 
-            self.bot.sleep(getattr(config, "CYCLE_PAUSE_DURATION", 0.080))
+            self.bot.sleep(config.CYCLE_PAUSE_DURATION)
             cycle_hit = self._perform_vision_pass(check_priority, check_main_target, check_fallbacks)
             if cycle_hit:
                 return cycle_hit
@@ -870,7 +909,7 @@ class OscillatingSearcher:
             if not self.perform_scroll(direction):
                 return None
 
-            settle_wait = self.settle_duration + getattr(config, "SCROLL_INTERVAL_PAUSE", 0.048)
+            settle_wait = self.settle_duration + config.SCROLL_INTERVAL_PAUSE
             self.bot.sleep(settle_wait)
 
             red_interrupt = self.bot.check_intra_scroll_red_interrupt()
@@ -910,13 +949,13 @@ class OscillatingSearcher:
         duration: Optional[float] = None,
     ):
         dir_int = self._map_direction(direction)
-        start_x, start_y = getattr(config, "SCROLL_START_POS", (180, 390))
+        start_x, start_y = config.SCROLL_START_POS
 
-        ratio = distance_ratio or getattr(config, "SCROLL_DISTANCE_RATIO", 1.0)
-        pixel_distance = int(getattr(config, "SCROLL_PIXEL_STEP", 175) * ratio)
+        ratio = distance_ratio or config.SCROLL_DISTANCE_RATIO
+        pixel_distance = int(config.SCROLL_PIXEL_STEP * ratio)
         end_y = start_y - (pixel_distance * dir_int)
 
-        scroll_duration = duration if duration is not None else getattr(config, "SCROLL_DURATION", 0.42)
+        scroll_duration = duration if duration is not None else config.SCROLL_DURATION
 
         success = self.bot.mouse_controller.drag(
             start_x,
@@ -990,9 +1029,9 @@ class ScrollHandler:
 
     def scroll(self, distance: int, direction: str = "DOWN", duration: float = None):
         if duration is None:
-            duration = getattr(config, "SCROLL_DURATION", 0.3)
+            duration = config.SCROLL_DURATION
 
-        start_pos = getattr(config, "SCROLL_START_POS", (180, 390))
+        start_pos = config.SCROLL_START_POS
         start_x, start_y = start_pos
 
         dir_mult = 1 if direction.upper() == "UP" else -1
@@ -1012,7 +1051,7 @@ class ScrollHandler:
 
         if success:
             self.current_scroll_y += distance * dir_mult
-            self.bot.sleep(getattr(config, "SCROLL_SETTLE_DELAY", 0.15))
+            self.bot.sleep(config.SCROLL_SETTLE_DELAY)
 
         return success
 
@@ -1033,9 +1072,9 @@ class BaseHandler:
             return False
 
         template, mask = self.templates[template_name]
-        threshold = threshold or getattr(config, "VERIFY_THRESHOLD", 0.96)
+        threshold = threshold or config.VERIFY_THRESHOLD
 
-        padding = getattr(config, "VERIFY_PADDING", 32)
+        padding = config.VERIFY_PADDING
         x1, y1 = max(0, x - padding), max(0, y - padding)
         x2 = min(screenshot.shape[1], x + padding)
         y2 = min(screenshot.shape[0], y + padding)
@@ -1088,7 +1127,7 @@ class RedIconHandler(BaseHandler):
         if self._search_tracked_targets(screenshot, scroll_y):
             return True
 
-        max_y = getattr(config, "MAX_SEARCH_Y", 660)
+        max_y = config.MAX_SEARCH_Y
         bands = [(0, 220), (220, 440), (440, max_y)]
 
         for y_start, y_end in bands:
@@ -1105,7 +1144,7 @@ class RedIconHandler(BaseHandler):
         for wx, wy, name in self.active_targets:
             sx, sy = wx, wy - scroll_y
 
-            if 10 <= sy < getattr(config, "MAX_SEARCH_Y", 660) - 10:
+            if 10 <= sy < config.MAX_SEARCH_Y - 10:
                 roi_box = (
                     max(0, sx - 45),
                     min(screenshot.shape[1], sx + 45),
@@ -1129,7 +1168,7 @@ class RedIconHandler(BaseHandler):
         if roi.size == 0:
             return False
 
-        threshold = getattr(config, "RED_ICON_THRESHOLD", 0.94)
+        threshold = config.RED_ICON_THRESHOLD
         scroll_y = self.scroll_handler.current_scroll_y
 
         found_icons = []
@@ -1175,7 +1214,7 @@ class UpgradeStationHandler(BaseHandler):
     """Isolated module for Upgrade Station processing."""
 
     def process(self, screenshot: np.ndarray):
-        search_roi = (0, screenshot.shape[1], 250, getattr(config, "MAX_SEARCH_Y", 660))
+        search_roi = (0, screenshot.shape[1], 250, config.MAX_SEARCH_Y)
         x1, x2, y1, y2 = search_roi
         roi = screenshot[y1:y2, x1:x2]
 
@@ -1194,7 +1233,7 @@ class BoxHandler(BaseHandler):
     """Isolated module for Box processing."""
 
     def process(self, screenshot: np.ndarray):
-        search_roi = (0, screenshot.shape[1], 150, getattr(config, "MAX_SEARCH_Y", 660))
+        search_roi = (0, screenshot.shape[1], 150, config.MAX_SEARCH_Y)
         x1, x2, y1, y2 = search_roi
         roi = screenshot[y1:y2, x1:x2]
 
@@ -1246,13 +1285,13 @@ class EatventureBot:
         self._red_template_hit_counts = {}
         self._red_template_priority = []
         self._red_template_last_seen = {}
-        self._red_template_decay_window = max(1.0, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", 0.22)))
+        self._red_template_decay_window = max(1.0, float(config.RED_ICON_STABILITY_CACHE_TTL))
         self.running = False
         self.red_icon_cycle_count = 0
         self.red_icons = []
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
-        self.max_wait_for_unlock_attempts = getattr(config, "WAIT_FOR_UNLOCK_MAX_ATTEMPTS", 50)
+        self.max_wait_for_unlock_attempts = config.WAIT_FOR_UNLOCK_MAX_ATTEMPTS
         self.upgrade_station_pos = None
         
         # Legacy directional scroll state removed.
@@ -1307,10 +1346,11 @@ class EatventureBot:
         self._forbidden_blackout_cache = {} # {world_coord_tuple: expiry_timestamp}
         self._no_red_scroll_cycle_pending = False
         self._last_forbidden_scroll_time = 0.0
+        self._timer_resolution = WindowsTimerResolution()
 
         self.forbidden_zones = [
             (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
-            for zone in getattr(config, "FORBIDDEN_ZONES", [])
+            for zone in config.FORBIDDEN_ZONES
         ]
 
         self.overlay = None
@@ -1355,7 +1395,7 @@ class EatventureBot:
             return False
 
         # 1. Check if bot was stopped by user
-        if not self.running:
+        if not getattr(self, "running", True):
             if raise_exception:
                 raise BotStoppedInterrupt("Bot stopped")
             return True
@@ -1374,7 +1414,8 @@ class EatventureBot:
         """Centralized sleep that is aware of high-priority interrupts."""
         self.check_critical_interrupts()
         if duration > 0:
-            time.sleep(duration)
+            if self._sleep_with_interrupt(duration):
+                self.check_critical_interrupts()
 
     def _consume_new_level_interrupt(self):
         with self._interrupt_lock:
@@ -1405,7 +1446,7 @@ class EatventureBot:
             
         # Also enforce a short cooldown after a transition to handle game lag/echoes
         if source == "new level button" or source == "new level red icon":
-            if time.monotonic() - self._last_transition_time < 5.0:
+            if time.monotonic() - self._last_transition_time < config.NEW_LEVEL_POST_TRANSITION_IGNORE_WINDOW:
                 return True
                 
         return False
@@ -1465,7 +1506,7 @@ class EatventureBot:
 
     def _click_idle(self, wait_after=True):
         now = time.monotonic()
-        cooldown = getattr(config, "IDLE_CLICK_COOLDOWN", 0.0)
+        cooldown = config.IDLE_CLICK_COOLDOWN
         if cooldown > 0 and now - self._last_idle_click_time < cooldown:
             logger.debug("Skipping idle click due to cooldown")
             return False
@@ -1488,7 +1529,7 @@ class EatventureBot:
             y_position,
         )
         now = time.monotonic()
-        cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
+        cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
         wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
         if wait_remaining > 0:
             if self._uninterrupted_main_flow_enabled():
@@ -1506,7 +1547,7 @@ class EatventureBot:
         return True
 
     def _uninterrupted_main_flow_enabled(self):
-        return not bool(getattr(config, "ENABLE_NO_ICON_SCROLL_INTERRUPT", False))
+        return not bool(config.ENABLE_NO_ICON_SCROLL_INTERRUPT)
 
     def _advance_after_blocked_red_icon(self, reason):
         logger.warning("%s", reason)
@@ -1562,8 +1603,8 @@ class EatventureBot:
         return recovery_state
 
     def _is_asset_click_safe(self, asset_name, x, y):
-        precheck_delay = max(0.0, float(getattr(config, "ASSET_BOUNDARY_PRECHECK_DELAY", 0.0)))
-        confirm_delay = max(0.0, float(getattr(config, "ASSET_BOUNDARY_CONFIRM_DELAY", 0.0)))
+        precheck_delay = max(0.0, float(config.ASSET_BOUNDARY_PRECHECK_DELAY))
+        confirm_delay = max(0.0, float(config.ASSET_BOUNDARY_CONFIRM_DELAY))
 
         if precheck_delay > 0:
             if self._sleep_with_interrupt(precheck_delay):
@@ -1617,7 +1658,7 @@ class EatventureBot:
             return None
 
         if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
-            if not getattr(config, "ENABLE_NO_ICON_SCROLL_INTERRUPT", False):
+            if not config.ENABLE_NO_ICON_SCROLL_INTERRUPT:
                 logger.debug(
                     "No-icon scroll interrupt condition met but BYPASSED (ENABLE_NO_ICON_SCROLL_INTERRUPT=False)"
                 )
@@ -1629,7 +1670,7 @@ class EatventureBot:
 
         interrupt = self._consume_new_level_interrupt()
         if interrupt:
-            if not getattr(config, "ENABLE_NEW_LEVEL_INTERRUPT", False):
+            if not config.ENABLE_NEW_LEVEL_INTERRUPT:
                 logger.debug(
                     "New level interrupt (background %s) detected but BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
                     interrupt["source"],
@@ -1661,7 +1702,7 @@ class EatventureBot:
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
-            if not getattr(config, "ENABLE_NEW_LEVEL_INTERRUPT", False):
+            if not config.ENABLE_NEW_LEVEL_INTERRUPT:
                 logger.debug(
                     "New level priority hit (%s at %s,%s) BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
                     source, x, y,
@@ -1683,8 +1724,8 @@ class EatventureBot:
 
     def _enforce_state_min_interval(self):
         state = self.state_machine.get_state_name()
-        per_state = getattr(config, "STATE_MIN_INTERVALS", {})
-        min_interval = float(per_state.get(state, getattr(config, "STATE_MIN_INTERVAL_DEFAULT", 0.0)))
+        per_state = config.STATE_MIN_INTERVALS
+        min_interval = float(per_state.get(state, config.STATE_MIN_INTERVAL_DEFAULT))
         if min_interval <= 0:
             self._state_last_run_at[state] = time.monotonic()
             return
@@ -1701,11 +1742,11 @@ class EatventureBot:
         if not red_icons:
             return []
 
-        ttl = max(0.01, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", 0.22)))
-        radius = max(4, int(getattr(config, "RED_ICON_STABILITY_RADIUS", 14)))
-        min_hits = max(1, int(getattr(config, "RED_ICON_STABILITY_MIN_HITS", 2)))
-        max_history = max(2, int(getattr(config, "RED_ICON_STABILITY_MAX_HISTORY", 10)))
-        immediate_threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50) * 1.5 # Super solid trigger
+        ttl = max(0.01, float(config.RED_ICON_STABILITY_CACHE_TTL))
+        radius = max(4, int(config.RED_ICON_STABILITY_RADIUS))
+        min_hits = max(1, int(config.RED_ICON_STABILITY_MIN_HITS))
+        max_history = max(2, int(config.RED_ICON_STABILITY_MAX_HISTORY))
+        immediate_threshold = config.RED_ICON_PIXEL_THRESHOLD * 1.5
         now = time.monotonic()
 
         history = []
@@ -1744,7 +1785,7 @@ class EatventureBot:
     def _add_to_blackout(self, x, y):
         """Registers a screen coordinate to the world-space blackout cache."""
         now = time.monotonic()
-        ttl = float(getattr(config, "FORBIDDEN_BLACKOUT_DURATION", 2.5))
+        ttl = float(config.FORBIDDEN_BLACKOUT_DURATION)
         scroll_y = int(self.scroll_offset_units * config.SCROLL_PIXEL_STEP)
         world_coord = (int(x), int(y + scroll_y))
         self._forbidden_blackout_cache[world_coord] = now + ttl
@@ -1761,7 +1802,7 @@ class EatventureBot:
 
     def _click_new_level_override(self, source=None, x=None, y=None):
         now = time.monotonic()
-        cooldown = getattr(config, "NEW_LEVEL_OVERRIDE_COOLDOWN", 0.0)
+        cooldown = config.NEW_LEVEL_OVERRIDE_COOLDOWN
         if cooldown > 0 and now - self._last_new_level_override_time < cooldown:
             logger.debug("Priority override: skipping click sequence due to cooldown")
             return
@@ -1876,7 +1917,7 @@ class EatventureBot:
             red_icons = self._detect_red_icons_in_view(screenshot, max_y=config.MAX_SEARCH_Y)
             
             # Implementation: Immediate Trigger for high density
-            immediate_threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 50) * 1.5
+            immediate_threshold = config.RED_ICON_PIXEL_THRESHOLD * 1.5
             
             if red_icons:
                 filtered, _ = self._filter_forbidden_red_icons(red_icons)
@@ -2146,7 +2187,8 @@ class EatventureBot:
             "Configured travel button",
         ):
             return False
-        time.sleep(config.BACKUP_CLICK_GAP)
+        if self._sleep_with_interrupt(config.BACKUP_CLICK_GAP):
+            return False
         return self._click_transition_target(
             config.LEVEL_TRANSITION_POS[0],
             config.LEVEL_TRANSITION_POS[1],
@@ -2481,20 +2523,20 @@ class EatventureBot:
         Both gates must pass (AND logic). Either failure discards the candidate.
         Returns: (passed, pixel_count)
         """
-        show_mask = getattr(config, "DEBUG_VISION", False)
+        show_mask = config.DEBUG_VISION
         metrics = self.image_matcher.analyze_red_region(
             screenshot,
             x,
             y,
-            size=getattr(config, "RED_ICON_COLOR_SAMPLE_SIZE", 24),
+            size=config.RED_ICON_COLOR_SAMPLE_SIZE,
             show_mask=show_mask,
         )
         pixel_count = metrics["pixel_count"]
 
-        threshold = getattr(config, "RED_ICON_PIXEL_THRESHOLD", 48)
-        min_ratio = getattr(config, "RED_ICON_COLOR_MIN_RATIO", 1.35)
-        max_ratio = getattr(config, "RED_ICON_COLOR_MAX_RATIO", 999.0)
-        min_mean = getattr(config, "RED_ICON_COLOR_MIN_MEAN", 55)
+        threshold = config.RED_ICON_PIXEL_THRESHOLD
+        min_ratio = config.RED_ICON_COLOR_MIN_RATIO
+        max_ratio = config.RED_ICON_COLOR_MAX_RATIO
+        min_mean = config.RED_ICON_COLOR_MIN_MEAN
         if relaxed:
             threshold = max(1, int(round(threshold * 0.8)))
             min_ratio *= 0.92
@@ -2551,8 +2593,8 @@ class EatventureBot:
         3. Filters 'safe' icons against the blackout cache to prevent immediate re-detection.
         """
         now = time.monotonic()
-        ttl = float(getattr(config, "FORBIDDEN_BLACKOUT_DURATION", 2.5))
-        radius = int(getattr(config, "RED_ICON_STABILITY_RADIUS", 14))
+        ttl = float(config.FORBIDDEN_BLACKOUT_DURATION)
+        radius = int(config.RED_ICON_STABILITY_RADIUS)
         
         # Purge expired blackout entries
         self._forbidden_blackout_cache = {
@@ -2603,7 +2645,7 @@ class EatventureBot:
 
         red_icons.sort(key=get_priority)
 
-        max_per_scan = max(1, int(getattr(config, "RED_ICON_MAX_PER_SCAN", 1)))
+        max_per_scan = max(1, int(config.RED_ICON_MAX_PER_SCAN))
         if len(red_icons) > max_per_scan:
             logger.debug(
                 "Red icon queue limited from %s to %s for single-target interaction safety",
@@ -2719,9 +2761,10 @@ class EatventureBot:
         
         if target_state:
             # Cycle cooldown if found
-            cooldown = getattr(config, "OSCILLATION_CYCLE_COOLDOWN", 0)
+            cooldown = config.OSCILLATION_CYCLE_COOLDOWN
             if cooldown > 0:
-                time.sleep(cooldown)
+                if self._sleep_with_interrupt(cooldown):
+                    return State.CHECK_NEW_LEVEL
             return target_state
         
         # Exhausted retries -> return to base scanning
@@ -2921,7 +2964,7 @@ class EatventureBot:
             self._red_template_hit_counts[template_name] = self._red_template_hit_counts.get(template_name, 0) + count
             self._red_template_last_seen[template_name] = now
 
-        decay_window = max(1.0, float(getattr(config, "RED_ICON_STABILITY_CACHE_TTL", self._red_template_decay_window)))
+        decay_window = max(1.0, float(config.RED_ICON_STABILITY_CACHE_TTL))
         scored = []
         for name, count in self._red_template_hit_counts.items():
             last_seen = self._red_template_last_seen.get(name, now)
@@ -2931,7 +2974,7 @@ class EatventureBot:
             scored.append((name, score))
 
         scored.sort(key=lambda item: item[1], reverse=True)
-        limit = max(1, getattr(config, "RED_ICON_PRIORITY_TEMPLATE_LIMIT", 8))
+        limit = max(1, config.RED_ICON_PRIORITY_TEMPLATE_LIMIT)
         self._red_template_priority = [name for name, _ in scored[:limit]]
 
     def _build_available_red_icon_templates(self):
@@ -2952,7 +2995,7 @@ class EatventureBot:
         return signatures
 
     def _passes_red_icon_template_gate(self, screenshot, x, y, template_name, template, mask, relaxed=False):
-        if not getattr(config, "RED_ICON_TEMPLATE_VERIFY", True):
+        if not config.RED_ICON_TEMPLATE_VERIFY:
             return True, {}
 
         signature = getattr(self, "_red_template_signatures", {}).get(template_name)
@@ -2966,14 +3009,14 @@ class EatventureBot:
             template,
             mask=mask,
             signature=signature,
-            max_offset=getattr(config, "RED_ICON_TEMPLATE_VERIFY_MAX_OFFSET", 1),
+            max_offset=config.RED_ICON_TEMPLATE_VERIFY_MAX_OFFSET,
         )
 
-        min_coverage = float(getattr(config, "RED_ICON_TEMPLATE_MIN_COVERAGE", 0.28))
-        min_precision = float(getattr(config, "RED_ICON_TEMPLATE_MIN_PRECISION", 0.55))
-        min_recall = float(getattr(config, "RED_ICON_TEMPLATE_MIN_RECALL", 0.55))
-        min_iou = float(getattr(config, "RED_ICON_TEMPLATE_MIN_IOU", 0.38))
-        min_color_similarity = float(getattr(config, "RED_ICON_TEMPLATE_COLOR_SIMILARITY", 0.72))
+        min_coverage = float(config.RED_ICON_TEMPLATE_MIN_COVERAGE)
+        min_precision = float(config.RED_ICON_TEMPLATE_MIN_PRECISION)
+        min_recall = float(config.RED_ICON_TEMPLATE_MIN_RECALL)
+        min_iou = float(config.RED_ICON_TEMPLATE_MIN_IOU)
+        min_color_similarity = float(config.RED_ICON_TEMPLATE_COLOR_SIMILARITY)
         if relaxed:
             min_coverage *= 0.9
             min_precision *= 0.95
@@ -3112,7 +3155,7 @@ class EatventureBot:
 
         if forbidden_present:
             now = time.monotonic()
-            cooldown = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN", 0.0)))
+            cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
             wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
             if wait_remaining > 0:
                 if self._uninterrupted_main_flow_enabled():
@@ -3157,14 +3200,14 @@ class EatventureBot:
 
     def _resolve_red_icon_zone_state(self):
         """Debounced 4-state arbitration for safe-vs-forbidden red icon handling."""
-        pre_delay = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_DETECTION_PRE_DELAY", 0.0)))
-        post_delay = max(0.0, float(getattr(config, "FORBIDDEN_ZONE_DETECTION_POST_DELAY", 0.0)))
-        ticks = max(1, int(getattr(config, "FORBIDDEN_ZONE_DEBOUNCE_TICKS", 1)))
+        pre_delay = max(0.0, float(config.FORBIDDEN_ZONE_DETECTION_PRE_DELAY))
+        post_delay = max(0.0, float(config.FORBIDDEN_ZONE_DETECTION_POST_DELAY))
+        ticks = max(1, int(config.FORBIDDEN_ZONE_DEBOUNCE_TICKS))
         required_consensus = max(
             1,
             min(
                 ticks,
-                int(getattr(config, "FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS", ticks)),
+                int(config.FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS),
             ),
         )
 
@@ -3714,7 +3757,8 @@ class EatventureBot:
                 return State.CHECK_NEW_LEVEL
             return self._abort_transition("verification drag failed")
         # Settle after scroll
-        time.sleep(config.POST_SCROLL_SETTLE)
+        if self._sleep_with_interrupt(config.POST_SCROLL_SETTLE):
+            return State.CHECK_NEW_LEVEL
 
         # 2. Secondary Detection Check
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
@@ -3744,11 +3788,13 @@ class EatventureBot:
                 "New level acknowledgment",
             ):
                 return self._abort_transition("acknowledgment click failed")
-            time.sleep(config.NEW_LEVEL_BUTTON_DELAY)
+            if self._sleep_with_interrupt(config.NEW_LEVEL_BUTTON_DELAY):
+                return State.CHECK_NEW_LEVEL
 
             # Step 2: Animation Buffer
             logger.info("Step 2: Animation Buffer (%ss)", config.TRANSITION_POST_CLICK_DELAY)
-            time.sleep(config.TRANSITION_POST_CLICK_DELAY)
+            if self._sleep_with_interrupt(config.TRANSITION_POST_CLICK_DELAY):
+                return State.CHECK_NEW_LEVEL
 
             # Step 3: Confirm Travel
             if not self._execute_transition_travel_clicks():
@@ -3761,7 +3807,8 @@ class EatventureBot:
 
         # Step 5: Load Stabilization
         logger.info("Step 5: Load Stabilization (%ss)", config.NEW_LEVEL_FOLLOWUP_DELAY)
-        time.sleep(config.NEW_LEVEL_FOLLOWUP_DELAY)
+        if self._sleep_with_interrupt(config.NEW_LEVEL_FOLLOWUP_DELAY):
+            return State.CHECK_NEW_LEVEL
 
         # 4. Hand back to specialized Hot Loop (WAIT_FOR_UNLOCK is returned by _finalize_transition)
         logger.info(">>> TRANSITION COMPLETE: Handing control to Hot Loop (WAIT_FOR_UNLOCK)")
@@ -3795,9 +3842,10 @@ class EatventureBot:
                 ):
                     return self._abort_transition("acknowledgment click failed")
 
-                button_delay = getattr(config, "NEW_LEVEL_BUTTON_DELAY", 0.02)
+                button_delay = config.NEW_LEVEL_BUTTON_DELAY
                 if button_delay > 0:
-                    time.sleep(button_delay)
+                    if self._sleep_with_interrupt(button_delay):
+                        return State.CHECK_NEW_LEVEL
 
                 if not self._execute_transition_travel_clicks():
                     return self._abort_transition("travel confirmation click failed")
@@ -3893,7 +3941,8 @@ class EatventureBot:
                     
                     # STEP C: Verify click success (Check if button disappeared)
                     # We wait for UI to register and then re-verify
-                    time.sleep(config.UNLOCK_REGISTER_WAIT)
+                    if self._sleep_with_interrupt(config.UNLOCK_REGISTER_WAIT):
+                        return State.CHECK_NEW_LEVEL
                     v_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
                     v_found, _, _, _ = self.image_matcher.find_template(
                         v_screenshot, template, mask=mask,
@@ -3908,7 +3957,8 @@ class EatventureBot:
                         logger.debug("Unlock click not registered by UI; retrying next poll...")
 
             # Maintain the tight polling cadence
-            time.sleep(polling_interval)
+            if self._sleep_with_interrupt(polling_interval):
+                return State.CHECK_NEW_LEVEL
             
         # --- SMART TIMEOUT EXIT STRATEGY ---
         logger.warning(f"!!! Timeout: Unlock button not found within {max_duration}s.")
@@ -3932,6 +3982,7 @@ class EatventureBot:
         if self.running:
             return
 
+        self._timer_resolution.enable()
         self._reset_runtime_interrupt_state(reset_completion=True)
         self.running = True
         logger.info("Bot started")
@@ -3959,6 +4010,7 @@ class EatventureBot:
 
     def stop(self):
         if not self.running:
+            self._timer_resolution.disable()
             return
 
         self.running = False
@@ -3971,6 +4023,7 @@ class EatventureBot:
             self.overlay.stop()
             self.overlay = None
         self._reset_runtime_interrupt_state(reset_completion=True)
+        self._timer_resolution.disable()
         logger.info("Bot stopped")
 
     def step(self):

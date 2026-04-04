@@ -164,7 +164,7 @@ class ForbiddenAreaOverlay:
     def stop(self):
         self.running = False
         if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
-            self.thread.join(timeout=max(0.1, float(getattr(config, "THREAD_JOIN_TIMEOUT", 1.0))))
+            self.thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
         self.thread = None
         self._destroy_overlay_window()
         logger.info("Forbidden area overlay stopped")

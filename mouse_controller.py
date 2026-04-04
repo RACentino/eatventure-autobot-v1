@@ -44,10 +44,10 @@ _SEND_INPUT.restype = wintypes.UINT
 
 
 class MouseController:
-    def __init__(self, hwnd, click_delay=0.1, move_delay=0.004):
+    def __init__(self, hwnd, click_delay=None, move_delay=None):
         self.hwnd = hwnd
-        self.click_delay = click_delay
-        self.move_delay = move_delay
+        self.click_delay = config.CLICK_DELAY if click_delay is None else click_delay
+        self.move_delay = config.MOUSE_MOVE_DELAY if move_delay is None else move_delay
         self.interrupt_callback = None # Set by bot to check for high-priority interrupts
         self._last_click_time = 0.0
         self._last_cursor_pos = None
@@ -395,21 +395,21 @@ class MouseController:
         else:
             distance = max(0.0, float(distance_override))
 
-        base_delay = max(0.0, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_BASE", 0.0)))
-        max_delay = max(base_delay, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_MAX", base_delay)))
-        distance_factor = max(0.0, float(getattr(config, "MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR", 0.0)))
+        base_delay = max(0.0, float(config.MOUSE_PRE_CLICK_STABILIZE_BASE))
+        max_delay = max(base_delay, float(config.MOUSE_PRE_CLICK_STABILIZE_MAX))
+        distance_factor = max(0.0, float(config.MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR))
         stabilize_delay = min(max_delay, base_delay + (distance * distance_factor))
         if stabilize_delay > 0:
             self._sleep(stabilize_delay)
 
     def _ensure_cursor_at_target(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
-        tolerance = getattr(config, "MOUSE_POSITION_TOLERANCE", 0)
-        timeout = getattr(config, "MOUSE_TARGET_TIMEOUT", 0.0)
-        check_interval = getattr(config, "MOUSE_TARGET_CHECK_INTERVAL", 0.0)
-        settle_delay = getattr(config, "MOUSE_TARGET_SETTLE_DELAY", 0.0)
-        hover_delay = getattr(config, "MOUSE_TARGET_HOVER_DELAY", 0.0)
-        stabilize_duration = getattr(config, "MOUSE_STABILIZE_DURATION", 0.0)
+        tolerance = config.MOUSE_POSITION_TOLERANCE
+        timeout = config.MOUSE_TARGET_TIMEOUT
+        check_interval = config.MOUSE_TARGET_CHECK_INTERVAL
+        settle_delay = config.MOUSE_TARGET_SETTLE_DELAY
+        hover_delay = config.MOUSE_TARGET_HOVER_DELAY
+        stabilize_duration = config.MOUSE_STABILIZE_DURATION
 
         start_time = time.monotonic()
         stable_since = None
@@ -448,7 +448,7 @@ class MouseController:
         target_center_x, target_center_y = self._translate_to_monitor_space(x, y, relative=relative)
         window_origin = self.get_window_position()
 
-        for zone in getattr(config, "FORBIDDEN_ZONES", []):
+        for zone in config.FORBIDDEN_ZONES:
             zone_x1, zone_x2, zone_y1, zone_y2 = self._zone_to_monitor_space(zone, window_origin)
             zone_x1, zone_x2 = sorted((zone_x1, zone_x2))
             zone_y1, zone_y2 = sorted((zone_y1, zone_y2))
@@ -465,11 +465,11 @@ class MouseController:
     def _validate_pre_click_target(self, screen_x, screen_y):
         validation_delay = max(
             0.0,
-            float(getattr(config, "FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY", 0.0)),
+            float(config.FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY),
         )
         double_check_delay = max(
             0.0,
-            float(getattr(config, "FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY", 0.0)),
+            float(config.FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY),
         )
 
         if validation_delay > 0:
@@ -627,9 +627,9 @@ class MouseController:
 
         self._check_interrupts()
         if duration is None:
-            duration = getattr(config, "SPAM_CLICK_DURATION", 6.0)
+            duration = config.SPAM_CLICK_DURATION
         if click_delay is None:
-            click_delay = getattr(config, "SPAM_CLICK_DELAY", 0.035)
+            click_delay = config.SPAM_CLICK_DELAY
 
         duration = max(0.0, float(duration))
         click_delay = max(0.0, float(click_delay))
@@ -767,7 +767,7 @@ class MouseController:
             )
             self._sleep(config.MOUSE_DOWN_UP_DELAY)
 
-            steps = max(1, int(getattr(config, "SCROLL_STEP_COUNT", 20)))
+            steps = max(1, int(config.SCROLL_STEP_COUNT))
             duration = max(duration, config.DRAG_MIN_DURATION)
             start_time = time.monotonic()
             interrupted = False
@@ -805,6 +805,5 @@ class MouseController:
                 return False
 
             logger.info(f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})")
-            settle_delay = getattr(config, "SCROLL_SETTLE_DELAY", 0.0)
-            self._sleep(settle_delay if settle_delay > 0 else self.click_delay)
+            self._sleep(config.SCROLL_SETTLE_DELAY)
             return True
