@@ -1657,27 +1657,23 @@ class EatventureBot:
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
             return None
 
-        if current_state == State.FIND_RED_ICONS and self._no_red_scroll_cycle_pending:
-            if not config.ENABLE_NO_ICON_SCROLL_INTERRUPT:
-                logger.debug(
-                    "No-icon scroll interrupt condition met but BYPASSED (ENABLE_NO_ICON_SCROLL_INTERRUPT=False)"
-                )
-                self._no_red_scroll_cycle_pending = False
-                return None
+        if not config.ENABLE_NO_ICON_SCROLL_INTERRUPT and self._no_red_scroll_cycle_pending:
+            logger.debug(
+                "No-icon scroll interrupt disabled; clearing deferred no-red scroll continuation state"
+            )
+            self._no_red_scroll_cycle_pending = False
+
+        if (
+            config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            and current_state == State.FIND_RED_ICONS
+            and self._no_red_scroll_cycle_pending
+        ):
             logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
             self._no_red_scroll_cycle_pending = False
             return State.SCROLL
 
         interrupt = self._consume_new_level_interrupt()
         if interrupt:
-            if not config.ENABLE_NEW_LEVEL_INTERRUPT:
-                logger.debug(
-                    "New level interrupt (background %s) detected but BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
-                    interrupt["source"],
-                )
-                if self._no_red_scroll_cycle_pending:
-                    self._no_red_scroll_cycle_pending = False
-                return None
             logger.info(
                 "Priority override: background %s detected at (%s, %s), interrupting current action",
                 interrupt["source"],
@@ -1702,12 +1698,6 @@ class EatventureBot:
         )
         if priority_hit:
             source, confidence, x, y = priority_hit
-            if not config.ENABLE_NEW_LEVEL_INTERRUPT:
-                logger.debug(
-                    "New level priority hit (%s at %s,%s) BYPASSED (ENABLE_NEW_LEVEL_INTERRUPT=False)",
-                    source, x, y,
-                )
-                return None
             logger.info(
                 "Priority override: %s detected at (%s, %s), transitioning immediately",
                 source,
@@ -2919,13 +2909,23 @@ class EatventureBot:
                 logger.debug("Fallback scan: boxes only in forbidden zone, ignoring.")
 
         if clicked_targets > 0:
-            self._no_red_scroll_cycle_pending = True
-            logger.info(
-                "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
-                clicked_targets,
-                clicked_upgrade_station,
-                clicked_box,
-            )
+            if config.ENABLE_NO_ICON_SCROLL_INTERRUPT:
+                self._no_red_scroll_cycle_pending = True
+                logger.info(
+                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
+                    clicked_targets,
+                    clicked_upgrade_station,
+                    clicked_box,
+                )
+            else:
+                self._no_red_scroll_cycle_pending = False
+                logger.info(
+                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; "
+                    "no-red scroll continuation suppressed (ENABLE_NO_ICON_SCROLL_INTERRUPT=False)",
+                    clicked_targets,
+                    clicked_upgrade_station,
+                    clicked_box,
+                )
 
         return clicked_targets
 
