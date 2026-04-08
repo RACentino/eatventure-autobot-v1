@@ -1301,6 +1301,10 @@ class EatventureBot:
         self.red_icon_processed_count = 0
         self.forbidden_icon_scrolls = 0
         self.scroll_offset_units = 0  # Tracks vertical drift from center
+        self._oscillation_cycle_index = 1
+        self._oscillation_leg_direction = 1
+        self._oscillation_leg_progress = 0
+        self._scroll_break_sequence_pending = False
         
         self.successful_red_icon_positions = []
         self.upgrade_found_in_cycle = False
@@ -1549,22 +1553,62 @@ class EatventureBot:
     def _uninterrupted_main_flow_enabled(self):
         return not bool(config.ENABLE_NO_ICON_SCROLL_INTERRUPT)
 
+    def _no_icon_scroll_interrupt_enabled(self):
+        return bool(config.ENABLE_NO_ICON_SCROLL_INTERRUPT)
+
+    def _scroll_break_passthrough_active(self):
+        if not getattr(self, "_scroll_break_sequence_pending", False):
+            return False
+        event = getattr(self, "_new_level_event", None)
+        if event is not None and event.is_set():
+            return False
+        if getattr(self, "completion_detected_time", None) is not None:
+            return False
+        return True
+
+    def _current_oscillation_leg_target_steps(self):
+        increment = max(1, int(config.SCROLL_INCREMENT_STEP))
+        return max(1, int(self._oscillation_cycle_index) * increment)
+
+    def _advance_oscillation_progress(self):
+        leg_target = self._current_oscillation_leg_target_steps()
+        self._oscillation_leg_progress += 1
+
+        leg_completed = self._oscillation_leg_progress >= leg_target
+        cycle_completed = False
+
+        if leg_completed:
+            self._oscillation_leg_progress = 0
+            if self._oscillation_leg_direction > 0:
+                self._oscillation_leg_direction = -1
+            else:
+                self._oscillation_leg_direction = 1
+                cycle_completed = True
+                self._oscillation_cycle_index += 1
+                max_cycles = max(1, int(config.MAX_SCROLL_CYCLES))
+                if self._oscillation_cycle_index > max_cycles:
+                    self._oscillation_cycle_index = 1
+
+        return leg_completed, cycle_completed, leg_target
+
     def _advance_after_blocked_red_icon(self, reason):
         logger.warning("%s", reason)
-        self.current_red_icon_index += 1
-        if self.current_red_icon_index < len(self.red_icons):
+        self.current_red_icon_index = getattr(self, "current_red_icon_index", 0) + 1
+        red_icons = getattr(self, "red_icons", [])
+        if self.current_red_icon_index < len(red_icons):
             return State.CLICK_RED_ICON
-        return State.OPEN_BOXES
+        return State.CHECK_UNLOCK
 
     def _advance_after_blocked_station(self, reason):
         logger.warning("%s", reason)
-        self.red_icon_processed_count += 1
-        self.current_red_icon_index += 1
+        self.red_icon_processed_count = getattr(self, "red_icon_processed_count", 0) + 1
+        self.current_red_icon_index = getattr(self, "current_red_icon_index", 0) + 1
         self.upgrade_station_pos = None
         self._last_upgrade_station_pos = None
-        if self.current_red_icon_index < len(self.red_icons):
+        red_icons = getattr(self, "red_icons", [])
+        if self.current_red_icon_index < len(red_icons):
             return State.CLICK_RED_ICON
-        return State.OPEN_BOXES
+        return State.UPGRADE_STATS
 
     def _recover_from_step_exception(self):
         current_state = self.state_machine.get_state()
@@ -1657,14 +1701,8 @@ class EatventureBot:
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
             return None
 
-        if not config.ENABLE_NO_ICON_SCROLL_INTERRUPT and self._no_red_scroll_cycle_pending:
-            logger.debug(
-                "No-icon scroll interrupt disabled; clearing deferred no-red scroll continuation state"
-            )
-            self._no_red_scroll_cycle_pending = False
-
         if (
-            config.ENABLE_NO_ICON_SCROLL_INTERRUPT
+            self._no_icon_scroll_interrupt_enabled()
             and current_state == State.FIND_RED_ICONS
             and self._no_red_scroll_cycle_pending
         ):
@@ -1680,7 +1718,7 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
-            if self._no_red_scroll_cycle_pending:
+            if self._no_icon_scroll_interrupt_enabled() and self._no_red_scroll_cycle_pending:
                 logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
                 self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(
@@ -1704,7 +1742,7 @@ class EatventureBot:
                 x,
                 y,
             )
-            if self._no_red_scroll_cycle_pending:
+            if self._no_icon_scroll_interrupt_enabled() and self._no_red_scroll_cycle_pending:
                 logger.info("Clearing deferred no-red scroll due to immediate level transition")
                 self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=source)
@@ -1808,6 +1846,7 @@ class EatventureBot:
         self._last_new_level_fail_time = 0.0
         self._last_transition_time = 0.0
         self._no_red_scroll_cycle_pending = False
+        self._scroll_break_sequence_pending = False
         self.red_icons = []
         self.current_red_icon_index = 0
         self.red_icon_cycle_count = 0
@@ -2738,27 +2777,47 @@ class EatventureBot:
         return None
 
     def execute_oscillating_search(self):
-        """
-        Principal Architect Refactor: Uses the new OscillatingSearcher class 
-        to execute a strict 5-step Scan-First protocol.
-        """
-        # Execute cycle with 3 distinct callback layers
-        target_state = self.searcher.execute_cycle(
-            check_priority=self.check_priority_targets,
-            check_main_target=self.check_main_success,
-            check_fallbacks=self.check_fallbacks
+        direction = 1 if self._oscillation_leg_direction > 0 else -1
+        direction_label = "DOWN" if direction > 0 else "UP"
+        cycle_index = self._oscillation_cycle_index
+        step_target = self._current_oscillation_leg_target_steps()
+        step_index = self._oscillation_leg_progress + 1
+
+        logger.info(
+            "[ScrollStep] Cycle %s %s step %s/%s",
+            cycle_index,
+            direction_label,
+            step_index,
+            step_target,
         )
-        
-        if target_state:
-            # Cycle cooldown if found
-            cooldown = config.OSCILLATION_CYCLE_COOLDOWN
-            if cooldown > 0:
-                if self._sleep_with_interrupt(cooldown):
-                    return State.CHECK_NEW_LEVEL
-            return target_state
-        
-        # Exhausted retries -> return to base scanning
-        return State.FIND_RED_ICONS
+
+        motion_ok = self.searcher.perform_scroll(
+            direction=direction,
+            distance_ratio=config.SCROLL_DISTANCE_RATIO,
+            duration=config.SCROLL_DURATION,
+        )
+        if not motion_ok:
+            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
+                return State.CHECK_NEW_LEVEL
+            logger.warning("[ScrollStep] Motion aborted; returning to FIND_RED_ICONS")
+            return State.FIND_RED_ICONS
+
+        if self._sleep_with_interrupt(config.POST_SCROLL_SETTLE):
+            return State.CHECK_NEW_LEVEL
+
+        if self._sleep_with_interrupt(config.SCROLL_INTERVAL_PAUSE):
+            return State.CHECK_NEW_LEVEL
+
+        leg_completed, cycle_completed, _ = self._advance_oscillation_progress()
+        if leg_completed and config.CYCLE_PAUSE_DURATION > 0:
+            if self._sleep_with_interrupt(config.CYCLE_PAUSE_DURATION):
+                return State.CHECK_NEW_LEVEL
+        if cycle_completed and config.OSCILLATION_CYCLE_COOLDOWN > 0:
+            if self._sleep_with_interrupt(config.OSCILLATION_CYCLE_COOLDOWN):
+                return State.CHECK_NEW_LEVEL
+
+        self._scroll_break_sequence_pending = True
+        return State.CHECK_NEW_LEVEL
 
 
     def load_templates(self):
@@ -2909,7 +2968,7 @@ class EatventureBot:
                 logger.debug("Fallback scan: boxes only in forbidden zone, ignoring.")
 
         if clicked_targets > 0:
-            if config.ENABLE_NO_ICON_SCROLL_INTERRUPT:
+            if self._no_icon_scroll_interrupt_enabled():
                 self._no_red_scroll_cycle_pending = True
                 logger.info(
                     "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
@@ -2920,8 +2979,7 @@ class EatventureBot:
             else:
                 self._no_red_scroll_cycle_pending = False
                 logger.info(
-                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; "
-                    "no-red scroll continuation suppressed (ENABLE_NO_ICON_SCROLL_INTERRUPT=False)",
+                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]",
                     clicked_targets,
                     clicked_upgrade_station,
                     clicked_box,
@@ -3259,7 +3317,7 @@ class EatventureBot:
         self.check_critical_interrupts()
         if self.current_red_icon_index >= len(self.red_icons):
             logger.info("All red icons processed, continuing cycle")
-            return State.OPEN_BOXES
+            return State.CHECK_UNLOCK
         
         confidence, x, y = self.red_icons[self.current_red_icon_index]
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
@@ -3287,7 +3345,7 @@ class EatventureBot:
             self.current_red_icon_index += 1
             if self.current_red_icon_index < len(self.red_icons):
                 return State.CLICK_RED_ICON
-            return State.FIND_RED_ICONS
+            return State.CHECK_UNLOCK
 
         refined_pos, refined, refined_conf = self._refine_red_icon_position(
             x,
@@ -3318,7 +3376,7 @@ class EatventureBot:
                 return State.CHECK_NEW_LEVEL
                 
             self.current_red_icon_index += 1
-            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
+            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
         
         logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
         click_success = self.mouse_controller.click(click_x, click_y, relative=True)
@@ -3341,7 +3399,7 @@ class EatventureBot:
                     return State.SCROLL
 
             self.current_red_icon_index += 1
-            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
+            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
         
         self.red_icon_cycle_count = 0
         return State.CHECK_UNLOCK
@@ -3422,13 +3480,9 @@ class EatventureBot:
                         self.vision_optimizer.update_upgrade_station_miss()
                         self.tuner.record_search_result(False)
                         self._apply_tuning()
-                        if self._uninterrupted_main_flow_enabled():
-                            return self._advance_after_blocked_station(
-                                f"Upgrade station at ({x}, {y}) blocked by forbidden zone during search; skipping to preserve main flow"
-                            )
-                        if self._redirect_forbidden_asset_to_scroll("Upgrade Station (search)", x, y):
-                            return State.SCROLL
-                        continue  # Try next attempt if redirect cooldown blocked
+                        return self._advance_after_blocked_station(
+                            f"Upgrade station at ({x}, {y}) blocked by forbidden zone during search; advancing main loop"
+                        )
 
                     logger.info(f"✓ Upgrade station found (attempt {attempt + 1})")
                     refined_pos, refined = self._refine_template_position(
@@ -3521,13 +3575,9 @@ class EatventureBot:
             return State.CHECK_NEW_LEVEL
         if not is_safe:
             logger.warning("Upgrade station position is in forbidden zone; redirecting to oscillating search")
-            if self._uninterrupted_main_flow_enabled():
-                return self._advance_after_blocked_station(
-                    f"Upgrade station at ({x}, {y}) blocked before spam-click; skipping to preserve main flow"
-                )
-            if self._redirect_forbidden_asset_to_scroll("Upgrade Station", x, y):
-                return State.SCROLL
-            return State.FIND_RED_ICONS
+            return self._advance_after_blocked_station(
+                f"Upgrade station at ({x}, {y}) blocked before spam-click; advancing main loop"
+            )
         
         logger.info("Spam-clicking upgrade station...")
 
@@ -3550,12 +3600,9 @@ class EatventureBot:
         if not spam_click_success:
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return State.CHECK_NEW_LEVEL
-            if self._uninterrupted_main_flow_enabled():
-                return self._advance_after_blocked_station(
-                    "Upgrade station rapid-click sequence aborted; skipping blocked action to preserve main flow"
-                )
-            logger.warning("Upgrade station rapid-click sequence aborted; re-validating target")
-            return State.SEARCH_UPGRADE_STATION
+            return self._advance_after_blocked_station(
+                "Upgrade station rapid-click sequence aborted; advancing main loop"
+            )
         
         self._click_idle()
         if config.IDLE_CLICK_SETTLE_DELAY > 0:
@@ -3579,7 +3626,7 @@ class EatventureBot:
         if not has_stats_icon:
             logger.info("✗ No stats icon, skipping")
             self.vision_optimizer.update_stats_upgrade_miss()
-            return State.SCROLL
+            return State.OPEN_BOXES
 
         self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
         
@@ -3674,62 +3721,23 @@ class EatventureBot:
         if boxes_found > 0:
             logger.info(f"🎁 Opened {boxes_found} boxes")
             self.work_done = True
-        
+
         if self.upgrade_found_in_cycle:
-            logger.info("✓ Upgrade found → Staying in area")
+            logger.info("✓ Upgrade found → continuing strict main-loop stage order")
             self.upgrade_found_in_cycle = False
-            self.cycle_counter = 0
-            return State.FIND_RED_ICONS
-        
-        self.cycle_counter += 1
-        
+
+        self.cycle_counter = 0
         if self.consecutive_failed_cycles >= 3:
-            logger.info(f"⚠ {self.consecutive_failed_cycles} failed → Force scroll")
+            logger.info(f"⚠ {self.consecutive_failed_cycles} failed → continuing scroll sequence")
             self.consecutive_failed_cycles = 0
-            self.cycle_counter = 0
-            return State.SCROLL
-        
-        if self.cycle_counter >= 2:
-            logger.info(f"➡ Cycle {self.cycle_counter}/2 done → Scrolling")
-            self.cycle_counter = 0
-            return State.SCROLL
-        else:
-            return State.FIND_RED_ICONS
+
+        return State.SCROLL
     
     def handle_scroll(self, current_state):
         self.check_critical_interrupts()
         self._click_idle()
-        
-        # 1. DRIFT CORRECTION: If we are not at center (due to interrupt), return to center first.
-        # This ensures the IOS pattern always starts from a known reference point.
-        if abs(self.scroll_offset_units) > 0.01:
-            logger.info(f"Drift detected ({self.scroll_offset_units:.2f} units). Correcting to center before search.")
-            # If offset is positive (DOWN), we need to scroll UP (direction=1)
-            # If offset is negative (UP), we need to scroll DOWN (direction=-1)
-            direction_int = 1 if self.scroll_offset_units > 0 else -1
-            correction_dist = abs(self.scroll_offset_units)
-            
-            # Perform correction using the new searcher's single source of truth
-            self.searcher.perform_scroll(
-                direction=direction_int,
-                distance_ratio=correction_dist,
-                duration=config.SCROLL_DURATION
-            )
-            return State.FIND_RED_ICONS
 
-        limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-
-        if self._should_interrupt_for_new_level(
-            screenshot=limited_screenshot,
-            max_y=config.MAX_SEARCH_Y,
-            force=True,
-        ):
-            logger.info("New level detected before scroll, transitioning")
-            return State.CHECK_NEW_LEVEL
-        
-        # We now rely entirely on the Incremental Oscillating Search pattern
-        # when the bot enters the SCROLL state (which happens when no icons are found).
-        logger.info("Executing Incremental Oscillating Search")
+        logger.info("Executing single-step oscillating scroll stage")
         return self.execute_oscillating_search()
     
     def handle_check_new_level(self, current_state):
@@ -3737,6 +3745,10 @@ class EatventureBot:
         Requirement: Robust Two-Step Verification for New Level.
         Eliminates false positives via a scroll-up check before execution.
         """
+        if self._scroll_break_passthrough_active():
+            logger.debug("Scroll break sequence: CHECK_NEW_LEVEL passthrough")
+            return State.TRANSITION_LEVEL
+
         self._clear_new_level_interrupt()
         self._click_idle()
         logger.info(">>> VERIFICATION PHASE: New Level Trigger Detected")
@@ -3815,6 +3827,10 @@ class EatventureBot:
         return target_state
     
     def handle_transition_level(self, current_state):
+        if self._scroll_break_passthrough_active():
+            logger.debug("Scroll break sequence: TRANSITION_LEVEL passthrough")
+            return State.WAIT_FOR_UNLOCK
+
         self._click_idle()
         
         max_attempts = config.LEVEL_TRANSITION_MAX_ATTEMPTS
@@ -3892,18 +3908,33 @@ class EatventureBot:
 
     def _reset_search_cycle(self, reason="state reset"):
         """Reset oscillating-search progression so the next search starts from base sweep."""
+        cycle_index = getattr(self, "_oscillation_cycle_index", 1)
+        leg_direction = getattr(self, "_oscillation_leg_direction", 1)
+        leg_progress = getattr(self, "_oscillation_leg_progress", 0)
         logger.debug(
-            "Resetting search cycle (%s): scroll_offset_units=%.2f",
+            "Resetting search cycle (%s): scroll_offset_units=%.2f cycle=%s leg=%s progress=%s",
             reason,
             self.scroll_offset_units,
+            cycle_index,
+            "DOWN" if leg_direction > 0 else "UP",
+            leg_progress,
         )
         self.scroll_offset_units = 0
+        self._oscillation_cycle_index = 1
+        self._oscillation_leg_direction = 1
+        self._oscillation_leg_progress = 0
+        self._scroll_break_sequence_pending = False
     
     def handle_wait_for_unlock(self, current_state):
         """
         Requirement: High-Frequency Visual Polling.
         Minimizes time between station availability and interaction to near-zero.
         """
+        if self._scroll_break_passthrough_active():
+            logger.debug("Scroll break sequence: WAIT_FOR_UNLOCK passthrough")
+            self._scroll_break_sequence_pending = False
+            return State.FIND_RED_ICONS
+
         self._click_idle()
         max_duration = config.UNLOCK_HOT_LOOP_TIMEOUT
         start_time = time.monotonic()
