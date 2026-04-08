@@ -28,6 +28,7 @@ class WindowCapture:
         self.hwnd = None
         self.target_width = target_width
         self.target_height = target_height
+        self._capture_lock = threading.Lock()
         self.find_window()
         self.resize_window()
 
@@ -69,68 +70,98 @@ class WindowCapture:
         return x, y, width, height
     
     def capture(self, max_y=None):
-        self._ensure_window_handle()
-        
-        x, y, width, height = self.get_window_rect()
-        
-        if max_y is not None:
-            height = min(height, max_y)
+        retries = max(1, int(getattr(config, "WINDOW_CAPTURE_RETRIES", 3)))
+        retry_delay = max(0.0, float(getattr(config, "WINDOW_CAPTURE_RETRY_DELAY", 0.02)))
+        last_exc = None
 
-        if width <= 0 or height <= 0:
-            raise RuntimeError(
-                f"Window '{self.window_title}' has invalid capture bounds: width={width}, height={height}"
-            )
+        for attempt in range(1, retries + 1):
+            try:
+                with self._capture_lock:
+                    self._ensure_window_handle()
 
-        hwndDC = None
-        mfcDC = None
-        saveDC = None
-        saveBitMap = None
+                    _x, _y, width, height = self.get_window_rect()
 
-        try:
-            hwndDC = win32gui.GetWindowDC(self.hwnd)
-            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-            saveDC = mfcDC.CreateCompatibleDC()
+                    if max_y is not None:
+                        height = min(height, max_y)
 
-            saveBitMap = win32ui.CreateBitmap()
-            saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-            saveDC.SelectObject(saveBitMap)
+                    if width <= 0 or height <= 0:
+                        raise RuntimeError(
+                            f"Window '{self.window_title}' has invalid capture bounds: width={width}, height={height}"
+                        )
 
-            print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-            if print_result != 1:
-                logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
+                    hwndDC = None
+                    mfcDC = None
+                    saveDC = None
+                    saveBitMap = None
 
-            bmpstr = saveBitMap.GetBitmapBits(True)
-            expected_size = width * height * 4
-            if len(bmpstr) != expected_size:
-                raise RuntimeError(
-                    f"Capture buffer size mismatch for '{self.window_title}': "
-                    f"expected {expected_size}, got {len(bmpstr)}"
+                    try:
+                        hwndDC = win32gui.GetWindowDC(self.hwnd)
+                        if not hwndDC:
+                            raise RuntimeError(
+                                f"GetWindowDC returned null for '{self.window_title}' (hwnd={self.hwnd})"
+                            )
+
+                        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+                        saveDC = mfcDC.CreateCompatibleDC()
+
+                        saveBitMap = win32ui.CreateBitmap()
+                        saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+                        saveDC.SelectObject(saveBitMap)
+
+                        print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+                        if print_result != 1:
+                            logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
+
+                        bmpstr = saveBitMap.GetBitmapBits(True)
+                        expected_size = width * height * 4
+                        if len(bmpstr) != expected_size:
+                            raise RuntimeError(
+                                f"Capture buffer size mismatch for '{self.window_title}': "
+                                f"expected {expected_size}, got {len(bmpstr)}"
+                            )
+
+                        img = np.frombuffer(bmpstr, dtype=np.uint8)
+                        img.shape = (height, width, 4)
+                        return np.ascontiguousarray(img[:, :, :3])
+                    finally:
+                        if saveBitMap is not None:
+                            try:
+                                win32gui.DeleteObject(saveBitMap.GetHandle())
+                            except Exception:
+                                pass
+                        if saveDC is not None:
+                            try:
+                                saveDC.DeleteDC()
+                            except Exception:
+                                pass
+                        if mfcDC is not None:
+                            try:
+                                mfcDC.DeleteDC()
+                            except Exception:
+                                pass
+                        if hwndDC is not None:
+                            try:
+                                win32gui.ReleaseDC(self.hwnd, hwndDC)
+                            except Exception:
+                                pass
+            except Exception as exc:
+                last_exc = exc
+                self.hwnd = None
+                if attempt >= retries:
+                    break
+                logger.warning(
+                    "Capture attempt %s/%s failed for '%s': %s",
+                    attempt,
+                    retries,
+                    self.window_title,
+                    exc,
                 )
+                if retry_delay > 0:
+                    time.sleep(retry_delay)
 
-            img = np.frombuffer(bmpstr, dtype=np.uint8)
-            img.shape = (height, width, 4)
-            return np.ascontiguousarray(img[:, :, :3])
-        finally:
-            if saveBitMap is not None:
-                try:
-                    win32gui.DeleteObject(saveBitMap.GetHandle())
-                except Exception:
-                    pass
-            if saveDC is not None:
-                try:
-                    saveDC.DeleteDC()
-                except Exception:
-                    pass
-            if mfcDC is not None:
-                try:
-                    mfcDC.DeleteDC()
-                except Exception:
-                    pass
-            if hwndDC is not None:
-                try:
-                    win32gui.ReleaseDC(self.hwnd, hwndDC)
-                except Exception:
-                    pass
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"Capture failed for '{self.window_title}' without a reported exception")
     
     def is_window_active(self):
         return win32gui.IsWindow(self.hwnd) if self.hwnd else False
