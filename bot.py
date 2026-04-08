@@ -1346,6 +1346,7 @@ class EatventureBot:
         self._last_new_level_fail_time = 0.0
         self._last_idle_click_time = 0.0
         self._state_last_run_at = {}
+        self._last_sleep_priority_probe_at = 0.0
         self._recent_red_icon_history = []
         self._forbidden_blackout_cache = {} # {world_coord_tuple: expiry_timestamp}
         self._no_red_scroll_cycle_pending = False
@@ -1468,13 +1469,13 @@ class EatventureBot:
                     time.sleep(max(interval, config.MONITOR_POLL_MIN_SLEEP))
                     continue
 
-                monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=True)
+                monitor_screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y, force=False)
                 limited_screenshot = monitor_screenshot[:config.MAX_SEARCH_Y, :]
 
                 red_found, red_conf, red_x, red_y = self._detect_new_level_red_icon(
                     screenshot=monitor_screenshot,
                     max_y=config.EXTENDED_SEARCH_Y,
-                    force=True,
+                    force=False,
                 )
                 if red_found:
                     logger.info(
@@ -1489,7 +1490,7 @@ class EatventureBot:
                 found, confidence, x, y = self._detect_new_level(
                     screenshot=limited_screenshot,
                     max_y=config.MAX_SEARCH_Y,
-                    force=True,
+                    force=False,
                 )
                 if found:
                     logger.info("Background monitor: new level button detected at (%s, %s)", x, y)
@@ -1647,39 +1648,13 @@ class EatventureBot:
         return recovery_state
 
     def _is_asset_click_safe(self, asset_name, x, y):
-        precheck_delay = max(0.0, float(config.ASSET_BOUNDARY_PRECHECK_DELAY))
-        confirm_delay = max(0.0, float(config.ASSET_BOUNDARY_CONFIRM_DELAY))
+        if self.check_critical_interrupts(raise_exception=False):
+            return None
 
-        if precheck_delay > 0:
-            if self._sleep_with_interrupt(precheck_delay):
-                logger.info(
-                    "%s pre-click validation interrupted by new-level signal during precheck delay",
-                    asset_name,
-                )
-                return None
-
-        first_safe = self.mouse_controller.is_safe_to_click(x, y, relative=True)
-        if not first_safe:
+        is_safe = self.mouse_controller.is_safe_to_click(x, y, relative=True)
+        if not is_safe:
             logger.warning(
                 "%s blocked by forbidden-zone pre-click validator at (%s, %s)",
-                asset_name,
-                x,
-                y,
-            )
-            return False
-
-        if confirm_delay > 0:
-            if self._sleep_with_interrupt(confirm_delay):
-                logger.info(
-                    "%s pre-click validation interrupted by new-level signal during confirm delay",
-                    asset_name,
-                )
-                return None
-
-        second_safe = self.mouse_controller.is_safe_to_click(x, y, relative=True)
-        if not second_safe:
-            logger.warning(
-                "%s blocked by forbidden-zone confirmation validator at (%s, %s)",
                 asset_name,
                 x,
                 y,
@@ -1752,6 +1727,13 @@ class EatventureBot:
 
     def _enforce_state_min_interval(self):
         state = self.state_machine.get_state_name()
+        if self._scroll_break_passthrough_active() and state in (
+            "CHECK_NEW_LEVEL",
+            "TRANSITION_LEVEL",
+            "WAIT_FOR_UNLOCK",
+        ):
+            self._state_last_run_at[state] = time.monotonic()
+            return
         per_state = config.STATE_MIN_INTERVALS
         min_interval = float(per_state.get(state, config.STATE_MIN_INTERVAL_DEFAULT))
         if min_interval <= 0:
@@ -1845,6 +1827,7 @@ class EatventureBot:
         self._last_new_level_override_time = 0.0
         self._last_new_level_fail_time = 0.0
         self._last_transition_time = 0.0
+        self._last_sleep_priority_probe_at = 0.0
         self._no_red_scroll_cycle_pending = False
         self._scroll_break_sequence_pending = False
         self.red_icons = []
@@ -1864,15 +1847,21 @@ class EatventureBot:
 
     def _capture(self, max_y=None, force=False):
         cache_key = max_y if max_y is not None else "full"
+        now = time.monotonic()
         with self._capture_lock:
-            now = time.monotonic()
             cached = self._capture_cache.get(cache_key)
             if not force and cached and now - cached[0] <= self._capture_cache_ttl:
                 return cached[1]
 
-            frame = self.window_capture.capture(max_y=max_y)
+        frame = self.window_capture.capture(max_y=max_y)
+
+        with self._capture_lock:
+            if not force:
+                cached = self._capture_cache.get(cache_key)
+                if cached and time.monotonic() - cached[0] <= self._capture_cache_ttl:
+                    return cached[1]
             self._capture_cache[cache_key] = (time.monotonic(), frame)
-            return frame
+        return frame
 
     def _clear_capture_cache(self):
         with self._capture_lock:
@@ -1912,9 +1901,23 @@ class EatventureBot:
                     now = time.monotonic()
                     continue
                 return True
-            if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
-                return True
             now = time.monotonic()
+            monitor_thread = getattr(self, "_new_level_monitor_thread", None)
+            monitor_active = bool(monitor_thread is not None and monitor_thread.is_alive())
+            probe_interval = (
+                max(config.NEW_LEVEL_MONITOR_INTERVAL, config.MONITOR_POLL_MIN_SLEEP)
+                if monitor_active
+                else 0.0
+            )
+            last_probe = float(getattr(self, "_last_sleep_priority_probe_at", 0.0))
+            should_probe = (not monitor_active) or ((now - last_probe) >= probe_interval)
+            if should_probe:
+                self._last_sleep_priority_probe_at = now
+                if self._should_interrupt_for_new_level(
+                    max_y=config.MAX_SEARCH_Y,
+                    force=not monitor_active,
+                ):
+                    return True
         return False
 
     def _sleep_with_interrupt(self, duration):
@@ -2430,6 +2433,7 @@ class EatventureBot:
             else config.RED_ICON_THRESHOLD
         )
         threshold = base_threshold if threshold_override is None else threshold_override
+        immediate_threshold = config.RED_ICON_PIXEL_THRESHOLD * 1.5
 
         for template_name, template, mask in self._iter_red_icon_templates():
             icons = self.image_matcher.find_all_templates(
@@ -2445,6 +2449,7 @@ class EatventureBot:
                 passed, pixel_count = self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color)
                 if not passed:
                     continue
+                template_gate_relaxed = relaxed_color or pixel_count >= immediate_threshold
                 passed_template_gate, _ = self._passes_red_icon_template_gate(
                     screenshot,
                     x,
@@ -2452,7 +2457,7 @@ class EatventureBot:
                     template_name,
                     template,
                     mask,
-                    relaxed=relaxed_color,
+                    relaxed=template_gate_relaxed,
                 )
                 if not passed_template_gate:
                     continue
@@ -2895,7 +2900,7 @@ class EatventureBot:
                         return -2
                     if is_safe:
                         logger.info("Fallback scan: clicking safe upgrade station at (%s, %s) [%.2f%%]", x, y, conf * 100)
-                        if self.mouse_controller.click(x, y, relative=True):
+                        if self.mouse_controller.click(x, y, relative=True, prevalidated=True):
                             clicked_targets += 1
                             clicked_upgrade_station = True
                             self.upgrade_found_in_cycle = True
@@ -3379,7 +3384,12 @@ class EatventureBot:
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
         
         logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
-        click_success = self.mouse_controller.click(click_x, click_y, relative=True)
+        click_success = self.mouse_controller.click(
+            click_x,
+            click_y,
+            relative=True,
+            prevalidated=True,
+        )
         self.tuner.record_click_result(click_success)
         self._apply_tuning()
 
@@ -3779,6 +3789,7 @@ class EatventureBot:
         if not priority_hit:
             logger.warning("Verification Failed: Secondary check was False. False positive aborted.")
             # Fallback to main loop
+            self._last_new_level_fail_time = time.monotonic()
             self.completion_detected_time = None
             self.completion_detected_by = None
             return State.FIND_RED_ICONS

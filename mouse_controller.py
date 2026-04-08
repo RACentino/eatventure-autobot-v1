@@ -229,8 +229,8 @@ class MouseController:
             )
         return clamped_x, clamped_y
 
-    def _send_click(self, screen_x, screen_y, down_up_delay=None):
-        if not self._validate_pre_click_target(screen_x, screen_y):
+    def _send_click(self, screen_x, screen_y, down_up_delay=None, prevalidated=False):
+        if not prevalidated and not self._validate_pre_click_target(screen_x, screen_y):
             logger.warning(
                 "Blocked click dispatch at (%s, %s): forbidden-zone pre-check failed",
                 int(screen_x),
@@ -262,7 +262,7 @@ class MouseController:
 
         self._ensure_min_click_interval()
 
-        if not self._validate_pre_click_target(screen_x, screen_y):
+        if not prevalidated and not self._validate_pre_click_target(screen_x, screen_y):
             logger.warning(
                 "Blocked click dispatch at (%s, %s): forbidden-zone final gate failed",
                 int(screen_x),
@@ -507,17 +507,26 @@ class MouseController:
             self._last_cursor_pos = (int(screen_x), int(screen_y))
             logger.info(f"Cursor moved to window position ({x}, {y})")
     
-    def click(self, x, y, relative=True, delay=None, wait_after=True):
+    def click(self, x, y, relative=True, delay=None, wait_after=True, prevalidated=False):
         self._check_interrupts()
         with self._mouse_action_lock:
-            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            screen_pos = self._resolve_screen_position(
+                x,
+                y,
+                relative=relative,
+                check_forbidden=not prevalidated,
+            )
             if screen_pos is None:
                 if wait_after:
                     self._sleep(self.click_delay if delay is None else delay)
                 return False
 
             screen_x, screen_y = screen_pos
-            click_sent = self._send_click(screen_x, screen_y)
+            click_sent = self._send_click(
+                screen_x,
+                screen_y,
+                prevalidated=prevalidated,
+            )
             if not click_sent:
                 if wait_after:
                     self._sleep(self.click_delay if delay is None else delay)

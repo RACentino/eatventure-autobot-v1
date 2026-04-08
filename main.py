@@ -954,7 +954,7 @@ def run_bot():
                     bot.stop()
                     continue
                 bot.step()
-            if config.MAIN_LOOP_DELAY > 0:
+            if not bot.running and config.MAIN_LOOP_DELAY > 0:
                 time.sleep(config.MAIN_LOOP_DELAY)
 
         logger.info("Program exiting...")
