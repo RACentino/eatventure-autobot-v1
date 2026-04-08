@@ -200,6 +200,18 @@ def run_self_tests():
                 110_500_000,
             )
 
+        def test_hold_at_returns_false_when_mouse_down_is_blocked(self):
+            self.controller._resolve_screen_position = lambda *args, **kwargs: (100, 200)
+            self.controller._send_mouse_down = lambda *args, **kwargs: False
+            mouse_up_calls = []
+            self.controller._send_mouse_up = lambda *args, **kwargs: mouse_up_calls.append(args)
+            self.controller._sleep = lambda *args, **kwargs: None
+
+            result = self.controller.hold_at(100, 200, duration=0.01, relative=False)
+
+            self.assertFalse(result)
+            self.assertEqual(mouse_up_calls, [])
+
     class VisionPersistenceTests(unittest.TestCase):
         def test_load_returns_empty_dict_for_malformed_json(self):
             temp_dir = make_test_dir("test-vision-load")

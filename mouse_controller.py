@@ -589,7 +589,8 @@ class MouseController:
                 screen_y,
                 duration,
             )
-            self._send_mouse_down(screen_x, screen_y)
+            if not self._send_mouse_down(screen_x, screen_y):
+                return False
             
             # Sleep in small chunks to allow interruption
             start_time = time.monotonic()

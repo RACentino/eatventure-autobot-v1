@@ -2,22 +2,22 @@
 
 import argparse
 import sys
-from typing import Iterable
+from typing import Any, Dict, Iterable, Optional
 
 import requests
 
 import config
 
 
-def _load_token(cli_token: str | None) -> str:
+def _load_token(cli_token: Optional[str]) -> str:
     token = (cli_token or config.TELEGRAM_BOT_TOKEN or "").strip()
     if not token:
         raise ValueError("No bot token found. Provide --token or set TELEGRAM_BOT_TOKEN in config.py")
     return token
 
 
-def _extract_chat_ids(updates: Iterable[dict]) -> dict[int, dict]:
-    chats: dict[int, dict] = {}
+def _extract_chat_ids(updates: Iterable[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    chats: Dict[int, Dict[str, Any]] = {}
     for update in updates:
         message = update.get("message") if isinstance(update, dict) else None
         if not isinstance(message, dict):
