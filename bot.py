@@ -1288,6 +1288,7 @@ class EatventureBot:
         self._red_template_decay_window = max(1.0, float(config.RED_ICON_STABILITY_CACHE_TTL))
         self.running = False
         self.red_icon_cycle_count = 0
+        self._red_icon_click_failure_streak = {}
         self.red_icons = []
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
@@ -1626,6 +1627,7 @@ class EatventureBot:
         self.red_icons = []
         self.current_red_icon_index = 0
         self.red_icon_cycle_count = 0
+        self._red_icon_click_failure_streak = {}
         self.wait_for_unlock_attempts = 0
         self.work_done = False
         self.upgrade_found_in_cycle = False
@@ -3326,14 +3328,20 @@ class EatventureBot:
         
         confidence, x, y = self.red_icons[self.current_red_icon_index]
         limited_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
-        
-        # Calculate relaxed threshold for verification (matching search cycle logic)
+        failure_streak = getattr(self, "_red_icon_click_failure_streak", None)
+        if failure_streak is None:
+            failure_streak = {}
+            self._red_icon_click_failure_streak = failure_streak
+        icon_key = (int(round(x)), int(round(y)))
         base_threshold = (
             self.vision_optimizer.red_icon_threshold
             if self.vision_optimizer.enabled
             else config.RED_ICON_THRESHOLD
         )
-        relaxed_threshold = max(0.0, base_threshold - 0.04) # Match SCROLL_RED_ICON_THRESHOLD_DROP approx
+        relaxed_threshold = max(
+            0.0,
+            base_threshold - float(config.RED_ICON_CLICK_RECHECK_THRESHOLD_DROP),
+        )
         
         if not self._is_red_icon_present_at(
             x,
@@ -3347,6 +3355,7 @@ class EatventureBot:
                 x,
                 y,
             )
+            failure_streak.pop(icon_key, None)
             self.current_red_icon_index += 1
             if self.current_red_icon_index < len(self.red_icons):
                 return State.CLICK_RED_ICON
@@ -3361,58 +3370,147 @@ class EatventureBot:
             x, y = refined_pos
             self.vision_optimizer.update_red_icon_confidences([refined_conf])
 
-        click_x = x + config.RED_ICON_OFFSET_X
-        click_y = y + config.RED_ICON_OFFSET_Y
-        
-        is_safe = self._is_asset_click_safe("Red Icon", click_x, click_y)
-        if is_safe is None:
-            return State.CHECK_NEW_LEVEL
-        if not is_safe:
-            logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
-            self._add_to_blackout(x, y) # Blacklist the original detection point
+        max_retries = max(0, int(config.RED_ICON_CLICK_MAX_RETRIES))
+        verify_delay = max(0.0, float(config.RED_ICON_CLICK_VERIFY_DELAY))
+        retry_delay = max(0.0, float(config.RED_ICON_CLICK_RETRY_DELAY))
+        max_stuck_cycles = max(1, int(config.RED_ICON_CLICK_STUCK_MAX_CYCLES))
+
+        click_candidates = [
+            (x + config.RED_ICON_OFFSET_X, y + config.RED_ICON_OFFSET_Y),
+            (x, y),
+        ]
+
+        blocked_target = None
+        dispatch_failed_target = None
+        consumed = False
+
+        for attempt in range(max_retries + 1):
+            click_x, click_y = click_candidates[attempt % len(click_candidates)]
+
+            is_safe = self._is_asset_click_safe("Red Icon", click_x, click_y)
+            if is_safe is None:
+                return State.CHECK_NEW_LEVEL
+            if not is_safe:
+                blocked_target = (click_x, click_y)
+                continue
+
+            logger.info(
+                "Clicking red icon %s/%s at (%s, %s) [attempt %s/%s]",
+                self.current_red_icon_index + 1,
+                len(self.red_icons),
+                click_x,
+                click_y,
+                attempt + 1,
+                max_retries + 1,
+            )
+            click_success = self.mouse_controller.click(
+                click_x,
+                click_y,
+                relative=True,
+                prevalidated=True,
+            )
+            self.tuner.record_click_result(click_success)
+            self._apply_tuning()
+
+            if not click_success:
+                dispatch_failed_target = (click_x, click_y)
+                continue
+
+            if verify_delay > 0 and self._sleep_with_interrupt(verify_delay):
+                return State.CHECK_NEW_LEVEL
+
+            post_click_screenshot = self._capture(max_y=config.MAX_SEARCH_Y, force=True)
+            still_present = self._is_red_icon_present_at(
+                x,
+                y,
+                screenshot=post_click_screenshot,
+                threshold_override=relaxed_threshold,
+                relaxed_color=True,
+            )
+            if not still_present:
+                consumed = True
+                break
+
+            refined_pos, refined, refined_conf = self._refine_red_icon_position(
+                x,
+                y,
+                screenshot=post_click_screenshot,
+            )
+            if refined:
+                x, y = refined_pos
+                self.vision_optimizer.update_red_icon_confidences([refined_conf])
+                click_candidates = [
+                    (x + config.RED_ICON_OFFSET_X, y + config.RED_ICON_OFFSET_Y),
+                    (x, y),
+                ]
+
+            if attempt < max_retries and retry_delay > 0 and self._sleep_with_interrupt(retry_delay):
+                return State.CHECK_NEW_LEVEL
+
+        if consumed:
+            failure_streak.pop(icon_key, None)
+            self.red_icon_cycle_count = 0
+            return State.CHECK_UNLOCK
+
+        if blocked_target is not None and dispatch_failed_target is None:
+            bx, by = blocked_target
+            logger.warning(
+                "Red icon click blocked - position (%s, %s) is in forbidden zone",
+                bx,
+                by,
+            )
+            self._add_to_blackout(x, y)
+            failure_streak.pop(icon_key, None)
             if self._uninterrupted_main_flow_enabled():
                 return self._advance_after_blocked_red_icon(
-                    f"Red icon blocked by forbidden zone at ({click_x}, {click_y}); skipping to preserve main flow"
+                    f"Red icon blocked by forbidden zone at ({bx}, {by}); skipping to preserve main flow"
                 )
-            if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
+            if self._redirect_forbidden_asset_to_scroll("Red Icon", bx, by):
                 return State.SCROLL
-            
             if self._new_level_event.is_set():
                 return State.CHECK_NEW_LEVEL
-                
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
-        
-        logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
-        click_success = self.mouse_controller.click(
-            click_x,
-            click_y,
-            relative=True,
-            prevalidated=True,
-        )
-        self.tuner.record_click_result(click_success)
-        self._apply_tuning()
 
-        if not click_success:
-            if self.mouse_controller.is_in_forbidden_zone(click_x, click_y):
+        if dispatch_failed_target is not None:
+            dx, dy = dispatch_failed_target
+            if self.mouse_controller.is_in_forbidden_zone(dx, dy):
                 logger.warning(
                     "Red icon click canceled by strict pre-click validator at (%s, %s); redirecting to oscillating search",
-                    click_x,
-                    click_y,
+                    dx,
+                    dy,
                 )
+                failure_streak.pop(icon_key, None)
                 if self._uninterrupted_main_flow_enabled():
                     self._add_to_blackout(x, y)
                     return self._advance_after_blocked_red_icon(
-                        f"Red icon click canceled at ({click_x}, {click_y}); skipping blocked action to preserve main flow"
+                        f"Red icon click canceled at ({dx}, {dy}); skipping blocked action to preserve main flow"
                     )
-                if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
+                if self._redirect_forbidden_asset_to_scroll("Red Icon", dx, dy):
                     return State.SCROLL
 
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
-        
-        self.red_icon_cycle_count = 0
-        return State.CHECK_UNLOCK
+
+        failure_cycles = failure_streak.get(icon_key, 0) + 1
+        failure_streak[icon_key] = failure_cycles
+        if failure_cycles < max_stuck_cycles:
+            logger.warning(
+                "Red icon remained after click confirmation at (%s, %s); retrying same target (cycle %s/%s)",
+                x,
+                y,
+                failure_cycles,
+                max_stuck_cycles,
+            )
+            if retry_delay > 0 and self._sleep_with_interrupt(retry_delay):
+                return State.CHECK_NEW_LEVEL
+            return State.CLICK_RED_ICON
+
+        self._add_to_blackout(x, y)
+        failure_streak.pop(icon_key, None)
+        return self._advance_after_blocked_red_icon(
+            f"Red icon remained after {max_stuck_cycles} confirmed click cycles at ({x}, {y}); skipping stale target"
+        )
     
     def handle_check_unlock(self, current_state):
         self.check_critical_interrupts()
@@ -3934,6 +4032,7 @@ class EatventureBot:
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
+        self._red_icon_click_failure_streak = {}
         self._scroll_break_sequence_pending = False
     
     def handle_wait_for_unlock(self, current_state):

@@ -270,11 +270,9 @@ class MouseController:
             )
             return False
 
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, 0, 0)
-        self._sleep(config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y, 0, 0)
-        self._last_click_time = time.monotonic()
-        return True
+        hold_delay = config.MOUSE_DOWN_UP_DELAY if down_up_delay is None else down_up_delay
+        hold_ns = self._seconds_to_ns(hold_delay)
+        return self._send_precise_click(hold_ns)
 
     def _send_mouse_down(self, screen_x, screen_y):
         if not self._validate_pre_click_target(screen_x, screen_y):
