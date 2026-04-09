@@ -1330,7 +1330,6 @@ class EatventureBot:
         self._last_sleep_priority_probe_at = 0.0
         self._recent_red_icon_history = []
         self._forbidden_blackout_cache = {} # {world_coord_tuple: expiry_timestamp}
-        self._no_red_scroll_cycle_pending = False
         self._last_forbidden_scroll_time = 0.0
         self._timer_resolution = WindowsTimerResolution()
 
@@ -1506,38 +1505,6 @@ class EatventureBot:
             self._last_idle_click_time = time.monotonic()
         return clicked
 
-    def _scroll_away_from_forbidden_zone(self, y_position, asset_name="asset"):
-        # One-Scroll Rule retained: do not execute manual directional drags here.
-        # Instead, redirect the FSM into the canonical oscillating search cycle.
-        logger.warning(
-            "%s in forbidden zone at y=%s; redirecting to Main Loop Scroll (Oscillating Search)",
-            asset_name,
-            y_position,
-        )
-        now = time.monotonic()
-        cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
-        wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
-        if wait_remaining > 0:
-            if self._uninterrupted_main_flow_enabled():
-                logger.debug(
-                    "Skipping forbidden-zone scroll redirect cooldown %.3fs to preserve main flow",
-                    wait_remaining,
-                )
-            else:
-                logger.debug(
-                    "Applying forbidden-zone scroll redirect cooldown %.3fs",
-                    wait_remaining,
-                )
-                self._sleep_with_interrupt(wait_remaining)
-        self._last_forbidden_scroll_time = time.monotonic()
-        return True
-
-    def _uninterrupted_main_flow_enabled(self):
-        return not bool(config.ENABLE_NO_ICON_SCROLL_INTERRUPT)
-
-    def _no_icon_scroll_interrupt_enabled(self):
-        return bool(config.ENABLE_NO_ICON_SCROLL_INTERRUPT)
-
     def _scroll_break_passthrough_active(self):
         if not getattr(self, "_scroll_break_sequence_pending", False):
             return False
@@ -1603,7 +1570,6 @@ class EatventureBot:
         )
 
         self._suppress_interrupts = False
-        self._no_red_scroll_cycle_pending = False
         self.red_icons = []
         self.current_red_icon_index = 0
         self.red_icon_cycle_count = 0
@@ -1644,27 +1610,9 @@ class EatventureBot:
 
         return True
 
-    def _redirect_forbidden_asset_to_scroll(self, asset_name, x, y):
-        logger.info(
-            "%s forbidden-zone redirect requested for (%s, %s)",
-            asset_name,
-            x,
-            y,
-        )
-        return self._scroll_away_from_forbidden_zone(y, asset_name=asset_name)
-
     def resolve_priority_state(self, current_state):
         if current_state in (State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL):
             return None
-
-        if (
-            self._no_icon_scroll_interrupt_enabled()
-            and current_state == State.FIND_RED_ICONS
-            and self._no_red_scroll_cycle_pending
-        ):
-            logger.info("Priority override: continuing no-red scroll cycle after fallback asset scan")
-            self._no_red_scroll_cycle_pending = False
-            return State.SCROLL
 
         interrupt = self._consume_new_level_interrupt()
         if interrupt:
@@ -1674,9 +1622,6 @@ class EatventureBot:
                 interrupt["x"],
                 interrupt["y"],
             )
-            if self._no_icon_scroll_interrupt_enabled() and self._no_red_scroll_cycle_pending:
-                logger.info("Clearing deferred no-red scroll due to pending level transition interrupt")
-                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(
                 source=interrupt["source"],
                 x=interrupt["x"],
@@ -1698,9 +1643,6 @@ class EatventureBot:
                 x,
                 y,
             )
-            if self._no_icon_scroll_interrupt_enabled() and self._no_red_scroll_cycle_pending:
-                logger.info("Clearing deferred no-red scroll due to immediate level transition")
-                self._no_red_scroll_cycle_pending = False
             self._click_new_level_override(source=source)
             return State.CHECK_NEW_LEVEL
 
@@ -1809,7 +1751,6 @@ class EatventureBot:
         self._last_new_level_fail_time = 0.0
         self._last_transition_time = 0.0
         self._last_sleep_priority_probe_at = 0.0
-        self._no_red_scroll_cycle_pending = False
         self._scroll_break_sequence_pending = False
         self.red_icons = []
         self.current_red_icon_index = 0
@@ -2941,10 +2882,7 @@ class EatventureBot:
             elif forbidden_stations:
                 logger.warning("Fallback scan: ONLY forbidden upgrade stations detected; triggering Oscillating Search")
                 self.vision_optimizer.update_upgrade_station_miss()
-                if self._uninterrupted_main_flow_enabled():
-                    logger.info("Fallback scan: preserving main flow and skipping forced scroll redirect for forbidden upgrade station")
-                elif self._redirect_forbidden_asset_to_scroll("Upgrade Station", forbidden_stations[0][1], forbidden_stations[0][2]):
-                    return -1
+                logger.info("Fallback scan: preserving main flow and skipping forced scroll redirect for forbidden upgrade station")
             else:
                 self.vision_optimizer.update_upgrade_station_miss()
 
@@ -3004,22 +2942,12 @@ class EatventureBot:
                 logger.debug("Fallback scan: boxes only in forbidden zone, ignoring.")
 
         if clicked_targets > 0:
-            if self._no_icon_scroll_interrupt_enabled():
-                self._no_red_scroll_cycle_pending = True
-                logger.info(
-                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]; scheduling no-red scroll cycle",
-                    clicked_targets,
-                    clicked_upgrade_station,
-                    clicked_box,
-                )
-            else:
-                self._no_red_scroll_cycle_pending = False
-                logger.info(
-                    "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]",
-                    clicked_targets,
-                    clicked_upgrade_station,
-                    clicked_box,
-                )
+            logger.info(
+                "Fallback scan summary: clicked %s target(s) [upgrade_station=%s, boxes=%s]",
+                clicked_targets,
+                clicked_upgrade_station,
+                clicked_box,
+            )
 
         return clicked_targets
 
@@ -3317,17 +3245,10 @@ class EatventureBot:
             cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
             wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
             if wait_remaining > 0:
-                if self._uninterrupted_main_flow_enabled():
-                    logger.debug(
-                        "Forbidden-only state detected; skipping scroll reentry cooldown %.3fs to preserve main flow",
-                        wait_remaining,
-                    )
-                else:
-                    logger.debug(
-                        "Forbidden-only state detected; applying scroll reentry cooldown %.3fs",
-                        wait_remaining,
-                    )
-                    self._sleep_with_interrupt(wait_remaining)
+                logger.debug(
+                    "Forbidden-only state detected; skipping scroll reentry cooldown %.3fs to preserve main flow",
+                    wait_remaining,
+                )
             self._last_forbidden_scroll_time = time.monotonic()
             logger.warning(
                 "⚠ %s targets currently inside Forbidden Zone with no safe counterpart. "
@@ -3466,18 +3387,9 @@ class EatventureBot:
         if not is_safe:
             logger.warning(f"Red icon click blocked - position with offset ({click_x}, {click_y}) is in forbidden zone")
             self._add_to_blackout(x, y) # Blacklist the original detection point
-            if self._uninterrupted_main_flow_enabled():
-                return self._advance_after_blocked_red_icon(
-                    f"Red icon blocked by forbidden zone at ({click_x}, {click_y}); skipping to preserve main flow"
-                )
-            if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
-                return State.SCROLL
-            
-            if self._new_level_event.is_set():
-                return State.CHECK_NEW_LEVEL
-                
-            self.current_red_icon_index += 1
-            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
+            return self._advance_after_blocked_red_icon(
+                f"Red icon blocked by forbidden zone at ({click_x}, {click_y}); skipping to preserve main flow"
+            )
         
         logger.info(f"Clicking red icon {self.current_red_icon_index + 1}/{len(self.red_icons)} at ({click_x}, {click_y})")
         click_success = self.mouse_controller.click(
@@ -3496,13 +3408,10 @@ class EatventureBot:
                     click_x,
                     click_y,
                 )
-                if self._uninterrupted_main_flow_enabled():
-                    self._add_to_blackout(x, y)
-                    return self._advance_after_blocked_red_icon(
-                        f"Red icon click canceled at ({click_x}, {click_y}); skipping blocked action to preserve main flow"
-                    )
-                if self._redirect_forbidden_asset_to_scroll("Red Icon", click_x, click_y):
-                    return State.SCROLL
+                self._add_to_blackout(x, y)
+                return self._advance_after_blocked_red_icon(
+                    f"Red icon click canceled at ({click_x}, {click_y}); skipping blocked action to preserve main flow"
+                )
 
             self.current_red_icon_index += 1
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
@@ -4183,7 +4092,7 @@ class EatventureBot:
                 "Unexpected exception during bot step in state %s",
                 self.state_machine.get_state_name(),
             )
-            if self._uninterrupted_main_flow_enabled() and self.running:
+            if self.running:
                 self._recover_from_step_exception()
                 return
             raise

@@ -417,7 +417,7 @@ RED_ICON_MERGE_PROXIMITY = 10
 RED_ICON_MERGE_BUCKET_SIZE = 10
 
 # This is how many times the bot will look for an upgrade station before giving up for that icon.
-UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 5
+UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 2
 
 # This is how much easier the station threshold becomes after repeated misses.
 UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.035
@@ -545,10 +545,6 @@ MAX_SEARCH_Y = 660
 
 # This is the deeper bottom crop used when the bot also needs to watch the lower UI band.
 EXTENDED_SEARCH_Y = 720
-
-# Turn this on if you want fallback clicks to intentionally resume the no-red scroll cycle afterward.
-ENABLE_NO_ICON_SCROLL_INTERRUPT = False
-
 
 # =========================
 # Adaptive tuner

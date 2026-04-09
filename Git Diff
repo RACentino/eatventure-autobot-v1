@@ -256,7 +256,6 @@
 [31m-                self.vision_optimizer.update_box_confidence(confidence)[m
  [m
          if clicked_targets > 0:[m
-             self._no_red_scroll_cycle_pending = True[m
 [1mdiff --git a/config.py b/config.py[m
 [1mindex 1ad1ae3..5db4d2e 100644[m
 [1m--- a/config.py[m
