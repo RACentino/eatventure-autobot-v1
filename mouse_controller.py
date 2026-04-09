@@ -568,13 +568,13 @@ class MouseController:
     def double_click(self, x, y, relative=True):
         with self._mouse_action_lock:
             self.click(x, y, relative)
-            self._sleep(config.DOUBLE_CLICK_DELAY)
+            self._sleep(0.066)
             self.click(x, y, relative)
     
     def hold_at(self, x, y, duration=None, relative=True, interrupt_check=None):
         self._check_interrupts()
         if duration is None:
-            duration = config.UPGRADE_HOLD_DURATION
+            duration = 6.0
 
         with self._mouse_action_lock:
             screen_pos = self._resolve_screen_position(x, y, relative=relative)
@@ -594,7 +594,7 @@ class MouseController:
             
             # Sleep in small chunks to allow interruption
             start_time = time.monotonic()
-            chunk_size = config.HOLD_ITERATION_INTERVAL
+            chunk_size = 0.033
             while time.monotonic() - start_time < duration:
                 if interrupt_check and interrupt_check():
                     logger.info("Hold interrupted by callback")

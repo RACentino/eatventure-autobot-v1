@@ -134,7 +134,6 @@ class AdaptiveTuner:
         self.search_success_rate = 1.0
         self.click_delay = config.CLICK_DELAY
         self.move_delay = config.MOUSE_MOVE_DELAY
-        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
         self.search_interval = config.UPGRADE_SEARCH_INTERVAL
 
     def _ema(self, current, new_value):
@@ -178,18 +177,10 @@ class AdaptiveTuner:
                 self.search_interval + config.ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP,
                 config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL,
             )
-            self.upgrade_click_interval = min(
-                self.upgrade_click_interval + config.ADAPTIVE_TUNER_UPGRADE_INTERVAL_STEP,
-                config.ADAPTIVE_TUNER_MAX_UPGRADE_INTERVAL,
-            )
         elif self.search_success_rate > config.ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD:
             self.search_interval = max(
                 self.search_interval - config.ADAPTIVE_TUNER_SEARCH_DECREMENT,
                 config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL,
-            )
-            self.upgrade_click_interval = max(
-                self.upgrade_click_interval - config.ADAPTIVE_TUNER_UPGRADE_DECREMENT,
-                config.ADAPTIVE_TUNER_MIN_UPGRADE_INTERVAL,
             )
 
     def reset(self):
@@ -197,7 +188,6 @@ class AdaptiveTuner:
         self.search_success_rate = 1.0
         self.click_delay = config.CLICK_DELAY
         self.move_delay = config.MOUSE_MOVE_DELAY
-        self.upgrade_click_interval = config.UPGRADE_CLICK_INTERVAL
         self.search_interval = config.UPGRADE_SEARCH_INTERVAL
         logger.info("AdaptiveTuner reset to defaults")
 
@@ -581,10 +571,6 @@ class HistoricalLearner:
                 config.AI_LEARNING_MIN_MOVE_DELAY,
                 config.AI_LEARNING_MAX_MOVE_DELAY,
             ),
-            "upgrade_click_interval": (
-                config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
-                config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
-            ),
             "search_interval": (
                 config.AI_LEARNING_MIN_SEARCH_INTERVAL,
                 config.AI_LEARNING_MAX_SEARCH_INTERVAL,
@@ -730,7 +716,6 @@ class HistoricalLearner:
         profile = {
             "click_delay": 0.0,
             "move_delay": 0.0,
-            "upgrade_click_interval": 0.0,
             "search_interval": 0.0,
         }
         for record in top:
@@ -773,7 +758,7 @@ class HistoricalLearner:
 
         current = self.bot.get_runtime_behavior_snapshot()
         tuned = {}
-        keys = ("click_delay", "move_delay", "upgrade_click_interval", "search_interval")
+        keys = ("click_delay", "move_delay", "search_interval")
         for key in keys:
             if key not in behavior or key not in current:
                 continue
@@ -788,11 +773,6 @@ class HistoricalLearner:
             tuned.get("move_delay", current["move_delay"]),
             config.AI_LEARNING_MIN_MOVE_DELAY,
             config.AI_LEARNING_MAX_MOVE_DELAY,
-        )
-        tuned["upgrade_click_interval"] = self._clamp(
-            tuned.get("upgrade_click_interval", current["upgrade_click_interval"]),
-            config.AI_LEARNING_MIN_UPGRADE_INTERVAL,
-            config.AI_LEARNING_MAX_UPGRADE_INTERVAL,
         )
         tuned["search_interval"] = self._clamp(
             tuned.get("search_interval", current["search_interval"]),
@@ -1073,9 +1053,9 @@ class BaseHandler:
             return False
 
         template, mask = self.templates[template_name]
-        threshold = threshold or config.VERIFY_THRESHOLD
+        threshold = threshold or 0.97
 
-        padding = config.VERIFY_PADDING
+        padding = 32
         x1, y1 = max(0, x - padding), max(0, y - padding)
         x2 = min(screenshot.shape[1], x + padding)
         y2 = min(screenshot.shape[0], y + padding)
@@ -1293,7 +1273,6 @@ class EatventureBot:
         self.red_icons = []
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
-        self.max_wait_for_unlock_attempts = config.WAIT_FOR_UNLOCK_MAX_ATTEMPTS
         self.upgrade_station_pos = None
         
         # Legacy directional scroll state removed.
@@ -3232,7 +3211,6 @@ class EatventureBot:
         return {
             "click_delay": float(self.tuner.click_delay),
             "move_delay": float(self.tuner.move_delay),
-            "upgrade_click_interval": float(self.tuner.upgrade_click_interval),
             "search_interval": float(self.tuner.search_interval),
         }
 
@@ -3241,9 +3219,6 @@ class EatventureBot:
             return
         self.tuner.click_delay = float(learned.get("click_delay", self.tuner.click_delay))
         self.tuner.move_delay = float(learned.get("move_delay", self.tuner.move_delay))
-        self.tuner.upgrade_click_interval = float(
-            learned.get("upgrade_click_interval", self.tuner.upgrade_click_interval)
-        )
         self.tuner.search_interval = float(learned.get("search_interval", self.tuner.search_interval))
         logger.info(
             "Historical learner (%s) applied timing profile from best %.2fs run",

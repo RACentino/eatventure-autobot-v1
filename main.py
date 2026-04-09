@@ -264,7 +264,6 @@ def run_self_tests():
                                 "behavior": {
                                     "click_delay": 0.04,
                                     "move_delay": 0.002,
-                                    "upgrade_click_interval": 0.01,
                                     "search_interval": 0.08,
                                 },
                                 "source": "test",
@@ -278,7 +277,6 @@ def run_self_tests():
                         "tuned_behavior": {
                             "click_delay": 0.04,
                             "move_delay": 0.002,
-                            "upgrade_click_interval": 0.01,
                             "search_interval": 0.08,
                         },
                     }
@@ -316,7 +314,6 @@ def run_self_tests():
                                 "behavior": {
                                     "click_delay": "0.04",
                                     "move_delay": "bad",
-                                    "upgrade_click_interval": 0.01,
                                     "search_interval": 0.08,
                                 },
                                 "source": 123,
@@ -336,7 +333,6 @@ def run_self_tests():
                         "tuned_behavior": {
                             "click_delay": "0.03",
                             "move_delay": "bad",
-                            "upgrade_click_interval": 0.01,
                             "search_interval": 0.09,
                         },
                     }
@@ -995,7 +991,7 @@ def run_bot():
     print("=" * 60)
     print(f"Window Title: {config.WINDOW_TITLE}")
     print(f"Match Threshold: {config.MATCH_THRESHOLD * 100}%")
-    print(f"Templates Directory: {config.TEMPLATES_DIR}")
+    print(f"Templates Directory: {config.ASSETS_DIR}")
     print("=" * 60)
 
     setup_logging()
