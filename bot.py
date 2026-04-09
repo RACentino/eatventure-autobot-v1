@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Callable, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 import config
@@ -1285,6 +1286,7 @@ class EatventureBot:
         self._red_template_hit_counts = {}
         self._red_template_priority = []
         self._red_template_last_seen = {}
+        self._red_template_scaled_cache = {}
         self._red_template_decay_window = max(1.0, float(config.RED_ICON_STABILITY_CACHE_TTL))
         self.running = False
         self.red_icon_cycle_count = 0
@@ -2373,35 +2375,50 @@ class EatventureBot:
             else config.RED_ICON_THRESHOLD
         )
         threshold = max(0.0, base_threshold - config.RED_ICON_REFINE_THRESHOLD_DROP)
+        second_pass_threshold = self._resolve_red_icon_second_pass_threshold(threshold)
         best_match = None
 
-        for template_name, template, mask in self._iter_red_icon_templates():
-            found, confidence, rx, ry = self.image_matcher.find_template(
-                roi,
-                template,
-                mask=mask,
-                threshold=threshold,
-                template_name=f"{template_name}-refine",
-            )
-            if not found:
+        for pass_threshold, include_scaled, relaxed_gate in (
+            (threshold, False, False),
+            (second_pass_threshold, True, True),
+        ):
+            if best_match is not None:
+                break
+            if include_scaled and pass_threshold >= threshold:
                 continue
-            abs_x = rx + x1
-            abs_y = ry + y1
-            passed_color_gate, _ = self._passes_red_color_gate(screenshot, abs_x, abs_y)
-            if not passed_color_gate:
-                continue
-            passed_template_gate, _ = self._passes_red_icon_template_gate(
-                screenshot,
-                abs_x,
-                abs_y,
-                template_name,
-                template,
-                mask,
-            )
-            if not passed_template_gate:
-                continue
-            if best_match is None or confidence > best_match[2]:
-                best_match = (abs_x, abs_y, confidence)
+            for template_name, template, mask in self._iter_red_icon_template_variants(include_scaled=include_scaled):
+                found, confidence, rx, ry = self.image_matcher.find_template(
+                    roi,
+                    template,
+                    mask=mask,
+                    threshold=pass_threshold,
+                    template_name=f"{template_name}-refine",
+                )
+                if not found:
+                    continue
+                abs_x = rx + x1
+                abs_y = ry + y1
+                passed_color_gate, _ = self._passes_red_color_gate(
+                    screenshot,
+                    abs_x,
+                    abs_y,
+                    relaxed=relaxed_gate,
+                )
+                if not passed_color_gate:
+                    continue
+                passed_template_gate, _ = self._passes_red_icon_template_gate(
+                    screenshot,
+                    abs_x,
+                    abs_y,
+                    template_name,
+                    template,
+                    mask,
+                    relaxed=relaxed_gate,
+                )
+                if not passed_template_gate:
+                    continue
+                if best_match is None or confidence > best_match[2]:
+                    best_match = (abs_x, abs_y, confidence)
 
         if best_match:
             return (best_match[0], best_match[1]), True, best_match[2]
@@ -2433,44 +2450,66 @@ class EatventureBot:
             else config.RED_ICON_THRESHOLD
         )
         threshold = base_threshold if threshold_override is None else threshold_override
+        second_pass_threshold = self._resolve_red_icon_second_pass_threshold(threshold)
         immediate_threshold = config.RED_ICON_PIXEL_THRESHOLD * 1.5
 
-        for template_name, template, mask in self._iter_red_icon_templates():
-            icons = self.image_matcher.find_all_templates(
-                screenshot,
-                template,
-                mask=mask,
-                threshold=threshold,
-                min_distance=min_distance,
-                template_name=template_name,
-            )
+        pass_plan = [
+            (threshold, False, relaxed_color),
+        ]
+        if second_pass_threshold < threshold:
+            pass_plan.append((second_pass_threshold, True, True))
 
-            for conf, x, y in icons:
-                passed, pixel_count = self._passes_red_color_gate(screenshot, x, y, relaxed=relaxed_color)
-                if not passed:
-                    continue
-                template_gate_relaxed = relaxed_color or pixel_count >= immediate_threshold
-                passed_template_gate, _ = self._passes_red_icon_template_gate(
+        found_any = False
+        for pass_index, (pass_threshold, include_scaled, pass_relaxed_color) in enumerate(pass_plan):
+            if pass_index > 0 and found_any:
+                break
+
+            pass_hits = 0
+            for template_name, template, mask in self._iter_red_icon_template_variants(include_scaled=include_scaled):
+                icons = self.image_matcher.find_all_templates(
                     screenshot,
-                    x,
-                    y,
-                    template_name,
                     template,
-                    mask,
-                    relaxed=template_gate_relaxed,
+                    mask=mask,
+                    threshold=pass_threshold,
+                    min_distance=min_distance,
+                    template_name=template_name,
                 )
-                if not passed_template_gate:
-                    continue
-                self._merge_detection(
-                    detections,
-                    buckets,
-                    x,
-                    y,
-                    template_name,
-                    conf,
-                    pixel_count=pixel_count
-                )
-                template_hits[template_name] = template_hits.get(template_name, 0) + 1
+
+                for conf, x, y in icons:
+                    passed, pixel_count = self._passes_red_color_gate(
+                        screenshot,
+                        x,
+                        y,
+                        relaxed=pass_relaxed_color,
+                    )
+                    if not passed:
+                        continue
+                    template_gate_relaxed = pass_relaxed_color or pixel_count >= immediate_threshold
+                    passed_template_gate, _ = self._passes_red_icon_template_gate(
+                        screenshot,
+                        x,
+                        y,
+                        template_name,
+                        template,
+                        mask,
+                        relaxed=template_gate_relaxed,
+                    )
+                    if not passed_template_gate:
+                        continue
+                    self._merge_detection(
+                        detections,
+                        buckets,
+                        x,
+                        y,
+                        template_name,
+                        conf,
+                        pixel_count=pixel_count
+                    )
+                    template_hits[template_name] = template_hits.get(template_name, 0) + 1
+                    pass_hits += 1
+
+            if pass_hits > 0:
+                found_any = True
 
         self._update_red_template_priority(template_hits)
 
@@ -2497,7 +2536,14 @@ class EatventureBot:
                 relaxed=relaxed_color,
             )
             if not passed_color_gate:
-                return False
+                fallback_color_gate, _ = self._passes_red_color_gate(
+                    target_screenshot,
+                    x,
+                    y,
+                    relaxed=True,
+                )
+                if not fallback_color_gate:
+                    return False
 
         if threshold_override is not None:
             threshold = threshold_override
@@ -2507,6 +2553,7 @@ class EatventureBot:
                 if self.vision_optimizer.enabled
                 else config.RED_ICON_THRESHOLD
             )
+        second_pass_threshold = self._resolve_red_icon_second_pass_threshold(threshold)
 
         padding = config.RED_ICON_VERIFY_PADDING
         x1 = max(0, x - padding)
@@ -2518,33 +2565,38 @@ class EatventureBot:
         if roi.size == 0:
             return False
 
-        for template_name, template, mask in self._iter_red_icon_templates():
-            found, confidence, cx, cy = self.image_matcher.find_template(
-                roi,
-                template,
-                mask=mask,
-                threshold=threshold,
-                template_name=f"{template_name}-verify",
-            )
-            if not found:
-                continue
+        pass_plan = [(threshold, False, relaxed_color)]
+        if second_pass_threshold < threshold:
+            pass_plan.append((second_pass_threshold, True, True))
 
-            abs_x = cx + x1
-            abs_y = cy + y1
-            if (
-                abs(abs_x - x) <= config.RED_ICON_VERIFY_TOLERANCE
-                and abs(abs_y - y) <= config.RED_ICON_VERIFY_TOLERANCE
-                and self._passes_red_icon_template_gate(
-                    target_screenshot,
-                    abs_x,
-                    abs_y,
-                    template_name,
+        for pass_threshold, include_scaled, pass_relaxed_color in pass_plan:
+            for template_name, template, mask in self._iter_red_icon_template_variants(include_scaled=include_scaled):
+                found, confidence, cx, cy = self.image_matcher.find_template(
+                    roi,
                     template,
-                    mask,
-                    relaxed=relaxed_color,
-                )[0]
-            ):
-                return True
+                    mask=mask,
+                    threshold=pass_threshold,
+                    template_name=f"{template_name}-verify",
+                )
+                if not found:
+                    continue
+
+                abs_x = cx + x1
+                abs_y = cy + y1
+                if (
+                    abs(abs_x - x) <= config.RED_ICON_VERIFY_TOLERANCE
+                    and abs(abs_y - y) <= config.RED_ICON_VERIFY_TOLERANCE
+                    and self._passes_red_icon_template_gate(
+                        target_screenshot,
+                        abs_x,
+                        abs_y,
+                        template_name,
+                        template,
+                        mask,
+                        relaxed=pass_relaxed_color,
+                    )[0]
+                ):
+                    return True
 
         return False
 
@@ -3018,6 +3070,70 @@ class EatventureBot:
 
         return ordered
 
+    def _resolve_red_icon_second_pass_threshold(self, threshold):
+        try:
+            strict = float(threshold)
+        except (TypeError, ValueError):
+            return 0.0
+
+        drop = float(getattr(config, "RED_ICON_SECOND_PASS_THRESHOLD_DROP", 0.025))
+        floor = float(getattr(config, "AI_RED_ICON_THRESHOLD_MIN", 0.0))
+        if drop <= 0:
+            return strict
+        return max(floor, strict - drop)
+
+    def _resolve_red_icon_fallback_scales(self):
+        raw_scales = getattr(
+            config,
+            "RED_ICON_FALLBACK_SCALES",
+            (0.88, 0.94, 1.0, 1.06, 1.12, 1.18),
+        )
+        resolved = []
+        for value in raw_scales:
+            try:
+                scale = float(value)
+            except (TypeError, ValueError):
+                continue
+            if scale <= 0:
+                continue
+            resolved.append(round(scale, 4))
+        if not resolved:
+            return [1.0]
+        if not any(abs(scale - 1.0) < 1e-6 for scale in resolved):
+            resolved.append(1.0)
+        return sorted(set(resolved))
+
+    def _iter_red_icon_template_variants(self, include_scaled=False):
+        templates = self._iter_red_icon_templates()
+        if not templates:
+            return []
+
+        if not include_scaled:
+            return templates
+
+        scales = self._resolve_red_icon_fallback_scales()
+        variants = []
+        cache = getattr(self, "_red_template_scaled_cache", {})
+        for template_name, template, mask in templates:
+            for scale in scales:
+                if abs(scale - 1.0) < 1e-6:
+                    variants.append((template_name, template, mask))
+                    continue
+                key = (template_name, scale)
+                cached = cache.get(key)
+                if cached is None:
+                    interpolation = cv2.INTER_LINEAR if scale > 1.0 else cv2.INTER_AREA
+                    scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=interpolation)
+                    scaled_mask = None
+                    if mask is not None:
+                        scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+                        scaled_mask = np.where(scaled_mask > 0, 255, 0).astype(np.uint8)
+                    cached = (scaled_template, scaled_mask)
+                    cache[key] = cached
+                variants.append((template_name, cached[0], cached[1]))
+        self._red_template_scaled_cache = cache
+        return variants
+
     def _update_red_template_priority(self, hit_counts):
         if not hit_counts:
             return
@@ -3062,6 +3178,10 @@ class EatventureBot:
             return True, {}
 
         signature = getattr(self, "_red_template_signatures", {}).get(template_name)
+        if signature is not None:
+            opaque_mask = signature.get("opaque_mask")
+            if opaque_mask is None or opaque_mask.shape != template.shape[:2]:
+                signature = None
         if signature is None:
             signature = self.image_matcher.build_red_template_signature(template, mask=mask)
 
@@ -3160,6 +3280,7 @@ class EatventureBot:
         self._red_template_hit_counts = {}
         self._red_template_priority = []
         self._red_template_last_seen = {}
+        self._red_template_scaled_cache = {}
         self._recent_red_icon_history = []
         self._reset_search_cycle(reason="wipe_memory")
         

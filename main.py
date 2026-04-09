@@ -857,6 +857,23 @@ def run_self_tests():
             }
             return bot, template, mask
 
+        @staticmethod
+        def _make_scaled_detection_bot():
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
+            template_path = Path(config.ASSETS_DIR) / "RedIcon13.png"
+            template, mask = bot.image_matcher.load_template(template_path)
+            bot.available_red_icon_templates = [("RedIcon13", template, mask)]
+            bot._red_template_priority = []
+            bot._red_template_hit_counts = {}
+            bot._red_template_last_seen = {}
+            bot._red_template_scaled_cache = {}
+            bot._red_template_signatures = {
+                "RedIcon13": bot.image_matcher.build_red_template_signature(template, mask=mask)
+            }
+            bot.vision_optimizer = types.SimpleNamespace(enabled=False)
+            return bot, template, mask
+
         def test_real_red_icon_template_gate_passes(self):
             bot, template, mask = self._make_red_icon_bot()
             center_x = template.shape[1] // 2
@@ -905,6 +922,46 @@ def run_self_tests():
 
             self.assertFalse(passed)
             self.assertGreater(pixel_count, config.RED_ICON_PIXEL_THRESHOLD)
+
+        def test_detect_red_icons_second_pass_recovers_scaled_icon(self):
+            bot, template, _ = self._make_scaled_detection_bot()
+            scale = 1.12
+            scaled = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            frame = np.full((240, 240, 3), 255, dtype=np.uint8)
+            x1, y1 = 100, 90
+            h, w = scaled.shape[:2]
+            frame[y1:y1 + h, x1:x1 + w] = scaled
+
+            detections = EatventureBot._detect_red_icons_in_view(
+                bot,
+                frame,
+                max_y=240,
+                threshold_override=0.935,
+                min_distance=20,
+            )
+
+            self.assertTrue(detections)
+
+        def test_is_red_icon_present_second_pass_recovers_scaled_icon(self):
+            bot, template, _ = self._make_scaled_detection_bot()
+            scale = 1.12
+            scaled = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            frame = np.full((240, 240, 3), 255, dtype=np.uint8)
+            x1, y1 = 96, 92
+            h, w = scaled.shape[:2]
+            frame[y1:y1 + h, x1:x1 + w] = scaled
+            center_x = x1 + (w // 2)
+            center_y = y1 + (h // 2)
+
+            present = EatventureBot._is_red_icon_present_at(
+                bot,
+                center_x,
+                center_y,
+                screenshot=frame,
+                threshold_override=0.935,
+            )
+
+            self.assertTrue(present)
 
     suite = unittest.TestSuite()
     for case in (
