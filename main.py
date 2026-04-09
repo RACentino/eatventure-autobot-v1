@@ -537,6 +537,23 @@ def run_self_tests():
 
             self.assertEqual(state, State.OPEN_BOXES)
 
+        def test_find_red_icons_uses_fallback_assets_before_forbidden_scroll(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._resolve_red_icon_zone_state = lambda: {
+                "safe_present": False,
+                "forbidden_present": True,
+                "actionable_icons": [],
+                "forbidden_count": 1,
+            }
+            bot.check_fallbacks = lambda: State.FIND_RED_ICONS
+            bot._last_forbidden_scroll_time = 0.0
+
+            state = EatventureBot.handle_find_red_icons(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+
         def test_step_recovers_from_unexpected_exception(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.running = True
@@ -671,11 +688,81 @@ def run_self_tests():
             bot.upgrade_found_in_cycle = False
             bot.cycle_counter = 0
             bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = False
 
             state = EatventureBot.handle_open_boxes(bot, None)
 
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.SCROLL)
+
+        def test_open_boxes_loops_back_after_opening_box(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._mark_asset_action_completed = EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            bot.templates = {
+                "box1": (np.zeros((1, 1, 3), dtype=np.uint8), None)
+            }
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_box_miss=lambda: None,
+                update_box_confidence=lambda confidence: None,
+            )
+            bot.image_matcher = types.SimpleNamespace(
+                find_template=lambda *args, **kwargs: (True, 0.99, 11, 22)
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                is_in_forbidden_zone=lambda *args, **kwargs: False,
+                click=lambda *args, **kwargs: True,
+            )
+            bot.work_done = False
+            bot.upgrade_found_in_cycle = False
+            bot.cycle_counter = 0
+            bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = False
+
+            state = EatventureBot.handle_open_boxes(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
+
+        def test_open_boxes_loops_back_after_earlier_asset_action(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._mark_asset_action_completed = EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            bot.templates = {
+                f"box{i}": (np.zeros((1, 1, 3), dtype=np.uint8), None)
+                for i in range(1, 6)
+            }
+            miss_counter = {"count": 0}
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_box_miss=lambda: miss_counter.__setitem__("count", miss_counter["count"] + 1),
+                update_box_confidence=lambda confidence: None,
+            )
+            bot.image_matcher = types.SimpleNamespace(find_template=lambda *args, **kwargs: (False, 0.0, 0, 0))
+            bot.mouse_controller = types.SimpleNamespace(
+                is_in_forbidden_zone=lambda *args, **kwargs: False,
+                click=lambda *args, **kwargs: True,
+            )
+            bot.work_done = False
+            bot.upgrade_found_in_cycle = True
+            bot.cycle_counter = 0
+            bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = True
+
+            state = EatventureBot.handle_open_boxes(bot, None)
+
+            self.assertEqual(miss_counter["count"], 1)
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
 
         def test_check_new_level_aborts_when_acknowledgement_click_fails(self):
             bot = EatventureBot.__new__(EatventureBot)

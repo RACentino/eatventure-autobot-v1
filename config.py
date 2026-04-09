@@ -257,7 +257,7 @@ MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR = 0.00002
 SCROLL_START_POS = (170, 380)
 
 # This is the base scroll distance, in pixels, for one search drag.
-SCROLL_PIXEL_STEP = 125
+SCROLL_PIXEL_STEP = 90
 
 # This is the multiplier applied to the base scroll distance.
 SCROLL_DISTANCE_RATIO = 1
@@ -284,7 +284,7 @@ CYCLE_PAUSE_DURATION = 0.120
 SCROLL_DURATION = 0.150
 
 # This is how many cursor waypoints the bot uses while dragging a scroll gesture.
-SCROLL_STEP_COUNT = 8
+SCROLL_STEP_COUNT = 16
 
 # This is the minimum allowed gap between drag gestures.
 SCROLL_MIN_INTERVAL = 0.066

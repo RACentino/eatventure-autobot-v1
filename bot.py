@@ -1331,6 +1331,7 @@ class EatventureBot:
         self._recent_red_icon_history = []
         self._forbidden_blackout_cache = {} # {world_coord_tuple: expiry_timestamp}
         self._last_forbidden_scroll_time = 0.0
+        self._asset_action_completed = False
         self._timer_resolution = WindowsTimerResolution()
 
         self.forbidden_zones = [
@@ -1559,6 +1560,14 @@ class EatventureBot:
             return State.CLICK_RED_ICON
         return State.UPGRADE_STATS
 
+    def _mark_asset_action_completed(self):
+        self._asset_action_completed = True
+
+    def _consume_asset_action_completed(self):
+        completed = bool(getattr(self, "_asset_action_completed", False))
+        self._asset_action_completed = False
+        return completed
+
     def _recover_from_step_exception(self):
         current_state = self.state_machine.get_state()
         recovery_state = (
@@ -1578,6 +1587,7 @@ class EatventureBot:
         self.upgrade_found_in_cycle = False
         self.upgrade_station_pos = None
         self._last_upgrade_station_pos = None
+        self._asset_action_completed = False
         self._recent_red_icon_history = []
         self._clear_capture_cache()
         self._reset_search_cycle(reason="unexpected step exception")
@@ -2751,6 +2761,9 @@ class EatventureBot:
             return State.CHECK_NEW_LEVEL
         if clicked == -1:
             return State.SCROLL
+        if clicked > 0:
+            self._mark_asset_action_completed()
+            return State.FIND_RED_ICONS
         return None
 
     def execute_oscillating_search(self):
@@ -3212,6 +3225,7 @@ class EatventureBot:
         """
         self.check_critical_interrupts()
         self._click_idle()
+        self._asset_action_completed = False
 
         # Step 1: Discovery pipeline with debounced zone-state arbitration.
         zone_state = self._resolve_red_icon_zone_state()
@@ -3240,6 +3254,11 @@ class EatventureBot:
             self.work_done = True
             return State.CLICK_RED_ICON
 
+        fallback_state = self.check_fallbacks()
+        if fallback_state is not None:
+            logger.info("Fallback scan triggered state redirect to: %s", fallback_state)
+            return fallback_state
+
         if forbidden_present:
             now = time.monotonic()
             cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
@@ -3257,10 +3276,6 @@ class EatventureBot:
             )
             return State.SCROLL
 
-        fallback_state = self.check_fallbacks()
-        if fallback_state is not None:
-            logger.info("Fallback scan triggered state redirect to: %s", fallback_state)
-            return fallback_state
         logger.info("No targets detected; initiating exploration.")
         return State.SCROLL
 
@@ -3417,6 +3432,7 @@ class EatventureBot:
             return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.CHECK_UNLOCK
         
         self.red_icon_cycle_count = 0
+        self._mark_asset_action_completed()
         return State.CHECK_UNLOCK
     
     def handle_check_unlock(self, current_state):
@@ -3439,6 +3455,7 @@ class EatventureBot:
                     clicked_unlock = self.mouse_controller.click(x, y, relative=True)
 
         if clicked_unlock:
+            self._mark_asset_action_completed()
             if self._sleep_with_interrupt(config.STATE_DELAY):
                 return State.CHECK_NEW_LEVEL
             return State.SEARCH_UPGRADE_STATION
@@ -3626,6 +3643,7 @@ class EatventureBot:
         
         self.red_icon_processed_count += 1
         self.current_red_icon_index += 1
+        self._mark_asset_action_completed()
 
         logger.info("✓ Upgrade station complete → Stats upgrade next")
         return State.UPGRADE_STATS
@@ -3676,6 +3694,7 @@ class EatventureBot:
             return State.OPEN_BOXES
 
         self._click_idle()
+        self._mark_asset_action_completed()
         logger.info("========== STAT UPGRADE COMPLETED ==========")
         return State.OPEN_BOXES
     
@@ -3736,15 +3755,21 @@ class EatventureBot:
         if boxes_found > 0:
             logger.info(f"🎁 Opened {boxes_found} boxes")
             self.work_done = True
+            self._mark_asset_action_completed()
 
         if self.upgrade_found_in_cycle:
             logger.info("✓ Upgrade found → continuing strict main-loop stage order")
             self.upgrade_found_in_cycle = False
 
+        should_recheck_assets = self._consume_asset_action_completed()
         self.cycle_counter = 0
         if self.consecutive_failed_cycles >= 3:
             logger.info(f"⚠ {self.consecutive_failed_cycles} failed → continuing scroll sequence")
             self.consecutive_failed_cycles = 0
+
+        if should_recheck_assets:
+            logger.info("Asset actions completed during stages 1-7; restarting asset scan before scroll")
+            return State.FIND_RED_ICONS
 
         return State.SCROLL
     
@@ -3940,6 +3965,7 @@ class EatventureBot:
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
         self._scroll_break_sequence_pending = False
+        self._asset_action_completed = False
     
     def handle_wait_for_unlock(self, current_state):
         """
