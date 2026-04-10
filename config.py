@@ -61,7 +61,7 @@ NEW_LEVEL_RED_ICON_THRESHOLD = 0.942
 STATS_RED_ICON_THRESHOLD = 0.973
 
 # This is the confidence floor for the main upgrade-station template.
-UPGRADE_STATION_THRESHOLD = 0.95
+UPGRADE_STATION_THRESHOLD = 0.944
 
 # This is the confidence floor for gift box detection.
 BOX_THRESHOLD = 0.973
@@ -169,22 +169,22 @@ RED_ICON_FALLBACK_SCALES = (0.94, 1.0, 1.06, 1.12)
 UPGRADE_STATION_COLOR_CHECK = True
 
 # This is the local search radius used to re-center the upgrade-station match.
-UPGRADE_STATION_REFINE_RADIUS = 28
+UPGRADE_STATION_REFINE_RADIUS = 32
 
 # This is the smaller local search radius used to refine the actual click point on the station.
-UPGRADE_STATION_CLICK_REFINE_RADIUS = 18
+UPGRADE_STATION_CLICK_REFINE_RADIUS = 22
 
 # This is the lower HSV bound for the cyan/blue part of the upgrade station.
-UPGRADE_STATION_HSV_LOWER = (90, 100, 195)
+UPGRADE_STATION_HSV_LOWER = (90, 95, 190)
 
 # This is the upper HSV bound for the cyan/blue part of the upgrade station.
-UPGRADE_STATION_HSV_UPPER = (106, 210, 255)
+UPGRADE_STATION_HSV_UPPER = (107, 220, 255)
 
 # This is the minimum amount of upgrade-station color that must be present for a candidate to pass.
-UPGRADE_STATION_HSV_MIN_RATIO = 0.55
+UPGRADE_STATION_HSV_MIN_RATIO = 0.52
 
 # This is the minimum color-histogram similarity required for generic color verification.
-COLOR_SIMILARITY_THRESHOLD = 0.70
+COLOR_SIMILARITY_THRESHOLD = 0.32
 
 
 # =========================
@@ -417,13 +417,13 @@ RED_ICON_MERGE_PROXIMITY = 10
 RED_ICON_MERGE_BUCKET_SIZE = 10
 
 # This is how many times the bot will look for an upgrade station before giving up for that icon.
-UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 2
+UPGRADE_STATION_SEARCH_MAX_ATTEMPTS = 3
 
 # This is how much easier the station threshold becomes after repeated misses.
-UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.035
+UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.028
 
 # This is the attempt number where that relaxed station threshold starts being used.
-UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 2
+UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 1
 
 # This is how long a captured screenshot stays valid in the short-term cache.
 CAPTURE_CACHE_TTL = 0.033
@@ -679,16 +679,16 @@ AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 4
 AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0015
 
 # This is the lowest upgrade-station threshold the optimizer is allowed to use.
-AI_UPGRADE_STATION_THRESHOLD_MIN = 0.93
+AI_UPGRADE_STATION_THRESHOLD_MIN = 0.924
 
 # This is the highest upgrade-station threshold the optimizer is allowed to use.
-AI_UPGRADE_STATION_THRESHOLD_MAX = 0.988
+AI_UPGRADE_STATION_THRESHOLD_MAX = 0.968
 
 # This is how many missed upgrade-station scans happen before the threshold is lowered.
-AI_UPGRADE_STATION_MISS_WINDOW = 4
+AI_UPGRADE_STATION_MISS_WINDOW = 3
 
 # This is how much the upgrade-station threshold is lowered after that many misses.
-AI_UPGRADE_STATION_MISS_STEP = 0.0020
+AI_UPGRADE_STATION_MISS_STEP = 0.0035
 
 # This is the lowest stats-icon threshold the optimizer is allowed to use.
 AI_STATS_UPGRADE_THRESHOLD_MIN = 0.93
