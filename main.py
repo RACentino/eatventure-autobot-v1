@@ -220,6 +220,42 @@ def run_self_tests():
             self.assertFalse(result)
             self.assertEqual(mouse_up_calls, [])
 
+        def test_click_returns_false_when_cursor_positioning_fails(self):
+            self.controller._resolve_screen_position = lambda *args, **kwargs: (100, 200)
+            self.controller._sleep = lambda *args, **kwargs: None
+            self.controller._validate_pre_click_target = lambda *args, **kwargs: True
+
+            with mock.patch("mouse_controller.win32api.GetCursorPos", return_value=(0, 0)):
+                with mock.patch("mouse_controller.win32api.SetCursorPos", side_effect=RuntimeError("boom")) as set_cursor:
+                    with mock.patch("mouse_controller.win32api.mouse_event") as mouse_event:
+                        result = self.controller.click(100, 200, relative=False)
+
+            self.assertFalse(result)
+            self.assertGreaterEqual(set_cursor.call_count, 1)
+            mouse_event.assert_not_called()
+
+        def test_click_recovers_after_transient_cursor_position_failure(self):
+            self.controller._resolve_screen_position = lambda *args, **kwargs: (100, 200)
+            self.controller._sleep = lambda *args, **kwargs: None
+            self.controller._validate_pre_click_target = lambda *args, **kwargs: True
+            self.controller.recovery_callback = mock.Mock()
+            cursor = {"pos": (0, 0), "failures": 0}
+
+            def fake_set_cursor(target):
+                if cursor["failures"] == 0:
+                    cursor["failures"] += 1
+                    raise RuntimeError("boom")
+                cursor["pos"] = target
+
+            with mock.patch("mouse_controller.win32api.GetCursorPos", side_effect=lambda: cursor["pos"]):
+                with mock.patch("mouse_controller.win32api.SetCursorPos", side_effect=fake_set_cursor):
+                    with mock.patch("mouse_controller.win32api.mouse_event") as mouse_event:
+                        result = self.controller.click(100, 200, relative=False)
+
+            self.assertTrue(result)
+            self.controller.recovery_callback.assert_called()
+            self.assertEqual(mouse_event.call_count, 2)
+
     class VisionPersistenceTests(unittest.TestCase):
         def test_load_returns_empty_dict_for_malformed_json(self):
             temp_dir = make_test_dir("test-vision-load")
@@ -361,7 +397,7 @@ def run_self_tests():
             self.assertEqual(learner._last_pair_processed, 0)
             self.assertEqual(learner._last_batch_processed, 0)
             self.assertEqual(len(applied), 1)
-            self.assertAlmostEqual(applied[0][0][0]["click_delay"], 0.03)
+            self.assertAlmostEqual(applied[0][0][0]["click_delay"], config.AI_LEARNING_MAX_CLICK_DELAY)
             self.assertNotIn("move_delay", applied[0][0][0])
 
     class BotRegressionTests(unittest.TestCase):

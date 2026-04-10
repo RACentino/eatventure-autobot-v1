@@ -1250,6 +1250,7 @@ class EatventureBot:
             config.CLICK_DELAY,
             config.MOUSE_MOVE_DELAY,
             hwnd_provider=lambda: self.window_capture.hwnd,
+            recovery_callback=self._sync_window_bindings,
         )
         self.mouse_controller.interrupt_callback = self.check_critical_interrupts
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
