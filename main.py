@@ -537,22 +537,79 @@ def run_self_tests():
 
             self.assertEqual(state, State.OPEN_BOXES)
 
-        def test_find_red_icons_uses_fallback_assets_before_forbidden_scroll(self):
+        def test_find_red_icons_forbidden_only_continues_asset_cycle_before_scroll(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.check_critical_interrupts = lambda *args, **kwargs: False
             bot._click_idle = lambda *args, **kwargs: None
+            bot._continue_asset_cycle_after_red_scan = (
+                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
+            )
             bot._resolve_red_icon_zone_state = lambda: {
                 "safe_present": False,
                 "forbidden_present": True,
                 "actionable_icons": [],
                 "forbidden_count": 1,
             }
-            bot.check_fallbacks = lambda: State.FIND_RED_ICONS
-            bot._last_forbidden_scroll_time = 0.0
+            bot.red_icons = [(0.99, 10, 20)]
+            bot.current_red_icon_index = 3
+            bot.red_icon_cycle_count = 2
 
             state = EatventureBot.handle_find_red_icons(bot, None)
 
-            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertEqual(state, State.CHECK_UNLOCK)
+            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(bot.current_red_icon_index, 0)
+            self.assertEqual(bot.red_icon_cycle_count, 0)
+
+        def test_find_red_icons_without_targets_continues_asset_cycle_before_scroll(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._continue_asset_cycle_after_red_scan = (
+                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
+            )
+            bot._resolve_red_icon_zone_state = lambda: {
+                "safe_present": False,
+                "forbidden_present": False,
+                "actionable_icons": [],
+                "forbidden_count": 0,
+            }
+            bot.red_icons = [(0.99, 10, 20)]
+            bot.current_red_icon_index = 1
+            bot.red_icon_cycle_count = 4
+
+            state = EatventureBot.handle_find_red_icons(bot, None)
+
+            self.assertEqual(state, State.CHECK_UNLOCK)
+            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(bot.current_red_icon_index, 0)
+            self.assertEqual(bot.red_icon_cycle_count, 0)
+
+        def test_search_miss_flows_into_stats_before_boxes(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot.templates = {}
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_upgrade_station_miss=lambda: None,
+                update_upgrade_station_confidence=lambda *args, **kwargs: None,
+            )
+            bot.tuner = types.SimpleNamespace(
+                search_interval=0.0,
+                record_search_result=lambda *args, **kwargs: None,
+            )
+            bot._apply_tuning = lambda *args, **kwargs: None
+            bot.red_icons = []
+            bot.current_red_icon_index = 0
+            bot.red_icon_processed_count = 0
+            bot.successful_red_icon_positions = []
+            bot.upgrade_found_in_cycle = False
+            bot.consecutive_failed_cycles = 0
+
+            state = EatventureBot.handle_search_upgrade_station(bot, None)
+
+            self.assertEqual(state, State.UPGRADE_STATS)
 
         def test_step_recovers_from_unexpected_exception(self):
             bot = EatventureBot.__new__(EatventureBot)

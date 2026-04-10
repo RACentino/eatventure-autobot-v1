@@ -1560,6 +1560,13 @@ class EatventureBot:
             return State.CLICK_RED_ICON
         return State.UPGRADE_STATS
 
+    def _continue_asset_cycle_after_red_scan(self, reason):
+        logger.info("%s", reason)
+        self.red_icons = []
+        self.current_red_icon_index = 0
+        self.red_icon_cycle_count = 0
+        return State.CHECK_UNLOCK
+
     def _mark_asset_action_completed(self):
         self._asset_action_completed = True
 
@@ -3254,30 +3261,14 @@ class EatventureBot:
             self.work_done = True
             return State.CLICK_RED_ICON
 
-        fallback_state = self.check_fallbacks()
-        if fallback_state is not None:
-            logger.info("Fallback scan triggered state redirect to: %s", fallback_state)
-            return fallback_state
-
         if forbidden_present:
-            now = time.monotonic()
-            cooldown = max(0.0, float(config.FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN))
-            wait_remaining = (self._last_forbidden_scroll_time + cooldown) - now
-            if wait_remaining > 0:
-                logger.debug(
-                    "Forbidden-only state detected; skipping scroll reentry cooldown %.3fs to preserve main flow",
-                    wait_remaining,
-                )
-            self._last_forbidden_scroll_time = time.monotonic()
-            logger.warning(
-                "⚠ %s targets currently inside Forbidden Zone with no safe counterpart. "
-                "Switching to oscillating search cycle.",
-                zone_state["forbidden_count"],
+            return self._continue_asset_cycle_after_red_scan(
+                "Forbidden-only red-icon state detected; continuing staged asset sweep before scroll fallback"
             )
-            return State.SCROLL
 
-        logger.info("No targets detected; initiating exploration.")
-        return State.SCROLL
+        return self._continue_asset_cycle_after_red_scan(
+            "No actionable red icons detected; continuing staged asset sweep before scroll fallback"
+        )
 
     def _collect_red_icon_zone_snapshot(self):
         """Collect a single red-icon snapshot and split safe/forbidden detections."""
@@ -3562,7 +3553,7 @@ class EatventureBot:
         if self.current_red_icon_index < len(self.red_icons):
             logger.info("Trying next red icon after station search miss")
             return State.CLICK_RED_ICON
-        return State.OPEN_BOXES
+        return State.UPGRADE_STATS
     
     def handle_hold_upgrade_station(self, current_state):
         self.check_critical_interrupts()
