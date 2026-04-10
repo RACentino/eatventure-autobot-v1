@@ -44,10 +44,11 @@ _SEND_INPUT.restype = wintypes.UINT
 
 
 class MouseController:
-    def __init__(self, hwnd, click_delay=None, move_delay=None):
+    def __init__(self, hwnd, click_delay=None, move_delay=None, hwnd_provider=None):
         self.hwnd = hwnd
         self.click_delay = config.CLICK_DELAY if click_delay is None else click_delay
         self.move_delay = config.MOUSE_MOVE_DELAY if move_delay is None else move_delay
+        self.hwnd_provider = hwnd_provider
         self.interrupt_callback = None # Set by bot to check for high-priority interrupts
         self._last_click_time = 0.0
         self._last_cursor_pos = None
@@ -486,9 +487,26 @@ class MouseController:
 
     def is_in_forbidden_zone(self, x, y, relative=True):
         return not self.is_safe_to_click(x, y, relative=relative)
+
+    def set_window_handle(self, hwnd):
+        if hwnd and hwnd != self.hwnd:
+            self.hwnd = hwnd
+            self._last_cursor_pos = None
+            logger.info("Mouse controller rebound to hwnd %s", hwnd)
+
+    def _get_active_hwnd(self):
+        if callable(self.hwnd_provider):
+            try:
+                self.set_window_handle(self.hwnd_provider())
+            except Exception as exc:
+                logger.debug("Window handle provider failed: %s", exc)
+        return self.hwnd
     
     def get_window_position(self):
-        x, y = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        hwnd = self._get_active_hwnd()
+        if not hwnd:
+            raise RuntimeError("Mouse controller has no active window handle")
+        x, y = win32gui.ClientToScreen(hwnd, (0, 0))
         return x, y
     
     def move_to(self, x, y, relative=True):

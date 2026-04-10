@@ -31,6 +31,12 @@ WINDOW_HEIGHT = 650 * 1.2
 # This turns verbose console logging on when you need to troubleshoot behavior.
 DEBUG = False
 
+# This is the maximum size of a single runtime log file before it rolls over.
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+
+# This is how many rotated runtime log files are kept on disk.
+LOG_FILE_BACKUP_COUNT = 5
+
 # This shows the internal red-mask debug view so you can see what the bot thinks is "red."
 DEBUG_VISION = False
 
@@ -192,10 +198,10 @@ COLOR_SIMILARITY_THRESHOLD = 0.32
 # =========================
 
 # This is the normal pause after a click so the UI has time to react.
-CLICK_DELAY = 0.016
+CLICK_DELAY = 0.005
 
 # This is the normal pause after moving the cursor to a new point.
-MOUSE_MOVE_DELAY = 0.010
+MOUSE_MOVE_DELAY = 0.001
 
 # This is how long the left mouse button stays down during a standard click.
 MOUSE_DOWN_UP_DELAY = 0.016
@@ -204,46 +210,46 @@ MOUSE_DOWN_UP_DELAY = 0.016
 MOUSE_CLICK_RETRY_COUNT = 2
 
 # This is the tiny pause between click retries while the cursor settles.
-MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.016
+MOUSE_CLICK_RETRY_SETTLE_DELAY = 0.005
 
 # This is the minimum gap the bot enforces between separate clicks.
-MIN_CLICK_INTERVAL = 0.016
+MIN_CLICK_INTERVAL = 0.005
 
 # This is how many times the bot retries a cursor move before giving up on exact positioning.
 MOUSE_MOVE_RETRIES = 2
 
 # This is the pause between those move retries.
-MOUSE_MOVE_RETRY_DELAY = 0.010
+MOUSE_MOVE_RETRY_DELAY = 0.002
 
 # This is the pause after the cursor first reaches a target, before the bot trusts it is stable.
-MOUSE_TARGET_SETTLE_DELAY = 0.016
+MOUSE_TARGET_SETTLE_DELAY = 0.002
 
 # This is the longest time the bot will wait for the cursor to settle on a target.
-MOUSE_TARGET_TIMEOUT = 0.040
+MOUSE_TARGET_TIMEOUT = 0.020
 
 # This is how often the bot re-checks the cursor while waiting for it to settle.
-MOUSE_TARGET_CHECK_INTERVAL = 0.010
+MOUSE_TARGET_CHECK_INTERVAL = 0.002
 
 # This is the extra hover pause once the cursor appears to be on target.
-MOUSE_TARGET_HOVER_DELAY = 0.005
+MOUSE_TARGET_HOVER_DELAY = 0.001
 
 # This is the final stability window the cursor must survive before a click is allowed.
-MOUSE_STABILIZE_DURATION = 0.010
+MOUSE_STABILIZE_DURATION = 0.002
 
 # This is how many correction attempts are allowed if the cursor is still slightly off target.
 MOUSE_TARGET_RETRIES = 2
 
 # This is the pause between those correction nudges.
-MOUSE_TARGET_CORRECTION_DELAY = 0.010
+MOUSE_TARGET_CORRECTION_DELAY = 0.002
 
 # This is how many pixels of cursor error the bot still considers "close enough."
 MOUSE_POSITION_TOLERANCE = 1
 
 # This is the shortest pre-click settle time the bot always waits, even for tiny cursor moves.
-MOUSE_PRE_CLICK_STABILIZE_BASE = 0.010
+MOUSE_PRE_CLICK_STABILIZE_BASE = 0.002
 
 # This is the longest pre-click settle time allowed for long cursor travel.
-MOUSE_PRE_CLICK_STABILIZE_MAX = 0.020
+MOUSE_PRE_CLICK_STABILIZE_MAX = 0.008
 
 # This is how much extra settle time gets added as cursor travel distance grows.
 MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR = 0.00002
@@ -301,38 +307,38 @@ SCROLL_SETTLE_DELAY = 0.200
 # =========================
 
 # This is the idle sleep used by the launcher loop while the bot is not actively running.
-MAIN_LOOP_DELAY = 0.002
+MAIN_LOOP_DELAY = 0.001
 
 # This is the short pause between certain major state transitions.
-STATE_DELAY = 0.016
+STATE_DELAY = 0.005
 
 # This is the fallback minimum gap between two runs of the same state handler.
-STATE_MIN_INTERVAL_DEFAULT = 0.016
+STATE_MIN_INTERVAL_DEFAULT = 0.005
 
 # This table lets each state have its own minimum re-run delay.
 STATE_MIN_INTERVALS = {
     # This slows down red-icon scans just enough to avoid over-polling the same frame.
-    "FIND_RED_ICONS": 0.033,
+    "FIND_RED_ICONS": 0.016,
     # This is the minimum gap between box-opening passes.
-    "OPEN_BOXES": 0.033,
+    "OPEN_BOXES": 0.016,
     # This is the minimum gap between scroll handlers.
     "SCROLL": 0.180,
     # This is the minimum gap between upgrade-station search attempts.
-    "SEARCH_UPGRADE_STATION": 0.033,
+    "SEARCH_UPGRADE_STATION": 0.016,
     # This is the minimum gap between red-icon click handlers.
-    "CLICK_RED_ICON": 0.033,
+    "CLICK_RED_ICON": 0.016,
     # This is the minimum gap between upgrade-station spam-click handlers.
-    "HOLD_UPGRADE_STATION": 0.033,
+    "HOLD_UPGRADE_STATION": 0.016,
     # This is the minimum gap between unlock checks.
-    "CHECK_UNLOCK": 0.033,
+    "CHECK_UNLOCK": 0.016,
     # This is the minimum gap between new-level verification passes.
-    "CHECK_NEW_LEVEL": 0.033,
+    "CHECK_NEW_LEVEL": 0.016,
     # This is the minimum gap between stat-upgrade handlers.
-    "UPGRADE_STATS": 0.033,
+    "UPGRADE_STATS": 0.016,
     # This is the minimum gap between transition attempts.
-    "TRANSITION_LEVEL": 0.050,
+    "TRANSITION_LEVEL": 0.016,
     # This is the minimum gap between unlock hot-loop state entries.
-    "WAIT_FOR_UNLOCK": 0.016,
+    "WAIT_FOR_UNLOCK": 0.002,
 }
 
 
@@ -385,7 +391,7 @@ RAPID_CLICK_DOWN_UP_DELAY = 0.010
 RAPID_CLICK_SPIN_THRESHOLD = 0.005
 
 # This is the default pause between repeated upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.033
+UPGRADE_SEARCH_INTERVAL = 0.016
 
 # This is how long the bot rapid-clicks inside the stats menu.
 STATS_UPGRADE_CLICK_DURATION = 3.0
@@ -397,10 +403,10 @@ STATS_UPGRADE_CLICK_DELAY = 0.016
 STATS_ICON_PADDING = 20
 
 # This is the pause after the bot taps its idle spot and before it continues.
-IDLE_CLICK_SETTLE_DELAY = 0.016
+IDLE_CLICK_SETTLE_DELAY = 0.005
 
 # This is the minimum gap between two idle clicks.
-IDLE_CLICK_COOLDOWN = 0.033
+IDLE_CLICK_COOLDOWN = 0.016
 
 
 # =========================
@@ -426,13 +432,13 @@ UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.028
 UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 1
 
 # This is how long a captured screenshot stays valid in the short-term cache.
-CAPTURE_CACHE_TTL = 0.016
+CAPTURE_CACHE_TTL = 0.008
 
 # This is how long the special new-level red-icon result stays cached.
-NEW_LEVEL_RED_ICON_CACHE_TTL = 0.016
+NEW_LEVEL_RED_ICON_CACHE_TTL = 0.008
 
 # This is how long red-icon history is kept for stability checks and template priority decay.
-RED_ICON_STABILITY_CACHE_TTL = 0.33
+RED_ICON_STABILITY_CACHE_TTL = 0.15
 
 # This is how close two red-icon positions must be across frames to count as the same target.
 RED_ICON_STABILITY_RADIUS = 14
@@ -455,10 +461,10 @@ RED_ICON_PRIORITY_TEMPLATE_LIMIT = 8
 # =========================
 
 # This is the pause before the bot starts the debounced safe-vs-forbidden red-icon check.
-FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.016
+FORBIDDEN_ZONE_DETECTION_PRE_DELAY = 0.005
 
 # This is the pause between repeated snapshots during that debounce check.
-FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.016
+FORBIDDEN_ZONE_DETECTION_POST_DELAY = 0.005
 
 # This is how many safe/forbidden snapshots the bot collects before deciding.
 FORBIDDEN_ZONE_DEBOUNCE_TICKS = 2
@@ -470,13 +476,13 @@ FORBIDDEN_ZONE_DEBOUNCE_REQUIRED_CONSENSUS = 2
 FORBIDDEN_ZONE_SCROLL_REENTRY_COOLDOWN = 0.050
 
 # This is how long a blocked world-space coordinate stays on the temporary blacklist.
-FORBIDDEN_BLACKOUT_DURATION = 1.0
+FORBIDDEN_BLACKOUT_DURATION = 0.5
 
 # This is the pause before the first forbidden-zone safety check right before a click.
-FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.005
+FORBIDDEN_ZONE_PRECLICK_VALIDATION_DELAY = 0.001
 
 # This is the pause between the first and second forbidden-zone safety checks.
-FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.005
+FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.001
 
 
 # =========================
@@ -487,34 +493,34 @@ FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.005
 LEVEL_TRANSITION_MAX_ATTEMPTS = 5
 
 # This is how long a recent completion mark stays trusted for transition bookkeeping.
-LEVEL_COMPLETION_RECENCY_WINDOW = 3.0
+LEVEL_COMPLETION_RECENCY_WINDOW = 2.0
 
 # This is the cooldown after a failed new-level red-icon detection so the bot does not loop on bad signals.
-NEW_LEVEL_FAIL_COOLDOWN = 1.5
+NEW_LEVEL_FAIL_COOLDOWN = 0.5
 
 # This is the pause after clicking the "new level" acknowledgment button.
-NEW_LEVEL_BUTTON_DELAY = 0.050
+NEW_LEVEL_BUTTON_DELAY = 0.016
 
 # This is the final load-stabilization wait after the bot finishes a transition.
-NEW_LEVEL_FOLLOWUP_DELAY = 0.250
+NEW_LEVEL_FOLLOWUP_DELAY = 0.050
 
 # This is the animation buffer after travel-confirmation clicks.
-TRANSITION_POST_CLICK_DELAY = 0.250
+TRANSITION_POST_CLICK_DELAY = 0.050
 
 # This is the wait between repeated transition attempts when the button is not found right away.
-TRANSITION_RETRY_DELAY = 0.050
+TRANSITION_RETRY_DELAY = 0.016
 
 # This is how long the bot ignores repeated new-level signals right after a successful transition.
-NEW_LEVEL_POST_TRANSITION_IGNORE_WINDOW = 3.0
+NEW_LEVEL_POST_TRANSITION_IGNORE_WINDOW = 1.0
 
 # This is the sleep slice used by interrupt-aware loops while watching for new-level events.
-NEW_LEVEL_INTERRUPT_INTERVAL = 0.016
+NEW_LEVEL_INTERRUPT_INTERVAL = 0.005
 
 # This is the base polling rate of the background new-level monitor thread.
-NEW_LEVEL_MONITOR_INTERVAL = 0.033
+NEW_LEVEL_MONITOR_INTERVAL = 0.016
 
 # This is the cooldown that stops the bot from firing the same new-level override too quickly.
-NEW_LEVEL_OVERRIDE_COOLDOWN = 0.100
+NEW_LEVEL_OVERRIDE_COOLDOWN = 0.050
 
 # This is the left edge of the special bottom-screen box where the new-level red icon is expected.
 NEW_LEVEL_RED_ICON_X_MIN = 40
@@ -587,22 +593,22 @@ ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.008
 ADAPTIVE_TUNER_SEARCH_DECREMENT = 0.004
 
 # This is the fastest click delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.016
+ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.005
 
 # This is the slowest click delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.040
+ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.020
 
 # This is the fastest move delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.010
+ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.001
 
 # This is the slowest move delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.020
+ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.010
 
 # This is the fastest search retry interval the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.033
+ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.016
 
 # This is the slowest search retry interval the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.066
+ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.033
 
 
 # =========================
@@ -750,22 +756,22 @@ AI_LEARNING_MIN_IMPROVEMENT_RATIO = 0.025
 AI_LEARNING_APPLY_COOLDOWN = 0.9
 
 # This is the fastest click delay the learner is allowed to save or apply.
-AI_LEARNING_MIN_CLICK_DELAY = 0.016
+AI_LEARNING_MIN_CLICK_DELAY = 0.005
 
 # This is the slowest click delay the learner is allowed to save or apply.
-AI_LEARNING_MAX_CLICK_DELAY = 0.040
+AI_LEARNING_MAX_CLICK_DELAY = 0.020
 
 # This is the fastest move delay the learner is allowed to save or apply.
-AI_LEARNING_MIN_MOVE_DELAY = 0.010
+AI_LEARNING_MIN_MOVE_DELAY = 0.001
 
 # This is the slowest move delay the learner is allowed to save or apply.
-AI_LEARNING_MAX_MOVE_DELAY = 0.020
+AI_LEARNING_MAX_MOVE_DELAY = 0.010
 
 # This is the fastest search retry interval the learner is allowed to save or apply.
-AI_LEARNING_MIN_SEARCH_INTERVAL = 0.033
+AI_LEARNING_MIN_SEARCH_INTERVAL = 0.016
 
 # This is the slowest search retry interval the learner is allowed to save or apply.
-AI_LEARNING_MAX_SEARCH_INTERVAL = 0.066
+AI_LEARNING_MAX_SEARCH_INTERVAL = 0.033
 
 
 # =========================
@@ -773,34 +779,34 @@ AI_LEARNING_MAX_SEARCH_INTERVAL = 0.066
 # =========================
 
 # This is how often the forbidden-zone overlay refreshes its position on screen.
-OVERLAY_UPDATE_INTERVAL = 0.033
+OVERLAY_UPDATE_INTERVAL = 0.016
 
 # This is the hard minimum sleep for the learner loop so it never spins too aggressively.
-LEARNING_LOOP_MIN_SLEEP = 0.016
+LEARNING_LOOP_MIN_SLEEP = 0.005
 
 # This is the slower backoff the monitor uses after errors or busy states.
-MONITOR_YIELD_BACKOFF = 0.050
+MONITOR_YIELD_BACKOFF = 0.016
 
 # This is the floor under monitor sleeps so polling never becomes too tight.
-MONITOR_POLL_MIN_SLEEP = 0.016
+MONITOR_POLL_MIN_SLEEP = 0.005
 
 # This is the short pause between the two backup clicks in the travel-confirmation sequence.
-BACKUP_CLICK_GAP = 0.050
+BACKUP_CLICK_GAP = 0.016
 
 # This is how long the bot waits after clicking unlock before checking whether it disappeared.
-UNLOCK_REGISTER_WAIT = 0.050
+UNLOCK_REGISTER_WAIT = 0.016
 
 # This is how long the verification drag lasts during the two-step new-level check.
 VERIFICATION_SCROLL_DURATION = 0.280
 
 # This is the maximum time the unlock hot loop will poll after a transition.
-UNLOCK_HOT_LOOP_TIMEOUT = 3.0
+UNLOCK_HOT_LOOP_TIMEOUT = 1.5
 
 # This is the gap between unlock-button polls inside that hot loop.
-UNLOCK_POLL_INTERVAL = 0.016
+UNLOCK_POLL_INTERVAL = 0.002
 
 # This is how long background thread joins are allowed to block during shutdown.
-THREAD_JOIN_TIMEOUT = 0.5
+THREAD_JOIN_TIMEOUT = 0.25
 
 # This is the shortest drag duration the scroll helper is allowed to use.
 DRAG_MIN_DURATION = 0.050
@@ -812,7 +818,7 @@ DEFAULT_DRAG_DURATION = 0.250
 WINDOW_CAPTURE_RETRIES = 3
 
 # This is the pause between screenshot capture retries.
-WINDOW_CAPTURE_RETRY_DELAY = 0.016
+WINDOW_CAPTURE_RETRY_DELAY = 0.005
 
 
 # =========================

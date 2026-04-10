@@ -1,5 +1,6 @@
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 import time
@@ -109,7 +110,12 @@ def setup_logging():
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    file_handler = logging.FileHandler(logs_dir / "bot.log", encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        logs_dir / "bot.log",
+        maxBytes=max(1, int(config.LOG_FILE_MAX_BYTES)),
+        backupCount=max(1, int(config.LOG_FILE_BACKUP_COUNT)),
+        encoding="utf-8",
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(log_format))
 
@@ -138,6 +144,7 @@ def run_self_tests():
     import threading
     import types
     import unittest
+    from unittest import mock
 
     import cv2
     import numpy as np
@@ -145,6 +152,7 @@ def run_self_tests():
     from bot import EatventureBot, HistoricalLearner, State, VisionOptimizer, VisionPersistence
     from image_matcher import ImageMatcher
     from mouse_controller import MouseController
+    from window_capture import WindowCapture
 
     test_temp_root = Path(config.LOGS_DIR)
 
@@ -357,6 +365,28 @@ def run_self_tests():
             self.assertNotIn("move_delay", applied[0][0][0])
 
     class BotRegressionTests(unittest.TestCase):
+        def test_step_rebinds_mouse_handle_after_window_refresh(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            rebinds = []
+            bot.window_capture = types.SimpleNamespace(
+                hwnd=202,
+                ensure_window_ready=lambda resize_on_refresh=False: True,
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                set_window_handle=lambda hwnd: rebinds.append(hwnd),
+            )
+            bot.overlay = None
+            bot._sync_window_bindings = EatventureBot._sync_window_bindings.__get__(bot, EatventureBot)
+            bot._clear_capture_cache = lambda: None
+            bot._apply_tuning = lambda: None
+            bot._enforce_state_min_interval = lambda: None
+            bot.state_machine = types.SimpleNamespace(update=lambda: None)
+            bot.running = True
+
+            EatventureBot.step(bot)
+
+            self.assertEqual(rebinds, [202])
+
         def test_new_level_red_icon_recaptures_when_frame_is_too_short(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot._last_new_level_fail_time = 0.0
@@ -934,6 +964,29 @@ def run_self_tests():
             self.assertFalse(bot._new_level_event.is_set())
             self.assertIsNone(bot._new_level_interrupt)
 
+    class WindowRecoveryTests(unittest.TestCase):
+        def test_is_window_active_recovers_rebound_handle(self):
+            capture = WindowCapture.__new__(WindowCapture)
+            capture.window_title = "EatventureAuto"
+            capture.hwnd = 101
+            capture.target_width = 360
+            capture.target_height = 780
+            capture._capture_lock = threading.Lock()
+
+            with mock.patch("window_capture.win32gui.IsWindow", side_effect=[False, True]):
+                with mock.patch.object(
+                    WindowCapture,
+                    "find_window",
+                    side_effect=lambda: setattr(capture, "hwnd", 202),
+                ):
+                    self.assertTrue(WindowCapture.is_window_active(capture))
+
+            self.assertEqual(capture.hwnd, 202)
+
+        def test_print_window_failure_is_rejected(self):
+            with self.assertRaises(RuntimeError):
+                WindowCapture._ensure_print_window_succeeded(0, "EatventureAuto", 123)
+
     class RedIconGateTests(unittest.TestCase):
         @staticmethod
         def _make_red_icon_bot():
@@ -1061,6 +1114,7 @@ def run_self_tests():
         BotRegressionTests,
         NewLevelCacheTests,
         InterruptStateTests,
+        WindowRecoveryTests,
         RedIconGateTests,
     ):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))

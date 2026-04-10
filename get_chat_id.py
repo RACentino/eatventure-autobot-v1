@@ -85,8 +85,8 @@ def main() -> int:
         print("-" * 40)
 
     example_chat_id = next(iter(chats))
-    print("\n✅ Copy one of the Chat IDs above")
-    print("✅ Paste it into config.py as TELEGRAM_CHAT_ID")
+    print("\nCopy one of the Chat IDs above.")
+    print("Paste it into config.py as TELEGRAM_CHAT_ID.")
     print('\nExample:\nTELEGRAM_CHAT_ID = "{}"'.format(example_chat_id))
     return 0
 

@@ -1248,7 +1248,8 @@ class EatventureBot:
         self.mouse_controller = MouseController(
             self.window_capture.hwnd,
             config.CLICK_DELAY,
-            config.MOUSE_MOVE_DELAY
+            config.MOUSE_MOVE_DELAY,
+            hwnd_provider=lambda: self.window_capture.hwnd,
         )
         self.mouse_controller.interrupt_callback = self.check_critical_interrupts
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
@@ -1342,6 +1343,18 @@ class EatventureBot:
         self.overlay = None
         
         logger.info("Bot initialized successfully")
+
+    def _sync_window_bindings(self, resize_on_refresh=False):
+        if not hasattr(self, "window_capture") or self.window_capture is None:
+            return False
+
+        refreshed = self.window_capture.ensure_window_ready(resize_on_refresh=resize_on_refresh)
+        active_hwnd = self.window_capture.hwnd
+        if hasattr(self, "mouse_controller") and self.mouse_controller is not None:
+            self.mouse_controller.set_window_handle(active_hwnd)
+        if getattr(self, "overlay", None) is not None:
+            self.overlay.update_target_hwnd(active_hwnd)
+        return refreshed
 
     def _record_new_level_interrupt(self, source, confidence, x, y):
         if self._should_ignore_new_level_signal(source=source):
@@ -1785,6 +1798,7 @@ class EatventureBot:
             self.completion_detected_by = None
 
     def _capture(self, max_y=None, force=False):
+        self._sync_window_bindings(resize_on_refresh=True)
         cache_key = max_y if max_y is not None else "full"
         now = time.monotonic()
         with self._capture_lock:
@@ -4046,6 +4060,7 @@ class EatventureBot:
         if self.running:
             return
 
+        self._sync_window_bindings(resize_on_refresh=True)
         self._timer_resolution.enable()
         self._reset_runtime_interrupt_state(reset_completion=True)
         self.running = True
@@ -4091,6 +4106,7 @@ class EatventureBot:
         logger.info("Bot stopped")
 
     def step(self):
+        self._sync_window_bindings()
         self._clear_capture_cache()
         self._apply_tuning()
         self._enforce_state_min_interval()
