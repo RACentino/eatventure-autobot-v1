@@ -512,6 +512,7 @@ class HistoricalLearner:
             float(config.AI_LEARNING_MIN_IMPROVEMENT_RATIO),
         )
         self.apply_cooldown = max(0.0, float(config.AI_LEARNING_APPLY_COOLDOWN))
+        self.min_completion_time = max(0.0, float(getattr(config, "AI_LEARNING_MIN_COMPLETION_TIME", 0.0)))
         self._last_apply_time = 0.0
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -605,7 +606,7 @@ class HistoricalLearner:
                 time_spent = float(record.get("time_spent", 0.0))
             except (TypeError, ValueError):
                 continue
-            if time_spent <= 0:
+            if time_spent <= 0 or time_spent < self.min_completion_time:
                 continue
 
             try:
@@ -641,6 +642,13 @@ class HistoricalLearner:
 
     def record_completion(self, time_spent, source):
         if not self.enabled or time_spent <= 0:
+            return
+        if time_spent < self.min_completion_time:
+            logger.debug(
+                "Historical learner: ignoring completion time %.3fs below minimum %.3fs",
+                time_spent,
+                self.min_completion_time,
+            )
             return
         snapshot = self._sanitize_behavior_profile(self.bot.get_runtime_behavior_snapshot())
         if not snapshot:
@@ -1264,6 +1272,14 @@ class EatventureBot:
         ]
         self.templates = self.load_templates()
         self.available_red_icon_templates = self._build_available_red_icon_templates()
+        self._max_red_template_height = max(
+            (int(template.shape[0]) for _, template, _ in self.available_red_icon_templates),
+            default=0,
+        )
+        self._max_red_template_width = max(
+            (int(template.shape[1]) for _, template, _ in self.available_red_icon_templates),
+            default=0,
+        )
         self._red_template_signatures = self._build_red_template_signatures()
         self._red_template_hit_counts = {}
         self._red_template_priority = []
@@ -1451,12 +1467,53 @@ class EatventureBot:
                 
         return False
 
+    def _resolve_guard_state(self, state=None):
+        if state is not None:
+            return state
+        machine = getattr(self, "state_machine", None)
+        if machine is None:
+            return None
+        return machine.get_state()
+
+    def _foreground_priority_polling_active(self, state=None):
+        active_state = self._resolve_guard_state(state=state)
+        return active_state in (
+            State.CHECK_NEW_LEVEL,
+            State.WAIT_FOR_UNLOCK,
+        )
+
+    def _background_monitor_scan_paused(self, state=None):
+        active_state = self._resolve_guard_state(state=state)
+        if self.completion_detected_time is not None:
+            return True
+        return active_state in (
+            State.CLICK_RED_ICON,
+            State.HOLD_UPGRADE_STATION,
+            State.TRANSITION_LEVEL,
+            State.CHECK_NEW_LEVEL,
+            State.WAIT_FOR_UNLOCK,
+        )
+
+    def _background_monitor_has_coverage(self, state=None):
+        monitor_thread = getattr(self, "_new_level_monitor_thread", None)
+        if monitor_thread is None or not monitor_thread.is_alive():
+            return False
+        return not self._background_monitor_scan_paused(state=state)
+
+    def _should_active_probe_during_sleep(self, state=None):
+        active_state = self._resolve_guard_state(state=state)
+        if self.completion_detected_time is not None:
+            return False
+        if self._foreground_priority_polling_active(state=active_state):
+            return False
+        return not self._background_monitor_has_coverage(state=active_state)
+
     def _monitor_new_level(self):
         interval = config.NEW_LEVEL_MONITOR_INTERVAL
         while not self._new_level_monitor_stop.is_set():
             try:
                 active_state = self.state_machine.get_state()
-                if active_state in (State.CLICK_RED_ICON, State.HOLD_UPGRADE_STATION, State.TRANSITION_LEVEL):
+                if self._background_monitor_scan_paused(state=active_state):
                     time.sleep(max(interval, config.MONITOR_YIELD_BACKOFF))
                     continue
 
@@ -1515,6 +1572,7 @@ class EatventureBot:
             config.IDLE_CLICK_POS[1],
             relative=True,
             wait_after=wait_after,
+            prevalidated=True,
         )
         if clicked:
             self._last_idle_click_time = time.monotonic()
@@ -1588,6 +1646,15 @@ class EatventureBot:
         completed = bool(getattr(self, "_asset_action_completed", False))
         self._asset_action_completed = False
         return completed
+
+    def _advance_after_primary_cycle(self):
+        should_restart_primary = self._consume_asset_action_completed()
+        self.upgrade_found_in_cycle = False
+        if should_restart_primary:
+            logger.info("Primary cycle action completed; restarting strict main-loop sequence from FIND_RED_ICONS")
+            return State.FIND_RED_ICONS
+        logger.info("Primary targets exhausted; entering fallback sequence: OPEN_BOXES -> SCROLL")
+        return State.OPEN_BOXES
 
     def _recover_from_step_exception(self):
         current_state = self.state_machine.get_state()
@@ -1799,23 +1866,16 @@ class EatventureBot:
             self.completion_detected_by = None
 
     def _capture(self, max_y=None, force=False):
-        self._sync_window_bindings(resize_on_refresh=True)
         cache_key = max_y if max_y is not None else "full"
         now = time.monotonic()
         with self._capture_lock:
+            self._sync_window_bindings(resize_on_refresh=True)
             cached = self._capture_cache.get(cache_key)
             if not force and cached and now - cached[0] <= self._capture_cache_ttl:
                 return cached[1]
-
-        frame = self.window_capture.capture(max_y=max_y)
-
-        with self._capture_lock:
-            if not force:
-                cached = self._capture_cache.get(cache_key)
-                if cached and time.monotonic() - cached[0] <= self._capture_cache_ttl:
-                    return cached[1]
+            frame = self.window_capture.capture(max_y=max_y)
             self._capture_cache[cache_key] = (time.monotonic(), frame)
-        return frame
+            return frame
 
     def _clear_capture_cache(self):
         with self._capture_lock:
@@ -1838,7 +1898,9 @@ class EatventureBot:
             self.check_critical_interrupts()
             
             remaining = max(0, target_time - now)
-            time.sleep(min(interval, remaining))
+            wait_timeout = min(interval, remaining)
+            if wait_timeout > 0:
+                self._new_level_event.wait(timeout=wait_timeout)
             interrupt = None
             with self._interrupt_lock:
                 if self._new_level_event.is_set():
@@ -1856,20 +1918,14 @@ class EatventureBot:
                     continue
                 return True
             now = time.monotonic()
-            monitor_thread = getattr(self, "_new_level_monitor_thread", None)
-            monitor_active = bool(monitor_thread is not None and monitor_thread.is_alive())
-            probe_interval = (
-                max(config.NEW_LEVEL_MONITOR_INTERVAL, config.MONITOR_POLL_MIN_SLEEP)
-                if monitor_active
-                else 0.0
-            )
+            active_state = self._resolve_guard_state()
+            probe_interval = max(config.NEW_LEVEL_MONITOR_INTERVAL, config.MONITOR_POLL_MIN_SLEEP)
             last_probe = float(getattr(self, "_last_sleep_priority_probe_at", 0.0))
-            should_probe = (not monitor_active) or ((now - last_probe) >= probe_interval)
-            if should_probe:
+            if self._should_active_probe_during_sleep(state=active_state) and (now - last_probe) >= probe_interval:
                 self._last_sleep_priority_probe_at = now
                 if self._should_interrupt_for_new_level(
                     max_y=config.MAX_SEARCH_Y,
-                    force=not monitor_active,
+                    force=True,
                 ):
                     return True
         return False
@@ -1974,11 +2030,8 @@ class EatventureBot:
         if use_cache and cached["max_y"] == target_max_y and now - cached["timestamp"] <= cache_ttl:
             return cached["result"]
 
-        max_template_width = 0
-        max_template_height = 0
-        for _, template, _ in self._iter_red_icon_templates():
-            max_template_height = max(max_template_height, int(template.shape[0]))
-            max_template_width = max(max_template_width, int(template.shape[1]))
+        max_template_width = int(getattr(self, "_max_red_template_width", 0))
+        max_template_height = int(getattr(self, "_max_red_template_height", 0))
 
         roi_pad_x = max(2, max_template_width // 2)
         roi_pad_y = max(2, max_template_height // 2)
@@ -2139,12 +2192,13 @@ class EatventureBot:
         self.completion_detected_by = None
         return State.FIND_RED_ICONS
 
-    def _click_transition_target(self, x, y, label, wait_after=True):
+    def _click_transition_target(self, x, y, label, wait_after=True, prevalidated=False):
         success = self.mouse_controller.click(
             x,
             y,
             relative=True,
             wait_after=wait_after,
+            prevalidated=prevalidated,
         )
         if not success:
             logger.warning("%s click failed at (%s, %s)", label, x, y)
@@ -2171,6 +2225,7 @@ class EatventureBot:
             config.NEW_LEVEL_POS[0],
             config.NEW_LEVEL_POS[1],
             "Configured travel button",
+            prevalidated=True,
         ):
             return False
         if self._sleep_with_interrupt(config.BACKUP_CLICK_GAP):
@@ -2179,6 +2234,7 @@ class EatventureBot:
             config.LEVEL_TRANSITION_POS[0],
             config.LEVEL_TRANSITION_POS[1],
             "Configured level transition button",
+            prevalidated=True,
         )
 
     def _find_new_level(self, screenshot, threshold=None):
@@ -3665,7 +3721,7 @@ class EatventureBot:
         if not has_stats_icon:
             logger.info("✗ No stats icon, skipping")
             self.vision_optimizer.update_stats_upgrade_miss()
-            return State.OPEN_BOXES
+            return self._advance_after_primary_cycle()
 
         self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
         
@@ -3674,12 +3730,13 @@ class EatventureBot:
             config.STATS_UPGRADE_BUTTON_POS[0],
             config.STATS_UPGRADE_BUTTON_POS[1],
             relative=True,
+            prevalidated=True,
         )
         if not opened_menu:
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return State.CHECK_NEW_LEVEL
             logger.warning("Stats upgrade menu click failed; continuing without stat spam")
-            return State.OPEN_BOXES
+            return self._advance_after_primary_cycle()
 
         self.sleep(config.STATE_DELAY)
 
@@ -3697,12 +3754,12 @@ class EatventureBot:
             if self._should_interrupt_for_new_level(max_y=config.MAX_SEARCH_Y, force=True):
                 return State.CHECK_NEW_LEVEL
             logger.warning("Stats upgrade click burst aborted; continuing to box handling")
-            return State.OPEN_BOXES
+            return self._advance_after_primary_cycle()
 
         self._click_idle()
         self._mark_asset_action_completed()
         logger.info("========== STAT UPGRADE COMPLETED ==========")
-        return State.OPEN_BOXES
+        return self._advance_after_primary_cycle()
     
     def handle_open_boxes(self, current_state):
         self.check_critical_interrupts()
@@ -3761,21 +3818,13 @@ class EatventureBot:
         if boxes_found > 0:
             logger.info(f"🎁 Opened {boxes_found} boxes")
             self.work_done = True
-            self._mark_asset_action_completed()
 
-        if self.upgrade_found_in_cycle:
-            logger.info("✓ Upgrade found → continuing strict main-loop stage order")
-            self.upgrade_found_in_cycle = False
-
-        should_recheck_assets = self._consume_asset_action_completed()
+        self.upgrade_found_in_cycle = False
+        self._consume_asset_action_completed()
         self.cycle_counter = 0
         if self.consecutive_failed_cycles >= 3:
             logger.info(f"⚠ {self.consecutive_failed_cycles} failed → continuing scroll sequence")
             self.consecutive_failed_cycles = 0
-
-        if should_recheck_assets:
-            logger.info("Asset actions completed during stages 1-7; restarting asset scan before scroll")
-            return State.FIND_RED_ICONS
 
         return State.SCROLL
     
@@ -3845,6 +3894,7 @@ class EatventureBot:
                 config.NEW_LEVEL_BUTTON_POS[0],
                 config.NEW_LEVEL_BUTTON_POS[1],
                 "New level acknowledgment",
+                prevalidated=True,
             ):
                 return self._abort_transition("acknowledgment click failed")
             if self._sleep_with_interrupt(config.NEW_LEVEL_BUTTON_DELAY):
@@ -3902,6 +3952,7 @@ class EatventureBot:
                     config.NEW_LEVEL_BUTTON_POS[0],
                     config.NEW_LEVEL_BUTTON_POS[1],
                     "New level acknowledgment",
+                    prevalidated=True,
                 ):
                     return self._abort_transition("acknowledgment click failed")
 

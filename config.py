@@ -376,16 +376,16 @@ NEW_LEVEL_BUTTON_POS = (30, 692)
 # =========================
 
 # This is how long the bot rapid-clicks an upgrade station before moving on.
-SPAM_CLICK_DURATION = 4
+SPAM_CLICK_DURATION = 5.0
 
 # This is the gap between those rapid upgrade clicks.
-SPAM_CLICK_DELAY = 0.016
+SPAM_CLICK_DELAY = 0.014
 
 # This is the random wiggle range added to rapid clicks; zero keeps every click perfectly still.
 SPAM_CLICK_JITTER = 0
 
 # This is how long each rapid click keeps the mouse button held down.
-RAPID_CLICK_DOWN_UP_DELAY = 0.010
+RAPID_CLICK_DOWN_UP_DELAY = 0.014
 
 # This is the cutoff where the rapid-click scheduler stops sleeping and spins for precision instead.
 RAPID_CLICK_SPIN_THRESHOLD = 0.005
@@ -397,7 +397,7 @@ UPGRADE_SEARCH_INTERVAL = 0.016
 STATS_UPGRADE_CLICK_DURATION = 3.0
 
 # This is the gap between those stat-upgrade clicks.
-STATS_UPGRADE_CLICK_DELAY = 0.016
+STATS_UPGRADE_CLICK_DELAY = 0.014
 
 # This is the extra padding around the stat-icon search box so the bot does not crop it too tightly.
 STATS_ICON_PADDING = 20
@@ -432,10 +432,10 @@ UPGRADE_STATION_RELAXED_THRESHOLD_DROP = 0.028
 UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER = 1
 
 # This is how long a captured screenshot stays valid in the short-term cache.
-CAPTURE_CACHE_TTL = 0.008
+CAPTURE_CACHE_TTL = 0.0
 
 # This is how long the special new-level red-icon result stays cached.
-NEW_LEVEL_RED_ICON_CACHE_TTL = 0.008
+NEW_LEVEL_RED_ICON_CACHE_TTL = 0.0
 
 # This is how long red-icon history is kept for stability checks and template priority decay.
 RED_ICON_STABILITY_CACHE_TTL = 0.15
@@ -754,6 +754,7 @@ AI_LEARNING_MIN_IMPROVEMENT_RATIO = 0.025
 
 # This is the cooldown between one learned-profile application and the next.
 AI_LEARNING_APPLY_COOLDOWN = 0.9
+AI_LEARNING_MIN_COMPLETION_TIME = 2.0
 
 # This is the fastest click delay the learner is allowed to save or apply.
 AI_LEARNING_MIN_CLICK_DELAY = 0.005

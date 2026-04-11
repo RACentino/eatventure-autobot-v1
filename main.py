@@ -400,6 +400,67 @@ def run_self_tests():
             self.assertAlmostEqual(applied[0][0][0]["click_delay"], config.AI_LEARNING_MAX_CLICK_DELAY)
             self.assertNotIn("move_delay", applied[0][0][0])
 
+        def test_short_completion_records_are_discarded(self):
+            temp_dir = make_test_dir("test-learning-short-records")
+            state_path = temp_dir / "learning_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "behavior": {
+                                    "click_delay": 0.005,
+                                    "move_delay": 0.001,
+                                    "search_interval": 0.02,
+                                },
+                                "source": "too-short",
+                                "time_spent": 0.5,
+                                "timestamp": 1.0,
+                            },
+                            {
+                                "behavior": {
+                                    "click_delay": 0.005,
+                                    "move_delay": 0.001,
+                                    "search_interval": 0.02,
+                                },
+                                "source": "valid",
+                                "time_spent": 6.0,
+                                "timestamp": 2.0,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: None,
+                get_runtime_behavior_snapshot=lambda: {
+                    "click_delay": 0.005,
+                    "move_delay": 0.001,
+                    "search_interval": 0.02,
+                },
+            )
+            learner = HistoricalLearner(bot, VisionPersistence(str(state_path), save_interval=0.0))
+
+            self.assertEqual(len(learner._records), 1)
+            self.assertEqual(learner._records[0]["source"], "valid")
+
+        def test_record_completion_ignores_implausibly_short_runs(self):
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: None,
+                get_runtime_behavior_snapshot=lambda: {
+                    "click_delay": 0.005,
+                    "move_delay": 0.001,
+                    "search_interval": 0.02,
+                },
+            )
+            learner = HistoricalLearner(bot, persistence=None)
+
+            learner.record_completion(0.5, "too-short")
+
+            self.assertEqual(learner._records, [])
+
     class BotRegressionTests(unittest.TestCase):
         def test_step_rebinds_mouse_handle_after_window_refresh(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -588,20 +649,74 @@ def run_self_tests():
             self.assertEqual(state, State.CHECK_UNLOCK)
             self.assertEqual(bot.current_red_icon_index, 1)
 
-        def test_upgrade_stats_without_icon_continues_to_open_boxes(self):
+        def test_upgrade_stats_without_primary_actions_enters_fallback_boxes(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.check_critical_interrupts = lambda *args, **kwargs: False
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
             bot.vision_optimizer = types.SimpleNamespace(
                 enabled=False,
                 update_stats_upgrade_miss=lambda *args, **kwargs: None,
             )
+            bot._asset_action_completed = False
 
             state = EatventureBot.handle_upgrade_stats(bot, None)
 
             self.assertEqual(state, State.OPEN_BOXES)
+
+        def test_upgrade_stats_restarts_primary_loop_when_primary_action_completed(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_stats_upgrade_miss=lambda *args, **kwargs: None,
+            )
+            bot._asset_action_completed = True
+
+            state = EatventureBot.handle_upgrade_stats(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
+
+        def test_upgrade_stats_success_restarts_primary_loop_before_fallback(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (True, 0.99)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._mark_asset_action_completed = (
+                EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                click=lambda *args, **kwargs: True,
+                spam_click_at=lambda *args, **kwargs: True,
+            )
+            bot.sleep = lambda *args, **kwargs: None
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_stats_upgrade_confidence=lambda *args, **kwargs: None,
+                update_stats_upgrade_miss=lambda *args, **kwargs: None,
+            )
+            bot._asset_action_completed = False
+
+            state = EatventureBot.handle_upgrade_stats(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
 
         def test_find_red_icons_forbidden_only_continues_asset_cycle_before_scroll(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -792,6 +907,7 @@ def run_self_tests():
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
             bot.templates = {
                 f"box{i}": (np.zeros((1, 1, 3), dtype=np.uint8), None)
                 for i in range(1, 6)
@@ -818,13 +934,12 @@ def run_self_tests():
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.SCROLL)
 
-        def test_open_boxes_loops_back_after_opening_box(self):
+        def test_open_boxes_scrolls_after_opening_visible_boxes(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.check_critical_interrupts = lambda *args, **kwargs: False
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
-            bot._mark_asset_action_completed = EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
             bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
             bot.templates = {
                 "box1": (np.zeros((1, 1, 3), dtype=np.uint8), None)
@@ -849,16 +964,15 @@ def run_self_tests():
 
             state = EatventureBot.handle_open_boxes(bot, None)
 
-            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertEqual(state, State.SCROLL)
             self.assertFalse(bot._asset_action_completed)
 
-        def test_open_boxes_loops_back_after_earlier_asset_action(self):
+        def test_open_boxes_does_not_reenter_primary_loop_from_stale_asset_flag(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.check_critical_interrupts = lambda *args, **kwargs: False
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
-            bot._mark_asset_action_completed = EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
             bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
             bot.templates = {
                 f"box{i}": (np.zeros((1, 1, 3), dtype=np.uint8), None)
@@ -884,7 +998,7 @@ def run_self_tests():
             state = EatventureBot.handle_open_boxes(bot, None)
 
             self.assertEqual(miss_counter["count"], 1)
-            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertEqual(state, State.SCROLL)
             self.assertFalse(bot._asset_action_completed)
 
         def test_check_new_level_aborts_when_acknowledgement_click_fails(self):
@@ -999,6 +1113,36 @@ def run_self_tests():
             self.assertEqual(result, {"source": "test"})
             self.assertFalse(bot._new_level_event.is_set())
             self.assertIsNone(bot._new_level_interrupt)
+
+        def test_background_monitor_scan_pauses_in_foreground_priority_states(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.completion_detected_time = None
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.CHECK_NEW_LEVEL)
+
+            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
+
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.WAIT_FOR_UNLOCK)
+            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
+
+        def test_sleep_probe_defers_to_live_background_monitor_coverage(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.completion_detected_time = None
+            bot._new_level_monitor_thread = types.SimpleNamespace(is_alive=lambda: True)
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.FIND_RED_ICONS)
+            bot._background_monitor_scan_paused = (
+                EatventureBot._background_monitor_scan_paused.__get__(bot, EatventureBot)
+            )
+            bot._background_monitor_has_coverage = (
+                EatventureBot._background_monitor_has_coverage.__get__(bot, EatventureBot)
+            )
+            bot._foreground_priority_polling_active = (
+                EatventureBot._foreground_priority_polling_active.__get__(bot, EatventureBot)
+            )
+
+            self.assertFalse(EatventureBot._should_active_probe_during_sleep(bot))
+
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.HOLD_UPGRADE_STATION)
+            self.assertTrue(EatventureBot._should_active_probe_during_sleep(bot))
 
     class WindowRecoveryTests(unittest.TestCase):
         def test_is_window_active_recovers_rebound_handle(self):
