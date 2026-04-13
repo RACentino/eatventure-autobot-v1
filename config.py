@@ -263,7 +263,7 @@ MOUSE_PRE_CLICK_STABILIZE_DISTANCE_FACTOR = 0.00002
 SCROLL_START_POS = (170, 380)
 
 # This is the base scroll distance, in pixels, for one search drag.
-SCROLL_PIXEL_STEP = 90
+SCROLL_PIXEL_STEP = 125
 
 # This is the multiplier applied to the base scroll distance.
 SCROLL_DISTANCE_RATIO = 1
@@ -272,7 +272,7 @@ SCROLL_DISTANCE_RATIO = 1
 SCROLL_VERIFICATION_DISTANCE = 300
 
 # This is the highest search-cycle number the oscillating scroll pattern will reach before wrapping.
-MAX_SCROLL_CYCLES = 9
+MAX_SCROLL_CYCLES = 7
 
 # This is how many extra drag steps each wider oscillation cycle adds.
 SCROLL_INCREMENT_STEP = 1
@@ -287,7 +287,7 @@ POST_SCROLL_SETTLE = 0.350
 CYCLE_PAUSE_DURATION = 0.150
 
 # This is the drag duration for a normal search scroll.
-SCROLL_DURATION = 0.150
+SCROLL_DURATION = 0.1 50
 
 # This is how many cursor waypoints the bot uses while dragging a scroll gesture.
 SCROLL_STEP_COUNT = 16
