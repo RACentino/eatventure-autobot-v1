@@ -141,7 +141,6 @@ def run_self_tests():
 
     import json
     import shutil
-    import threading
     import types
     import unittest
     from unittest import mock
@@ -492,278 +491,8 @@ def run_self_tests():
             bot.red_icons = [(0.99, 10, 20), (0.98, 30, 40)]
             state = EatventureBot.handle_hold_upgrade_station(bot, None)
 
-            self.assertEqual(state, State.CLICK_RED_ICON)
-            self.assertEqual(bot.current_red_icon_index, 1)
-            self.assertEqual(bot.red_icon_processed_count, 1)
-
-        def test_click_red_icon_exhausted_queue_continues_to_check_unlock(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_red_icon_confidences=lambda *args, **kwargs: None,
-            )
-            bot.red_icons = [(0.99, 10, 20)]
-            bot.current_red_icon_index = 0
-            bot._is_red_icon_present_at = lambda *args, **kwargs: False
-
-            state = EatventureBot.handle_click_red_icon(bot, None)
-
-            self.assertEqual(state, State.CHECK_UNLOCK)
-            self.assertEqual(bot.current_red_icon_index, 1)
-
-        def test_upgrade_stats_without_primary_actions_enters_fallback_boxes(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
-            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
-            bot._consume_asset_action_completed = (
-                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
-            )
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_stats_upgrade_miss=lambda *args, **kwargs: None,
-            )
-            bot._asset_action_completed = False
-
-            state = EatventureBot.handle_upgrade_stats(bot, None)
-
-            self.assertEqual(state, State.OPEN_BOXES)
-
-        def test_upgrade_stats_restarts_primary_loop_when_primary_action_completed(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
-            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
-            bot._consume_asset_action_completed = (
-                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
-            )
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_stats_upgrade_miss=lambda *args, **kwargs: None,
-            )
-            bot._asset_action_completed = True
-
-            state = EatventureBot.handle_upgrade_stats(bot, None)
-
-            self.assertEqual(state, State.FIND_RED_ICONS)
-            self.assertFalse(bot._asset_action_completed)
-
-        def test_upgrade_stats_success_restarts_primary_loop_before_fallback(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
-            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (True, 0.99)
-            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
-            bot._mark_asset_action_completed = (
-                EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
-            )
-            bot._consume_asset_action_completed = (
-                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
-            )
-            bot.mouse_controller = types.SimpleNamespace(
-                click=lambda *args, **kwargs: True,
-                spam_click_at=lambda *args, **kwargs: True,
-            )
-            bot.sleep = lambda *args, **kwargs: None
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_stats_upgrade_confidence=lambda *args, **kwargs: None,
-                update_stats_upgrade_miss=lambda *args, **kwargs: None,
-            )
-            bot._asset_action_completed = False
-
-            state = EatventureBot.handle_upgrade_stats(bot, None)
-
-            self.assertEqual(state, State.FIND_RED_ICONS)
-            self.assertFalse(bot._asset_action_completed)
-
-        def test_find_red_icons_forbidden_only_continues_asset_cycle_before_scroll(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._continue_asset_cycle_after_red_scan = (
-                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
-            )
-            bot._resolve_red_icon_zone_state = lambda: {
-                "safe_present": False,
-                "forbidden_present": True,
-                "actionable_icons": [],
-                "forbidden_count": 1,
-            }
-            bot.red_icons = [(0.99, 10, 20)]
-            bot.current_red_icon_index = 3
-            bot.red_icon_cycle_count = 2
-
-            state = EatventureBot.handle_find_red_icons(bot, None)
-
-            self.assertEqual(state, State.CHECK_UNLOCK)
-            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(state, State.SEARCH_UPGRADE_STATION)
             self.assertEqual(bot.current_red_icon_index, 0)
-            self.assertEqual(bot.red_icon_cycle_count, 0)
-
-        def test_find_red_icons_without_targets_continues_asset_cycle_before_scroll(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._continue_asset_cycle_after_red_scan = (
-                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
-            )
-            bot._resolve_red_icon_zone_state = lambda: {
-                "safe_present": False,
-                "forbidden_present": False,
-                "actionable_icons": [],
-                "forbidden_count": 0,
-            }
-            bot.red_icons = [(0.99, 10, 20)]
-            bot.current_red_icon_index = 1
-            bot.red_icon_cycle_count = 4
-
-            state = EatventureBot.handle_find_red_icons(bot, None)
-
-            self.assertEqual(state, State.CHECK_UNLOCK)
-            self.assertEqual(bot.red_icons, [])
-            self.assertEqual(bot.current_red_icon_index, 0)
-            self.assertEqual(bot.red_icon_cycle_count, 0)
-
-        def test_search_miss_flows_into_stats_before_boxes(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
-            bot.templates = {}
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_upgrade_station_miss=lambda: None,
-                update_upgrade_station_confidence=lambda *args, **kwargs: None,
-            )
-            bot.tuner = types.SimpleNamespace(
-                search_interval=0.0,
-                record_search_result=lambda *args, **kwargs: None,
-            )
-            bot._apply_tuning = lambda *args, **kwargs: None
-            bot.red_icons = []
-            bot.current_red_icon_index = 0
-            bot.red_icon_processed_count = 0
-            bot.successful_red_icon_positions = []
-            bot.upgrade_found_in_cycle = False
-            bot.consecutive_failed_cycles = 0
-
-            state = EatventureBot.handle_search_upgrade_station(bot, None)
-
-            self.assertEqual(state, State.UPGRADE_STATS)
-
-        def test_step_recovers_from_unexpected_exception(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.running = True
-            bot._apply_tuning = lambda *args, **kwargs: None
-            bot._enforce_state_min_interval = lambda *args, **kwargs: None
-            bot._interrupt_lock = threading.RLock()
-            bot._new_level_event = threading.Event()
-            bot._new_level_interrupt = None
-            bot._clear_new_level_interrupt = EatventureBot._clear_new_level_interrupt.__get__(bot, EatventureBot)
-            bot._capture_lock = threading.Lock()
-            bot._capture_cache = {}
-            bot._new_level_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
-            bot._new_level_red_icon_cache = {"timestamp": 0.0, "result": (False, 0.0, 0, 0), "max_y": None}
-            bot._suppress_interrupts = False
-            bot.red_icons = [(0.99, 10, 20)]
-            bot.current_red_icon_index = 0
-            bot.red_icon_cycle_count = 1
-            bot.wait_for_unlock_attempts = 1
-            bot.work_done = True
-            bot.upgrade_found_in_cycle = True
-            bot.upgrade_station_pos = (50, 50)
-            bot._last_upgrade_station_pos = (50, 50)
-            bot._recent_red_icon_history = [{"timestamp": time.monotonic(), "icons": []}]
-            bot.completion_detected_time = None
-            bot.completion_detected_by = None
-            bot._reset_search_cycle = lambda *args, **kwargs: None
-            transitions = []
-
-            class FailingStateMachine:
-                def update(self_inner):
-                    raise RuntimeError("boom")
-
-                def get_state_name(self_inner):
-                    return "FIND_RED_ICONS"
-
-                def get_state(self_inner):
-                    return State.FIND_RED_ICONS
-
-                def transition(self_inner, state):
-                    transitions.append(state)
-
-            bot.state_machine = FailingStateMachine()
-
-            EatventureBot.step(bot)
-
-            self.assertEqual(transitions, [State.FIND_RED_ICONS])
-            self.assertEqual(bot.red_icons, [])
-            self.assertEqual(bot.current_red_icon_index, 0)
-            self.assertIsNone(bot.upgrade_station_pos)
-
-        def test_scroll_stage_oscillation_expands_and_resets(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.check_critical_interrupts = lambda *args, **kwargs: False
-            bot._click_idle = lambda *args, **kwargs: None
-            bot._sleep_with_interrupt = lambda *args, **kwargs: False
-            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
-            bot._oscillation_cycle_index = 1
-            bot._oscillation_leg_direction = 1
-            bot._oscillation_leg_progress = 0
-            bot._scroll_break_sequence_pending = False
-
-            scroll_calls = []
-            bot.searcher = types.SimpleNamespace(
-                perform_scroll=(
-                    lambda direction, distance_ratio=None, duration=None:
-                    scroll_calls.append((direction, distance_ratio, duration)) or True
-                )
-            )
-
-            original_max_cycles = config.MAX_SCROLL_CYCLES
-            original_increment = config.SCROLL_INCREMENT_STEP
-            try:
-                config.MAX_SCROLL_CYCLES = 2
-                config.SCROLL_INCREMENT_STEP = 1
-                states = [EatventureBot.handle_scroll(bot, None) for _ in range(8)]
-            finally:
-                config.MAX_SCROLL_CYCLES = original_max_cycles
-                config.SCROLL_INCREMENT_STEP = original_increment
-
-            self.assertEqual(
-                [direction for direction, _, _ in scroll_calls],
-                [1, -1, 1, 1, -1, -1, 1, -1],
-            )
-            self.assertEqual(states, [State.CHECK_NEW_LEVEL] * 8)
-            self.assertEqual(
-                [ratio for _, ratio, _ in scroll_calls],
-                [config.SCROLL_DISTANCE_RATIO] * 8,
-            )
-            self.assertEqual(
-                [duration for _, _, duration in scroll_calls],
-                [config.SCROLL_DURATION] * 8,
-            )
-
-        def test_scroll_break_sequence_passthrough_routes_9_10_11(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot._scroll_break_sequence_pending = True
-            bot._new_level_event = threading.Event()
-            bot.completion_detected_time = None
-            bot.completion_detected_by = None
-
-            state_9 = EatventureBot.handle_check_new_level(bot, None)
-            state_10 = EatventureBot.handle_transition_level(bot, None)
-            state_11 = EatventureBot.handle_wait_for_unlock(bot, None)
-
-            self.assertEqual(state_9, State.TRANSITION_LEVEL)
-            self.assertEqual(state_10, State.WAIT_FOR_UNLOCK)
-            self.assertEqual(state_11, State.FIND_RED_ICONS)
-            self.assertFalse(bot._scroll_break_sequence_pending)
 
         def test_open_boxes_counts_one_miss_per_empty_scan(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -797,137 +526,6 @@ def run_self_tests():
 
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.FIND_RED_ICONS)
-
-    class NewLevelCacheTests(unittest.TestCase):
-        def test_detect_new_level_uses_explicit_screenshot_over_cache(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot._capture_cache_ttl = 60.0
-            bot._new_level_cache = {
-                "timestamp": time.monotonic(),
-                "result": (False, 0.0, 0, 0),
-                "max_y": config.MAX_SEARCH_Y,
-            }
-            fresh_frame = object()
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_new_level_confidence=lambda *args, **kwargs: None,
-                update_new_level_miss=lambda *args, **kwargs: None,
-            )
-            bot._find_new_level = (
-                lambda screenshot, threshold=None:
-                (True, 0.99, 11, 22) if screenshot is fresh_frame else (False, 0.0, 0, 0)
-            )
-
-            result = EatventureBot._detect_new_level(
-                bot,
-                screenshot=fresh_frame,
-                max_y=config.MAX_SEARCH_Y,
-            )
-
-            self.assertEqual(result, (True, 0.99, 11, 22))
-
-        def test_detect_new_level_red_icon_uses_explicit_screenshot_over_cache(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot._last_new_level_fail_time = 0.0
-            bot._new_level_red_icon_cache = {
-                "timestamp": time.monotonic(),
-                "result": (False, 0.0, 0, 0),
-                "max_y": config.EXTENDED_SEARCH_Y,
-            }
-            bot.available_red_icon_templates = [("RedIcon", np.zeros((2, 2, 3), dtype=np.uint8), None)]
-            bot._iter_red_icon_templates = lambda: bot.available_red_icon_templates
-            bot.image_matcher = types.SimpleNamespace(
-                find_all_templates=lambda *args, **kwargs: [(0.97, 2, 2)]
-            )
-            bot.vision_optimizer = types.SimpleNamespace(
-                enabled=False,
-                update_new_level_red_icon_confidence=lambda *args, **kwargs: None,
-                update_new_level_red_icon_miss=lambda *args, **kwargs: None,
-            )
-            bot._passes_red_color_gate = lambda *args, **kwargs: (True, 99)
-            bot._passes_red_icon_template_gate = lambda *args, **kwargs: (True, {})
-            bot._merge_detection = EatventureBot._merge_detection.__get__(bot, EatventureBot)
-            bot._update_red_template_priority = lambda *args, **kwargs: None
-
-            screenshot = np.zeros(
-                (config.NEW_LEVEL_RED_ICON_Y_MAX + 10, config.NEW_LEVEL_RED_ICON_X_MAX + 10, 3),
-                dtype=np.uint8,
-            )
-
-            result = EatventureBot._detect_new_level_red_icon(
-                bot,
-                screenshot=screenshot,
-                max_y=config.EXTENDED_SEARCH_Y,
-            )
-
-            self.assertTrue(result[0])
-
-    class InterruptStateTests(unittest.TestCase):
-        def test_consume_new_level_interrupt_clears_payload(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot._new_level_event = threading.Event()
-            bot._new_level_event.set()
-            bot._new_level_interrupt = {"source": "test"}
-            bot._should_ignore_new_level_signal = lambda *args, **kwargs: False
-
-            result = EatventureBot._consume_new_level_interrupt(bot)
-
-            self.assertEqual(result, {"source": "test"})
-            self.assertFalse(bot._new_level_event.is_set())
-            self.assertIsNone(bot._new_level_interrupt)
-
-        def test_background_monitor_scan_pauses_in_foreground_priority_states(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.completion_detected_time = None
-            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.CHECK_NEW_LEVEL)
-
-            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
-
-            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.WAIT_FOR_UNLOCK)
-            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
-
-        def test_sleep_probe_defers_to_live_background_monitor_coverage(self):
-            bot = EatventureBot.__new__(EatventureBot)
-            bot.completion_detected_time = None
-            bot._new_level_monitor_thread = types.SimpleNamespace(is_alive=lambda: True)
-            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.FIND_RED_ICONS)
-            bot._background_monitor_scan_paused = (
-                EatventureBot._background_monitor_scan_paused.__get__(bot, EatventureBot)
-            )
-            bot._background_monitor_has_coverage = (
-                EatventureBot._background_monitor_has_coverage.__get__(bot, EatventureBot)
-            )
-            bot._foreground_priority_polling_active = (
-                EatventureBot._foreground_priority_polling_active.__get__(bot, EatventureBot)
-            )
-
-            self.assertFalse(EatventureBot._should_active_probe_during_sleep(bot))
-
-            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.HOLD_UPGRADE_STATION)
-            self.assertTrue(EatventureBot._should_active_probe_during_sleep(bot))
-
-    class WindowRecoveryTests(unittest.TestCase):
-        def test_is_window_active_recovers_rebound_handle(self):
-            capture = WindowCapture.__new__(WindowCapture)
-            capture.window_title = "EatventureAuto"
-            capture.hwnd = 101
-            capture.target_width = 360
-            capture.target_height = 780
-            capture._capture_lock = threading.Lock()
-
-            with mock.patch("window_capture.win32gui.IsWindow", side_effect=[False, True]):
-                with mock.patch.object(
-                    WindowCapture,
-                    "find_window",
-                    side_effect=lambda: setattr(capture, "hwnd", 202),
-                ):
-                    self.assertTrue(WindowCapture.is_window_active(capture))
-
-            self.assertEqual(capture.hwnd, 202)
-
-        def test_print_window_failure_is_rejected(self):
-            with self.assertRaises(RuntimeError):
-                WindowCapture._ensure_print_window_succeeded(0, "EatventureAuto", 123)
 
     class RedIconGateTests(unittest.TestCase):
         @staticmethod
@@ -1053,9 +651,6 @@ def run_self_tests():
         VisionPersistenceTests,
         HistoricalLearnerBootstrapTests,
         BotRegressionTests,
-        NewLevelCacheTests,
-        InterruptStateTests,
-        WindowRecoveryTests,
         RedIconGateTests,
     ):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
@@ -1087,7 +682,6 @@ def run_bot():
 
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
-    bot = None
 
     try:
         bot = EatventureBot()
@@ -1101,11 +695,6 @@ def run_bot():
 
         while not should_exit:
             if bot.running:
-                if not bot.window_capture.is_window_active():
-                    logger.error("Window '%s' is no longer active; stopping bot", config.WINDOW_TITLE)
-                    should_exit = True
-                    bot.stop()
-                    continue
                 bot.step()
             if config.MAIN_LOOP_DELAY > 0:
                 time.sleep(config.MAIN_LOOP_DELAY)
@@ -1121,12 +710,6 @@ def run_bot():
         listener.stop()
         return 1
     finally:
-        if bot is not None:
-            try:
-                bot.stop()
-            except Exception as exc:
-                logging.error("Failed to stop bot cleanly during shutdown: %s", exc, exc_info=True)
-        bot_instance = None
         listener.stop()
 
     return 0

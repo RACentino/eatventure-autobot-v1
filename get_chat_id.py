@@ -9,15 +9,17 @@ import requests
 import config
 
 
-def _load_token(cli_token: Optional[str]) -> str:
+def _load_token(cli_token: str | None) -> str:
+    # FIX: Support explicit CLI token override and sanitize whitespace.
     token = (cli_token or config.TELEGRAM_BOT_TOKEN or "").strip()
     if not token:
         raise ValueError("No bot token found. Provide --token or set TELEGRAM_BOT_TOKEN in config.py")
     return token
 
 
-def _extract_chat_ids(updates: Iterable[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    chats: Dict[int, Dict[str, Any]] = {}
+def _extract_chat_ids(updates: Iterable[dict]) -> dict[int, dict]:
+    # FIX: Defensively parse nested response objects to avoid KeyError crashes.
+    chats: dict[int, dict] = {}
     for update in updates:
         message = update.get("message") if isinstance(update, dict) else None
         if not isinstance(message, dict):
@@ -48,6 +50,7 @@ def main() -> int:
     url = f"https://api.telegram.org/bot{token}/getUpdates"
 
     try:
+        # FIX: Use explicit timeout and raise_for_status to fail fast on transport errors.
         response = requests.get(url, timeout=max(1.0, args.timeout))
         response.raise_for_status()
         data = response.json()

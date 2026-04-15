@@ -370,36 +370,21 @@ STATS_UPGRADE_BUTTON_POS = (310, 698)
 # This is the fixed position for acknowledging the "new level" button.
 NEW_LEVEL_BUTTON_POS = (30, 692)
 
+UPGRADE_HOLD_DURATION = 6
+UPGRADE_CLICK_INTERVAL = 0.016
 
-# =========================
-# Action timing
-# =========================
-
-# This is how long the bot rapid-clicks an upgrade station before moving on.
 SPAM_CLICK_DURATION = 4.0
-
-# This is the gap between those rapid upgrade clicks.
 SPAM_CLICK_DELAY = 0.016
 
 # This is the random wiggle range added to rapid clicks; zero keeps every click perfectly still.
 SPAM_CLICK_JITTER = 0
+RAPID_CLICK_DOWN_UP_DELAY = 0.008
+RAPID_CLICK_SPIN_THRESHOLD = 0.004
 
-# This is how long each rapid click keeps the mouse button held down.
-RAPID_CLICK_DOWN_UP_DELAY = 0.014
+UPGRADE_SEARCH_INTERVAL = 0.064
 
-# This is the cutoff where the rapid-click scheduler stops sleeping and spins for precision instead.
-RAPID_CLICK_SPIN_THRESHOLD = 0.005
-
-# This is the default pause between repeated upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.050
-
-# This is how long the bot rapid-clicks inside the stats menu.
-STATS_UPGRADE_CLICK_DURATION = 3.0
-
-# This is the gap between those stat-upgrade clicks.
-STATS_UPGRADE_CLICK_DELAY = 0.014
-
-# This is the extra padding around the stat-icon search box so the bot does not crop it too tightly.
+STATS_UPGRADE_CLICK_DURATION = 2.0
+STATS_UPGRADE_CLICK_DELAY = 0.016
 STATS_ICON_PADDING = 20
 
 # This is the pause after the bot taps its idle spot and before it continues.

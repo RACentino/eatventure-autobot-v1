@@ -17,6 +17,7 @@ class TelegramConfig:
 
 class TelegramNotifier:
     def __init__(self, bot_token, chat_id, enabled=True, timeout_seconds=5.0):
+        # FIX: Centralize and validate constructor inputs to avoid malformed URL state.
         clean_token = (bot_token or "").strip()
         clean_chat_id = str(chat_id).strip() if chat_id is not None else ""
         try:
@@ -31,6 +32,7 @@ class TelegramNotifier:
             timeout_seconds=resolved_timeout,
         )
 
+        # FIX: Reuse a Session for better connection pooling/performance under many notifications.
         self._session = requests.Session()
         self.base_url = f"https://api.telegram.org/bot{self.config.bot_token}"
         self.enabled = self.config.enabled and bool(self.config.bot_token and self.config.chat_id)
@@ -44,6 +46,7 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
+        # FIX: Escape outgoing message text while still allowing HTML parse mode safely.
         safe_message = html.escape(str(message or "")).strip()
         if not safe_message:
             logger.warning("Skipping Telegram send because message is empty")
@@ -61,6 +64,7 @@ class TelegramNotifier:
             response = self._session.post(url, json=payload, timeout=self.config.timeout_seconds)
             response.raise_for_status()
             body = response.json()
+            # FIX: Handle Telegram API-level failures even on HTTP 200.
             if not body.get("ok", False):
                 logger.error("Telegram API rejected message: %s", body)
                 return False
@@ -74,12 +78,14 @@ class TelegramNotifier:
             return False
 
     def notify_bot_started(self):
-        self.send_message("Bot started")
+        # FIX: Keep formatting plain text so escaping does not break tags.
+        self.send_message("🤖 Bot Started")
 
     def notify_bot_stopped(self):
         self.send_message("Bot stopped")
 
     def notify_new_level(self, level_number, time_spent):
+        # FIX: Clamp and normalize user-provided values to avoid bad formatting.
         safe_level = max(1, int(level_number))
         safe_time_spent = max(0.0, float(time_spent))
         minutes = int(safe_time_spent // 60)
