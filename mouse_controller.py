@@ -44,10 +44,12 @@ _SEND_INPUT.restype = wintypes.UINT
 
 
 class MouseController:
-    def __init__(self, hwnd, click_delay=None, move_delay=None):
+    def __init__(self, hwnd, click_delay=None, move_delay=None, hwnd_provider=None, recovery_callback=None):
         self.hwnd = hwnd
         self.click_delay = config.CLICK_DELAY if click_delay is None else click_delay
         self.move_delay = config.MOUSE_MOVE_DELAY if move_delay is None else move_delay
+        self.hwnd_provider = hwnd_provider
+        self.recovery_callback = recovery_callback
         self.interrupt_callback = None # Set by bot to check for high-priority interrupts
         self._last_click_time = 0.0
         self._last_cursor_pos = None
@@ -80,6 +82,98 @@ class MouseController:
     @staticmethod
     def _compute_next_click_deadline(previous_deadline_ns, click_start_ns, interval_ns):
         return max(previous_deadline_ns + interval_ns, click_start_ns + interval_ns)
+
+    @staticmethod
+    def _positions_within_tolerance(current, target, tolerance=None):
+        if current is None or target is None:
+            return False
+        allowed = config.MOUSE_POSITION_TOLERANCE if tolerance is None else tolerance
+        return (
+            abs(int(current[0]) - int(target[0])) <= allowed
+            and abs(int(current[1]) - int(target[1])) <= allowed
+        )
+
+    def _get_cursor_pos_safe(self):
+        try:
+            return win32api.GetCursorPos()
+        except Exception as exc:
+            logger.debug("GetCursorPos failed: %s", exc)
+            return self._last_cursor_pos
+
+    def _refresh_input_binding(self):
+        if callable(self.recovery_callback):
+            try:
+                self.recovery_callback()
+            except Exception as exc:
+                logger.debug("Input recovery callback failed: %s", exc)
+        try:
+            self._get_active_hwnd()
+        except Exception as exc:
+            logger.debug("Window handle refresh failed: %s", exc)
+
+    def _set_cursor_pos(self, target, context, retries=None, retry_delay=None):
+        attempts = max(1, int(config.MOUSE_MOVE_RETRIES if retries is None else retries))
+        delay = config.MOUSE_MOVE_RETRY_DELAY if retry_delay is None else retry_delay
+        target = (int(target[0]), int(target[1]))
+        tolerance = config.MOUSE_POSITION_TOLERANCE
+        last_exc = None
+
+        for attempt in range(1, attempts + 1):
+            self._check_interrupts()
+
+            current = self._get_cursor_pos_safe()
+            if self._positions_within_tolerance(current, target, tolerance):
+                self._last_cursor_pos = target
+                return True
+
+            try:
+                win32api.SetCursorPos(target)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "SetCursorPos failed during %s attempt %s/%s at (%s, %s): %s",
+                    context,
+                    attempt,
+                    attempts,
+                    target[0],
+                    target[1],
+                    exc,
+                )
+            else:
+                current = self._get_cursor_pos_safe()
+                if self._positions_within_tolerance(current, target, tolerance):
+                    self._last_cursor_pos = target
+                    return True
+                logger.debug(
+                    "Cursor position mismatch during %s attempt %s/%s at (%s, %s); current=%s",
+                    context,
+                    attempt,
+                    attempts,
+                    target[0],
+                    target[1],
+                    current,
+                )
+
+            self._refresh_input_binding()
+            if attempt < attempts and delay > 0:
+                self._sleep(delay)
+
+        if last_exc is not None:
+            logger.error(
+                "SetCursorPos exhausted during %s at (%s, %s): %s",
+                context,
+                target[0],
+                target[1],
+                last_exc,
+            )
+        else:
+            logger.error(
+                "SetCursorPos exhausted during %s at (%s, %s) without reaching target",
+                context,
+                target[0],
+                target[1],
+            )
+        return False
 
     def _rapid_click_hold_ns(self, click_interval):
         requested_hold = max(0.0, float(config.RAPID_CLICK_DOWN_UP_DELAY))
@@ -135,10 +229,28 @@ class MouseController:
         travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
 
         if self._should_move_cursor(screen_x, screen_y):
-            self._move_cursor(screen_x, screen_y)
+            if not self._move_cursor(screen_x, screen_y):
+                logger.warning(
+                    "Blocked rapid-click setup at (%s, %s): cursor move failed",
+                    int(screen_x),
+                    int(screen_y),
+                )
+                return False
 
-        self._ensure_cursor_at_target(screen_x, screen_y)
-        self._correct_cursor_position(screen_x, screen_y)
+        if not self._ensure_cursor_at_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked rapid-click setup at (%s, %s): cursor settle failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+        if not self._correct_cursor_position(screen_x, screen_y):
+            logger.warning(
+                "Blocked rapid-click setup at (%s, %s): cursor correction failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
         self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
 
         if not self.is_safe_to_click(screen_x, screen_y, relative=False):
@@ -245,18 +357,46 @@ class MouseController:
             travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
 
             if self._should_move_cursor(screen_x, screen_y):
-                self._move_cursor(screen_x, screen_y)
+                if not self._move_cursor(screen_x, screen_y):
+                    logger.warning(
+                        "Blocked click dispatch at (%s, %s): cursor move failed",
+                        int(screen_x),
+                        int(screen_y),
+                    )
+                    return False
 
-            self._ensure_cursor_at_target(screen_x, screen_y)
-            self._correct_cursor_position(screen_x, screen_y)
+            if not self._ensure_cursor_at_target(screen_x, screen_y):
+                logger.warning(
+                    "Blocked click dispatch at (%s, %s): cursor settle failed",
+                    int(screen_x),
+                    int(screen_y),
+                )
+                return False
+            if not self._correct_cursor_position(screen_x, screen_y):
+                logger.warning(
+                    "Blocked click dispatch at (%s, %s): cursor correction failed",
+                    int(screen_x),
+                    int(screen_y),
+                )
+                return False
             self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
-            current = win32api.GetCursorPos()
+            current = self._get_cursor_pos_safe()
             tolerance = config.MOUSE_POSITION_TOLERANCE
-            if abs(current[0] - screen_x) <= tolerance and abs(current[1] - screen_y) <= tolerance:
+            if self._positions_within_tolerance(current, (int(screen_x), int(screen_y)), tolerance):
                 break
 
-            win32api.SetCursorPos((int(screen_x), int(screen_y)))
-            self._last_cursor_pos = (int(screen_x), int(screen_y))
+            if not self._set_cursor_pos(
+                (int(screen_x), int(screen_y)),
+                context="click retry",
+                retries=1,
+                retry_delay=0.0,
+            ):
+                logger.warning(
+                    "Blocked click dispatch at (%s, %s): retry reposition failed",
+                    int(screen_x),
+                    int(screen_y),
+                )
+                return False
             if attempt < retries - 1 and settle_retry_delay > 0:
                 self._sleep(settle_retry_delay)
 
@@ -288,10 +428,28 @@ class MouseController:
         travel_distance = self._estimate_cursor_distance(screen_x, screen_y)
 
         if self._should_move_cursor(screen_x, screen_y):
-            self._move_cursor(screen_x, screen_y)
+            if not self._move_cursor(screen_x, screen_y):
+                logger.warning(
+                    "Blocked mouse-down dispatch at (%s, %s): cursor move failed",
+                    int(screen_x),
+                    int(screen_y),
+                )
+                return False
 
-        self._ensure_cursor_at_target(screen_x, screen_y)
-        self._correct_cursor_position(screen_x, screen_y)
+        if not self._ensure_cursor_at_target(screen_x, screen_y):
+            logger.warning(
+                "Blocked mouse-down dispatch at (%s, %s): cursor settle failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
+        if not self._correct_cursor_position(screen_x, screen_y):
+            logger.warning(
+                "Blocked mouse-down dispatch at (%s, %s): cursor correction failed",
+                int(screen_x),
+                int(screen_y),
+            )
+            return False
         self._stabilize_before_click(screen_x, screen_y, distance_override=travel_distance)
         self._ensure_min_click_interval()
 
@@ -332,20 +490,30 @@ class MouseController:
     def _correct_cursor_position(self, screen_x, screen_y):
         retries = max(0, config.MOUSE_TARGET_RETRIES)
         if retries <= 0:
-            return
+            return True
         tolerance = config.MOUSE_POSITION_TOLERANCE
         correction_delay = config.MOUSE_TARGET_CORRECTION_DELAY
         target = (int(screen_x), int(screen_y))
 
         for _ in range(retries):
-            current = win32api.GetCursorPos()
-            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
+            current = self._get_cursor_pos_safe()
+            if self._positions_within_tolerance(current, target, tolerance):
                 self._last_cursor_pos = target
-                return
-            win32api.SetCursorPos(target)
+                return True
+            if not self._set_cursor_pos(
+                target,
+                context="cursor correction",
+                retries=1,
+                retry_delay=0.0,
+            ):
+                return False
             if correction_delay > 0:
                 self._sleep(correction_delay)
-        self._last_cursor_pos = target
+        current = self._get_cursor_pos_safe()
+        if self._positions_within_tolerance(current, target, tolerance):
+            self._last_cursor_pos = target
+            return True
+        return False
 
     def _should_move_cursor(self, screen_x, screen_y):
         if self._last_cursor_pos is None:
@@ -358,26 +526,21 @@ class MouseController:
     def _move_cursor(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
         retries = max(1, config.MOUSE_MOVE_RETRIES)
-        retry_delay = config.MOUSE_MOVE_RETRY_DELAY
         tolerance = config.MOUSE_POSITION_TOLERANCE
 
-        for _ in range(retries):
-            win32api.SetCursorPos(target)
-            if retry_delay > 0:
-                self._sleep(retry_delay)
-            current = win32api.GetCursorPos()
-            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
-                break
+        if not self._set_cursor_pos(target, context="cursor move", retries=retries):
+            return False
 
+        current = self._get_cursor_pos_safe()
+        if not self._positions_within_tolerance(current, target, tolerance):
+            return False
         self._sleep(self.move_delay)
         self._last_cursor_pos = target
+        return True
 
     def _estimate_cursor_distance(self, screen_x, screen_y):
         target = (int(screen_x), int(screen_y))
-        try:
-            current = win32api.GetCursorPos()
-        except Exception:
-            current = self._last_cursor_pos
+        current = self._get_cursor_pos_safe()
 
         if current is None:
             return 0.0
@@ -414,8 +577,8 @@ class MouseController:
         start_time = time.monotonic()
         stable_since = None
         while True:
-            current = win32api.GetCursorPos()
-            if abs(current[0] - target[0]) <= tolerance and abs(current[1] - target[1]) <= tolerance:
+            current = self._get_cursor_pos_safe()
+            if self._positions_within_tolerance(current, target, tolerance):
                 if stable_since is None:
                     stable_since = time.monotonic()
                 if stabilize_duration <= 0 or time.monotonic() - stable_since >= stabilize_duration:
@@ -424,16 +587,16 @@ class MouseController:
                     if hover_delay > 0:
                         self._sleep(hover_delay)
                     self._last_cursor_pos = target
-                    return
+                    return True
             else:
                 stable_since = None
 
             if timeout <= 0 or time.monotonic() - start_time >= timeout:
-                win32api.SetCursorPos(target)
-                self._last_cursor_pos = target
+                if not self._set_cursor_pos(target, context="cursor settle timeout"):
+                    return False
                 if hover_delay > 0:
                     self._sleep(hover_delay)
-                return
+                return True
 
             if check_interval > 0:
                 self._sleep(check_interval)
@@ -486,9 +649,26 @@ class MouseController:
 
     def is_in_forbidden_zone(self, x, y, relative=True):
         return not self.is_safe_to_click(x, y, relative=relative)
+
+    def set_window_handle(self, hwnd):
+        if hwnd and hwnd != self.hwnd:
+            self.hwnd = hwnd
+            self._last_cursor_pos = None
+            logger.info("Mouse controller rebound to hwnd %s", hwnd)
+
+    def _get_active_hwnd(self):
+        if callable(self.hwnd_provider):
+            try:
+                self.set_window_handle(self.hwnd_provider())
+            except Exception as exc:
+                logger.debug("Window handle provider failed: %s", exc)
+        return self.hwnd
     
     def get_window_position(self):
-        x, y = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        hwnd = self._get_active_hwnd()
+        if not hwnd:
+            raise RuntimeError("Mouse controller has no active window handle")
+        x, y = win32gui.ClientToScreen(hwnd, (0, 0))
         return x, y
     
     def move_to(self, x, y, relative=True):
@@ -503,9 +683,12 @@ class MouseController:
                 screen_y = y
 
             screen_x, screen_y = self._clamp_to_screen(int(screen_x), int(screen_y))
-            win32api.SetCursorPos((int(screen_x), int(screen_y)))
+            if not self._set_cursor_pos((int(screen_x), int(screen_y)), context="move_to"):
+                logger.warning("Cursor move_to failed at (%s, %s)", int(screen_x), int(screen_y))
+                return False
             self._last_cursor_pos = (int(screen_x), int(screen_y))
             logger.info(f"Cursor moved to window position ({x}, {y})")
+            return True
     
     def click(self, x, y, relative=True, delay=None, wait_after=True, prevalidated=False):
         self._check_interrupts()
@@ -710,7 +893,18 @@ class MouseController:
                         )
                         return False
                     if self._should_move_cursor(target_x, target_y):
-                        win32api.SetCursorPos((int(target_x), int(target_y)))
+                        if not self._set_cursor_pos(
+                            (int(target_x), int(target_y)),
+                            context="rapid-click jitter",
+                            retries=1,
+                            retry_delay=0.0,
+                        ):
+                            logger.warning(
+                                "Blocked rapid-click dispatch at (%s, %s): jitter reposition failed",
+                                int(target_x),
+                                int(target_y),
+                            )
+                            return False
                         self._last_cursor_pos = (int(target_x), int(target_y))
 
                 if not self._send_precise_click(
@@ -762,9 +956,27 @@ class MouseController:
             screen_from_x, screen_from_y = self._clamp_to_screen(int(screen_from_x), int(screen_from_y))
             screen_to_x, screen_to_y = self._clamp_to_screen(int(screen_to_x), int(screen_to_y))
 
-            win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
-            self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y))
-            self._correct_cursor_position(int(screen_from_x), int(screen_from_y))
+            if not self._set_cursor_pos((int(screen_from_x), int(screen_from_y)), context="drag start"):
+                logger.warning(
+                    "Drag start positioning failed at (%s, %s)",
+                    int(screen_from_x),
+                    int(screen_from_y),
+                )
+                return False
+            if not self._ensure_cursor_at_target(int(screen_from_x), int(screen_from_y)):
+                logger.warning(
+                    "Drag start settle failed at (%s, %s)",
+                    int(screen_from_x),
+                    int(screen_from_y),
+                )
+                return False
+            if not self._correct_cursor_position(int(screen_from_x), int(screen_from_y)):
+                logger.warning(
+                    "Drag start correction failed at (%s, %s)",
+                    int(screen_from_x),
+                    int(screen_from_y),
+                )
+                return False
             self._last_cursor_pos = (int(screen_from_x), int(screen_from_y))
             self._sleep(self.move_delay)
 
@@ -791,7 +1003,19 @@ class MouseController:
                 t = i / steps
                 current_x = int(screen_from_x + (screen_to_x - screen_from_x) * t)
                 current_y = int(screen_from_y + (screen_to_y - screen_from_y) * t)
-                win32api.SetCursorPos((current_x, current_y))
+                if not self._set_cursor_pos(
+                    (current_x, current_y),
+                    context="drag step",
+                    retries=1,
+                    retry_delay=0.0,
+                ):
+                    logger.warning(
+                        "Drag step positioning failed at (%s, %s)",
+                        current_x,
+                        current_y,
+                    )
+                    interrupted = True
+                    break
                 target_time = start_time + (duration * t)
                 sleep_time = target_time - time.monotonic()
                 if sleep_time > 0:
@@ -806,8 +1030,12 @@ class MouseController:
             )
             final_x = int(current_x) if interrupted else int(screen_to_x)
             final_y = int(current_y) if interrupted else int(screen_to_y)
-            self._ensure_cursor_at_target(final_x, final_y)
-            self._correct_cursor_position(final_x, final_y)
+            if not self._ensure_cursor_at_target(final_x, final_y):
+                logger.warning("Drag final settle failed at (%s, %s)", final_x, final_y)
+                return False
+            if not self._correct_cursor_position(final_x, final_y):
+                logger.warning("Drag final correction failed at (%s, %s)", final_x, final_y)
+                return False
             self._last_cursor_pos = (final_x, final_y)
             
             if interrupted:

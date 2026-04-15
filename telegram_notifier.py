@@ -19,11 +19,16 @@ class TelegramNotifier:
     def __init__(self, bot_token, chat_id, enabled=True, timeout_seconds=5.0):
         clean_token = (bot_token or "").strip()
         clean_chat_id = str(chat_id).strip() if chat_id is not None else ""
+        try:
+            resolved_timeout = max(1.0, float(timeout_seconds))
+        except (TypeError, ValueError):
+            resolved_timeout = 5.0
+
         self.config = TelegramConfig(
             bot_token=clean_token,
             chat_id=clean_chat_id,
             enabled=bool(enabled),
-            timeout_seconds=max(1.0, float(timeout_seconds)),
+            timeout_seconds=resolved_timeout,
         )
 
         self._session = requests.Session()
@@ -69,10 +74,10 @@ class TelegramNotifier:
             return False
 
     def notify_bot_started(self):
-        self.send_message("🤖 Bot Started")
+        self.send_message("Bot started")
 
     def notify_bot_stopped(self):
-        self.send_message("⏹️ Bot Stopped")
+        self.send_message("Bot stopped")
 
     def notify_new_level(self, level_number, time_spent):
         safe_level = max(1, int(level_number))
@@ -84,4 +89,4 @@ class TelegramNotifier:
 
     def notify_level_milestone(self, total_levels):
         safe_levels = max(0, int(total_levels))
-        self.send_message(f"📊 Milestone reached! Total cities completed: {safe_levels}")
+        self.send_message(f"Milestone reached. Total cities completed: {safe_levels}")

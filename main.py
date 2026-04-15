@@ -1,5 +1,6 @@
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 import time
@@ -109,7 +110,12 @@ def setup_logging():
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    file_handler = logging.FileHandler(logs_dir / "bot.log", encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        logs_dir / "bot.log",
+        maxBytes=max(1, int(config.LOG_FILE_MAX_BYTES)),
+        backupCount=max(1, int(config.LOG_FILE_BACKUP_COUNT)),
+        encoding="utf-8",
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(log_format))
 
@@ -138,6 +144,7 @@ def run_self_tests():
     import threading
     import types
     import unittest
+    from unittest import mock
 
     import cv2
     import numpy as np
@@ -145,6 +152,7 @@ def run_self_tests():
     from bot import EatventureBot, HistoricalLearner, State, VisionOptimizer, VisionPersistence
     from image_matcher import ImageMatcher
     from mouse_controller import MouseController
+    from window_capture import WindowCapture
 
     test_temp_root = Path(config.LOGS_DIR)
 
@@ -211,6 +219,42 @@ def run_self_tests():
 
             self.assertFalse(result)
             self.assertEqual(mouse_up_calls, [])
+
+        def test_click_returns_false_when_cursor_positioning_fails(self):
+            self.controller._resolve_screen_position = lambda *args, **kwargs: (100, 200)
+            self.controller._sleep = lambda *args, **kwargs: None
+            self.controller._validate_pre_click_target = lambda *args, **kwargs: True
+
+            with mock.patch("mouse_controller.win32api.GetCursorPos", return_value=(0, 0)):
+                with mock.patch("mouse_controller.win32api.SetCursorPos", side_effect=RuntimeError("boom")) as set_cursor:
+                    with mock.patch("mouse_controller.win32api.mouse_event") as mouse_event:
+                        result = self.controller.click(100, 200, relative=False)
+
+            self.assertFalse(result)
+            self.assertGreaterEqual(set_cursor.call_count, 1)
+            mouse_event.assert_not_called()
+
+        def test_click_recovers_after_transient_cursor_position_failure(self):
+            self.controller._resolve_screen_position = lambda *args, **kwargs: (100, 200)
+            self.controller._sleep = lambda *args, **kwargs: None
+            self.controller._validate_pre_click_target = lambda *args, **kwargs: True
+            self.controller.recovery_callback = mock.Mock()
+            cursor = {"pos": (0, 0), "failures": 0}
+
+            def fake_set_cursor(target):
+                if cursor["failures"] == 0:
+                    cursor["failures"] += 1
+                    raise RuntimeError("boom")
+                cursor["pos"] = target
+
+            with mock.patch("mouse_controller.win32api.GetCursorPos", side_effect=lambda: cursor["pos"]):
+                with mock.patch("mouse_controller.win32api.SetCursorPos", side_effect=fake_set_cursor):
+                    with mock.patch("mouse_controller.win32api.mouse_event") as mouse_event:
+                        result = self.controller.click(100, 200, relative=False)
+
+            self.assertTrue(result)
+            self.controller.recovery_callback.assert_called()
+            self.assertEqual(mouse_event.call_count, 2)
 
     class VisionPersistenceTests(unittest.TestCase):
         def test_load_returns_empty_dict_for_malformed_json(self):
@@ -353,10 +397,93 @@ def run_self_tests():
             self.assertEqual(learner._last_pair_processed, 0)
             self.assertEqual(learner._last_batch_processed, 0)
             self.assertEqual(len(applied), 1)
-            self.assertAlmostEqual(applied[0][0][0]["click_delay"], 0.03)
+            self.assertAlmostEqual(applied[0][0][0]["click_delay"], config.AI_LEARNING_MAX_CLICK_DELAY)
             self.assertNotIn("move_delay", applied[0][0][0])
 
+        def test_short_completion_records_are_discarded(self):
+            temp_dir = make_test_dir("test-learning-short-records")
+            state_path = temp_dir / "learning_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "behavior": {
+                                    "click_delay": 0.005,
+                                    "move_delay": 0.001,
+                                    "search_interval": 0.02,
+                                },
+                                "source": "too-short",
+                                "time_spent": 0.5,
+                                "timestamp": 1.0,
+                            },
+                            {
+                                "behavior": {
+                                    "click_delay": 0.005,
+                                    "move_delay": 0.001,
+                                    "search_interval": 0.02,
+                                },
+                                "source": "valid",
+                                "time_spent": 6.0,
+                                "timestamp": 2.0,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: None,
+                get_runtime_behavior_snapshot=lambda: {
+                    "click_delay": 0.005,
+                    "move_delay": 0.001,
+                    "search_interval": 0.02,
+                },
+            )
+            learner = HistoricalLearner(bot, VisionPersistence(str(state_path), save_interval=0.0))
+
+            self.assertEqual(len(learner._records), 1)
+            self.assertEqual(learner._records[0]["source"], "valid")
+
+        def test_record_completion_ignores_implausibly_short_runs(self):
+            bot = types.SimpleNamespace(
+                apply_learned_behavior=lambda *args, **kwargs: None,
+                get_runtime_behavior_snapshot=lambda: {
+                    "click_delay": 0.005,
+                    "move_delay": 0.001,
+                    "search_interval": 0.02,
+                },
+            )
+            learner = HistoricalLearner(bot, persistence=None)
+
+            learner.record_completion(0.5, "too-short")
+
+            self.assertEqual(learner._records, [])
+
     class BotRegressionTests(unittest.TestCase):
+        def test_step_rebinds_mouse_handle_after_window_refresh(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            rebinds = []
+            bot.window_capture = types.SimpleNamespace(
+                hwnd=202,
+                ensure_window_ready=lambda resize_on_refresh=False: True,
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                set_window_handle=lambda hwnd: rebinds.append(hwnd),
+            )
+            bot.overlay = None
+            bot._sync_window_bindings = EatventureBot._sync_window_bindings.__get__(bot, EatventureBot)
+            bot._clear_capture_cache = lambda: None
+            bot._apply_tuning = lambda: None
+            bot._enforce_state_min_interval = lambda: None
+            bot.state_machine = types.SimpleNamespace(update=lambda: None)
+            bot.running = True
+
+            EatventureBot.step(bot)
+
+            self.assertEqual(rebinds, [202])
+
         def test_new_level_red_icon_recaptures_when_frame_is_too_short(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot._last_new_level_fail_time = 0.0
@@ -522,20 +649,148 @@ def run_self_tests():
             self.assertEqual(state, State.CHECK_UNLOCK)
             self.assertEqual(bot.current_red_icon_index, 1)
 
-        def test_upgrade_stats_without_icon_continues_to_open_boxes(self):
+        def test_upgrade_stats_without_primary_actions_enters_fallback_boxes(self):
             bot = EatventureBot.__new__(EatventureBot)
             bot.check_critical_interrupts = lambda *args, **kwargs: False
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
             bot.vision_optimizer = types.SimpleNamespace(
                 enabled=False,
                 update_stats_upgrade_miss=lambda *args, **kwargs: None,
             )
+            bot._asset_action_completed = False
 
             state = EatventureBot.handle_upgrade_stats(bot, None)
 
             self.assertEqual(state, State.OPEN_BOXES)
+
+        def test_upgrade_stats_restarts_primary_loop_when_primary_action_completed(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (False, 0.0)
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_stats_upgrade_miss=lambda *args, **kwargs: None,
+            )
+            bot._asset_action_completed = True
+
+            state = EatventureBot.handle_upgrade_stats(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
+
+        def test_upgrade_stats_success_restarts_primary_loop_before_fallback(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._has_stats_upgrade_icon = lambda *args, **kwargs: (True, 0.99)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._mark_asset_action_completed = (
+                EatventureBot._mark_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot._consume_asset_action_completed = (
+                EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                click=lambda *args, **kwargs: True,
+                spam_click_at=lambda *args, **kwargs: True,
+            )
+            bot.sleep = lambda *args, **kwargs: None
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_stats_upgrade_confidence=lambda *args, **kwargs: None,
+                update_stats_upgrade_miss=lambda *args, **kwargs: None,
+            )
+            bot._asset_action_completed = False
+
+            state = EatventureBot.handle_upgrade_stats(bot, None)
+
+            self.assertEqual(state, State.FIND_RED_ICONS)
+            self.assertFalse(bot._asset_action_completed)
+
+        def test_find_red_icons_forbidden_only_continues_asset_cycle_before_scroll(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._continue_asset_cycle_after_red_scan = (
+                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
+            )
+            bot._resolve_red_icon_zone_state = lambda: {
+                "safe_present": False,
+                "forbidden_present": True,
+                "actionable_icons": [],
+                "forbidden_count": 1,
+            }
+            bot.red_icons = [(0.99, 10, 20)]
+            bot.current_red_icon_index = 3
+            bot.red_icon_cycle_count = 2
+
+            state = EatventureBot.handle_find_red_icons(bot, None)
+
+            self.assertEqual(state, State.CHECK_UNLOCK)
+            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(bot.current_red_icon_index, 0)
+            self.assertEqual(bot.red_icon_cycle_count, 0)
+
+        def test_find_red_icons_without_targets_continues_asset_cycle_before_scroll(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._continue_asset_cycle_after_red_scan = (
+                EatventureBot._continue_asset_cycle_after_red_scan.__get__(bot, EatventureBot)
+            )
+            bot._resolve_red_icon_zone_state = lambda: {
+                "safe_present": False,
+                "forbidden_present": False,
+                "actionable_icons": [],
+                "forbidden_count": 0,
+            }
+            bot.red_icons = [(0.99, 10, 20)]
+            bot.current_red_icon_index = 1
+            bot.red_icon_cycle_count = 4
+
+            state = EatventureBot.handle_find_red_icons(bot, None)
+
+            self.assertEqual(state, State.CHECK_UNLOCK)
+            self.assertEqual(bot.red_icons, [])
+            self.assertEqual(bot.current_red_icon_index, 0)
+            self.assertEqual(bot.red_icon_cycle_count, 0)
+
+        def test_search_miss_flows_into_stats_before_boxes(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot.templates = {}
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_upgrade_station_miss=lambda: None,
+                update_upgrade_station_confidence=lambda *args, **kwargs: None,
+            )
+            bot.tuner = types.SimpleNamespace(
+                search_interval=0.0,
+                record_search_result=lambda *args, **kwargs: None,
+            )
+            bot._apply_tuning = lambda *args, **kwargs: None
+            bot.red_icons = []
+            bot.current_red_icon_index = 0
+            bot.red_icon_processed_count = 0
+            bot.successful_red_icon_positions = []
+            bot.upgrade_found_in_cycle = False
+            bot.consecutive_failed_cycles = 0
+
+            state = EatventureBot.handle_search_upgrade_station(bot, None)
+
+            self.assertEqual(state, State.UPGRADE_STATS)
 
         def test_step_recovers_from_unexpected_exception(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -652,6 +907,7 @@ def run_self_tests():
             bot._click_idle = lambda *args, **kwargs: None
             bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
             bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
             bot.templates = {
                 f"box{i}": (np.zeros((1, 1, 3), dtype=np.uint8), None)
                 for i in range(1, 6)
@@ -671,11 +927,79 @@ def run_self_tests():
             bot.upgrade_found_in_cycle = False
             bot.cycle_counter = 0
             bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = False
 
             state = EatventureBot.handle_open_boxes(bot, None)
 
             self.assertEqual(miss_counter["count"], 1)
             self.assertEqual(state, State.SCROLL)
+
+        def test_open_boxes_scrolls_after_opening_visible_boxes(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            bot.templates = {
+                "box1": (np.zeros((1, 1, 3), dtype=np.uint8), None)
+            }
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_box_miss=lambda: None,
+                update_box_confidence=lambda confidence: None,
+            )
+            bot.image_matcher = types.SimpleNamespace(
+                find_template=lambda *args, **kwargs: (True, 0.99, 11, 22)
+            )
+            bot.mouse_controller = types.SimpleNamespace(
+                is_in_forbidden_zone=lambda *args, **kwargs: False,
+                click=lambda *args, **kwargs: True,
+            )
+            bot.work_done = False
+            bot.upgrade_found_in_cycle = False
+            bot.cycle_counter = 0
+            bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = False
+
+            state = EatventureBot.handle_open_boxes(bot, None)
+
+            self.assertEqual(state, State.SCROLL)
+            self.assertFalse(bot._asset_action_completed)
+
+        def test_open_boxes_does_not_reenter_primary_loop_from_stale_asset_flag(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.check_critical_interrupts = lambda *args, **kwargs: False
+            bot._click_idle = lambda *args, **kwargs: None
+            bot._capture = lambda *args, **kwargs: np.zeros((100, 100, 3), dtype=np.uint8)
+            bot._should_interrupt_for_new_level = lambda *args, **kwargs: False
+            bot._consume_asset_action_completed = EatventureBot._consume_asset_action_completed.__get__(bot, EatventureBot)
+            bot.templates = {
+                f"box{i}": (np.zeros((1, 1, 3), dtype=np.uint8), None)
+                for i in range(1, 6)
+            }
+            miss_counter = {"count": 0}
+            bot.vision_optimizer = types.SimpleNamespace(
+                enabled=False,
+                update_box_miss=lambda: miss_counter.__setitem__("count", miss_counter["count"] + 1),
+                update_box_confidence=lambda confidence: None,
+            )
+            bot.image_matcher = types.SimpleNamespace(find_template=lambda *args, **kwargs: (False, 0.0, 0, 0))
+            bot.mouse_controller = types.SimpleNamespace(
+                is_in_forbidden_zone=lambda *args, **kwargs: False,
+                click=lambda *args, **kwargs: True,
+            )
+            bot.work_done = False
+            bot.upgrade_found_in_cycle = True
+            bot.cycle_counter = 0
+            bot.consecutive_failed_cycles = 0
+            bot._asset_action_completed = True
+
+            state = EatventureBot.handle_open_boxes(bot, None)
+
+            self.assertEqual(miss_counter["count"], 1)
+            self.assertEqual(state, State.SCROLL)
+            self.assertFalse(bot._asset_action_completed)
 
         def test_check_new_level_aborts_when_acknowledgement_click_fails(self):
             bot = EatventureBot.__new__(EatventureBot)
@@ -789,6 +1113,59 @@ def run_self_tests():
             self.assertEqual(result, {"source": "test"})
             self.assertFalse(bot._new_level_event.is_set())
             self.assertIsNone(bot._new_level_interrupt)
+
+        def test_background_monitor_scan_pauses_in_foreground_priority_states(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.completion_detected_time = None
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.CHECK_NEW_LEVEL)
+
+            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
+
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.WAIT_FOR_UNLOCK)
+            self.assertTrue(EatventureBot._background_monitor_scan_paused(bot))
+
+        def test_sleep_probe_defers_to_live_background_monitor_coverage(self):
+            bot = EatventureBot.__new__(EatventureBot)
+            bot.completion_detected_time = None
+            bot._new_level_monitor_thread = types.SimpleNamespace(is_alive=lambda: True)
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.FIND_RED_ICONS)
+            bot._background_monitor_scan_paused = (
+                EatventureBot._background_monitor_scan_paused.__get__(bot, EatventureBot)
+            )
+            bot._background_monitor_has_coverage = (
+                EatventureBot._background_monitor_has_coverage.__get__(bot, EatventureBot)
+            )
+            bot._foreground_priority_polling_active = (
+                EatventureBot._foreground_priority_polling_active.__get__(bot, EatventureBot)
+            )
+
+            self.assertFalse(EatventureBot._should_active_probe_during_sleep(bot))
+
+            bot.state_machine = types.SimpleNamespace(get_state=lambda: State.HOLD_UPGRADE_STATION)
+            self.assertTrue(EatventureBot._should_active_probe_during_sleep(bot))
+
+    class WindowRecoveryTests(unittest.TestCase):
+        def test_is_window_active_recovers_rebound_handle(self):
+            capture = WindowCapture.__new__(WindowCapture)
+            capture.window_title = "EatventureAuto"
+            capture.hwnd = 101
+            capture.target_width = 360
+            capture.target_height = 780
+            capture._capture_lock = threading.Lock()
+
+            with mock.patch("window_capture.win32gui.IsWindow", side_effect=[False, True]):
+                with mock.patch.object(
+                    WindowCapture,
+                    "find_window",
+                    side_effect=lambda: setattr(capture, "hwnd", 202),
+                ):
+                    self.assertTrue(WindowCapture.is_window_active(capture))
+
+            self.assertEqual(capture.hwnd, 202)
+
+        def test_print_window_failure_is_rejected(self):
+            with self.assertRaises(RuntimeError):
+                WindowCapture._ensure_print_window_succeeded(0, "EatventureAuto", 123)
 
     class RedIconGateTests(unittest.TestCase):
         @staticmethod
@@ -917,6 +1294,7 @@ def run_self_tests():
         BotRegressionTests,
         NewLevelCacheTests,
         InterruptStateTests,
+        WindowRecoveryTests,
         RedIconGateTests,
     ):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))

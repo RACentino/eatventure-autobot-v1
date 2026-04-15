@@ -35,30 +35,49 @@ class WindowCapture:
     def _ensure_window_handle(self):
         if not self.hwnd or not win32gui.IsWindow(self.hwnd):
             self.find_window()
-    
-    def find_window(self):
-        self.hwnd = win32gui.FindWindow(None, self.window_title)
-        if not self.hwnd:
-            raise Exception(f"Window '{self.window_title}' not found!")
-        logger.info(f"Window found: {self.window_title} (HWND: {self.hwnd})")
-    
-    def resize_window(self):
-        self._ensure_window_handle()
-        
+
+    def _apply_target_size(self):
         rect = win32gui.GetWindowRect(self.hwnd)
         x, y = rect[0], rect[1]
-        
+
         SWP_NOZORDER = 0x0004
         SWP_SHOWWINDOW = 0x0040
         success = ctypes.windll.user32.SetWindowPos(
-            self.hwnd, 0, int(x), int(y), 
-            int(self.target_width), int(self.target_height), 
+            self.hwnd, 0, int(x), int(y),
+            int(self.target_width), int(self.target_height),
             SWP_NOZORDER | SWP_SHOWWINDOW
         )
         if not success:
             logger.warning("SetWindowPos failed for hwnd %s", self.hwnd)
-            return
+            return False
+
         logger.info(f"Window resized to {self.target_width}x{self.target_height}")
+        return True
+
+    def ensure_window_ready(self, resize_on_refresh=False):
+        previous_hwnd = self.hwnd
+        self._ensure_window_handle()
+        refreshed = previous_hwnd != self.hwnd
+        if refreshed and resize_on_refresh:
+            self._apply_target_size()
+        return refreshed
+
+    @staticmethod
+    def _ensure_print_window_succeeded(print_result, window_title, hwnd):
+        if print_result != 1:
+            raise RuntimeError(
+                f"PrintWindow failed for '{window_title}' (hwnd={hwnd}, result={print_result})"
+            )
+    
+    def find_window(self):
+        self.hwnd = win32gui.FindWindow(None, self.window_title)
+        if not self.hwnd:
+            raise RuntimeError(f"Window '{self.window_title}' not found!")
+        logger.info(f"Window found: {self.window_title} (HWND: {self.hwnd})")
+    
+    def resize_window(self):
+        self.ensure_window_ready()
+        self._apply_target_size()
 
     def get_window_rect(self):
         self._ensure_window_handle()
@@ -77,7 +96,7 @@ class WindowCapture:
         for attempt in range(1, retries + 1):
             try:
                 with self._capture_lock:
-                    self._ensure_window_handle()
+                    self.ensure_window_ready(resize_on_refresh=True)
 
                     _x, _y, width, height = self.get_window_rect()
 
@@ -109,8 +128,7 @@ class WindowCapture:
                         saveDC.SelectObject(saveBitMap)
 
                         print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-                        if print_result != 1:
-                            logger.debug("PrintWindow returned %s for hwnd %s", print_result, self.hwnd)
+                        self._ensure_print_window_succeeded(print_result, self.window_title, self.hwnd)
 
                         bmpstr = saveBitMap.GetBitmapBits(True)
                         expected_size = width * height * 4
@@ -164,6 +182,10 @@ class WindowCapture:
         raise RuntimeError(f"Capture failed for '{self.window_title}' without a reported exception")
     
     def is_window_active(self):
+        try:
+            self.ensure_window_ready()
+        except Exception:
+            return False
         return win32gui.IsWindow(self.hwnd) if self.hwnd else False
 
 
@@ -199,6 +221,11 @@ class ForbiddenAreaOverlay:
         self.thread = None
         self._destroy_overlay_window()
         logger.info("Forbidden area overlay stopped")
+
+    def update_target_hwnd(self, target_hwnd):
+        if target_hwnd and target_hwnd != self.target_hwnd:
+            self.target_hwnd = target_hwnd
+            logger.info("Forbidden area overlay rebound to hwnd %s", target_hwnd)
     
     def _create_overlay(self):
         try:
