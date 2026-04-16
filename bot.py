@@ -911,7 +911,7 @@ class EatventureBot:
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
         self.historical_learner.start()
-        if config.ShowForbiddenArea and self.overlay is None:
+        if config.SHOW_FORBIDDEN_AREA and self.overlay is None:
             from window_capture import ForbiddenAreaOverlay
 
             self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
