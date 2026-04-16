@@ -160,13 +160,6 @@ RED_ICON_REFINE_RADIUS = 20
 # This is how much the red-icon threshold is relaxed during that local re-centering scan.
 RED_ICON_REFINE_THRESHOLD_DROP = 0.020
 
-# This is how much easier the backup second-pass red-icon search becomes.
-RED_ICON_SECOND_PASS_THRESHOLD_DROP = 0.015
-
-# This is the list of backup size multipliers the bot tries when a red icon looks slightly scaled.
-RED_ICON_FALLBACK_SCALES = (0.94, 1.0, 1.06, 1.12)
-
-
 # =========================
 # Upgrade and generic color checks
 # =========================

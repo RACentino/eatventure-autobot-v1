@@ -61,15 +61,34 @@ class WindowCapture:
         width = rect[2] - rect[0]
         height = rect[3] - rect[1]
         return x, y, width, height
+
+    @staticmethod
+    def _ensure_print_window_succeeded(result, window_title, hwnd):
+        if result:
+            return
+        raise RuntimeError(f"PrintWindow failed for '{window_title}' (hwnd={hwnd})")
+
+    def ensure_window_ready(self, resize_on_refresh=False):
+        previous_hwnd = self.hwnd
+        if not self.hwnd or not win32gui.IsWindow(self.hwnd):
+            self.find_window()
+        if resize_on_refresh:
+            self.resize_window()
+        return previous_hwnd != self.hwnd
     
     def capture(self, max_y=None):
-        if not self.hwnd:
-            self.find_window()
-        
-        x, y, width, height = self.get_window_rect()
-        
-        if max_y is not None:
-            height = min(height, max_y)
+        retries = 2
+        retry_delay = 0.05
+        last_exc = None
+
+        with self._capture_lock:
+            for attempt in range(1, retries + 1):
+                try:
+                    self.ensure_window_ready()
+                    _, _, width, height = self.get_window_rect()
+
+                    if max_y is not None:
+                        height = min(height, max_y)
 
                     if width <= 0 or height <= 0:
                         raise RuntimeError(
@@ -130,20 +149,20 @@ class WindowCapture:
                                 win32gui.ReleaseDC(self.hwnd, hwndDC)
                             except Exception:
                                 pass
-            except Exception as exc:
-                last_exc = exc
-                self.hwnd = None
-                if attempt >= retries:
-                    break
-                logger.warning(
-                    "Capture attempt %s/%s failed for '%s': %s",
-                    attempt,
-                    retries,
-                    self.window_title,
-                    exc,
-                )
-                if retry_delay > 0:
-                    time.sleep(retry_delay)
+                except Exception as exc:
+                    last_exc = exc
+                    self.hwnd = None
+                    if attempt >= retries:
+                        break
+                    logger.warning(
+                        "Capture attempt %s/%s failed for '%s': %s",
+                        attempt,
+                        retries,
+                        self.window_title,
+                        exc,
+                    )
+                    if retry_delay > 0:
+                        time.sleep(retry_delay)
 
         if last_exc is not None:
             raise last_exc
