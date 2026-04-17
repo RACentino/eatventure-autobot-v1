@@ -127,6 +127,27 @@ class ImageMatcher:
         """
         metrics = self.analyze_red_region(image, x, y, size=size, show_mask=show_mask)
         return metrics["pixel_count"]
+
+    def find_red_pixel_candidates(self, image, min_pixels):
+        if image is None or image.size == 0:
+            return []
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        mask = self._build_red_mask(hsv)
+        num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+
+        candidates = []
+        minimum = max(1, int(min_pixels))
+        for label_index in range(1, num_labels):
+            area = int(stats[label_index, cv2.CC_STAT_AREA])
+            if area < minimum:
+                continue
+            center_x = int(round(float(centroids[label_index][0])))
+            center_y = int(round(float(centroids[label_index][1])))
+            candidates.append((center_x, center_y, area))
+
+        candidates.sort(key=lambda item: item[2], reverse=True)
+        return candidates
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)

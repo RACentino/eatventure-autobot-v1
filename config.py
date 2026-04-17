@@ -387,6 +387,24 @@ FORBIDDEN_ZONE_DOUBLE_CHECK_DELAY = 0.016
 # This is how many times the bot will look for the new-level button before abandoning the transition.
 LEVEL_TRANSITION_MAX_ATTEMPTS = 5
 
+# This turns the dedicated new-level interrupt system on.
+NEW_LEVEL_INTERRUPT_ENABLED = True
+
+# This is the minimum gap between one interrupt scan and the next.
+NEW_LEVEL_INTERRUPT_POLL_INTERVAL = 0.050
+
+# This is how many consecutive button detections are required before the bot trusts a button-based interrupt.
+NEW_LEVEL_INTERRUPT_BUTTON_CONFIRMATIONS = 1
+
+# This is how many consecutive red-icon detections are required before the bot trusts a red-icon-based interrupt.
+NEW_LEVEL_INTERRUPT_RED_ICON_CONFIRMATIONS = 2
+
+# This is the short pause between those confirmation checks.
+NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY = 0.040
+
+# This is the cooldown after an interrupt fires so the same event does not immediately fire again.
+NEW_LEVEL_INTERRUPT_COOLDOWN = 0.250
+
 # This is the pause after clicking the "new level" button in the manual acknowledgement path.
 NEW_LEVEL_BUTTON_DELAY = 0.105
 
@@ -407,6 +425,18 @@ NEW_LEVEL_RED_ICON_Y_MIN = 665
 
 # This is the bottom edge of the small screen area where the new-level red icon is expected.
 NEW_LEVEL_RED_ICON_Y_MAX = 680
+
+# This is the left edge of the small screen area where the new-level button is expected during interrupt polling.
+NEW_LEVEL_INTERRUPT_BUTTON_X_MIN = 0
+
+# This is the right edge of the small screen area where the new-level button is expected during interrupt polling.
+NEW_LEVEL_INTERRUPT_BUTTON_X_MAX = 85
+
+# This is the top edge of the small screen area where the new-level button is expected during interrupt polling.
+NEW_LEVEL_INTERRUPT_BUTTON_Y_MIN = 620
+
+# This is the bottom edge of the small screen area where the new-level button is expected during interrupt polling.
+NEW_LEVEL_INTERRUPT_BUTTON_Y_MAX = 720
 
 # This is the left edge of the small screen area where the stats red icon is expected.
 UPGRADE_RED_ICON_X_MIN = 280
@@ -655,6 +685,9 @@ OVERLAY_UPDATE_INTERVAL = 0.033
 
 # This is the minimum sleep the learner loop uses so it never spins too aggressively.
 LEARNING_LOOP_MIN_SLEEP = 0.033
+
+# This is how long a freshly captured screenshot stays reusable before the bot grabs a new one.
+CAPTURE_CACHE_TTL = 0.033
 
 # This is how long the bot waits after clicking unlock before checking whether it disappeared.
 UNLOCK_REGISTER_WAIT = 0.072

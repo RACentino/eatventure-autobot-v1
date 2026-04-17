@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import config
@@ -14,6 +15,12 @@ from telegram_notifier import TelegramNotifier
 from window_capture import WindowCapture
 
 logger = logging.getLogger(__name__)
+
+
+class NewLevelInterrupt(Exception):
+    def __init__(self, target_state):
+        super().__init__(target_state.name)
+        self.target_state = target_state
 
 
 class AdaptiveTuner:
@@ -554,6 +561,14 @@ class EatventureBot:
         self.red_icon_template_names = sorted(
             name for name in self.templates if name.lower().startswith("redicon")
         )
+        self._red_icon_template_specs = [
+            (name, *self.templates[name]) for name in self.red_icon_template_names
+        ]
+        self._red_icon_local_radius = max(
+            [max(template.shape[:2]) for _, template, _ in self._red_icon_template_specs] or [24]
+        )
+        self._capture_cache = {}
+        self._capture_cache_hwnd = self.window_capture.hwnd
         self.overlay = None
         self.register_states()
         self.running = False
@@ -576,11 +591,16 @@ class EatventureBot:
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
+        self._pending_new_level_interrupt_state = None
+        self._interrupt_resume_state = None
+        self._last_new_level_interrupt_at = 0.0
+        self._last_new_level_interrupt_poll_at = 0.0
         self._state_last_run_at = {}
         self.forbidden_zones = [
             (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
             for zone in config.FORBIDDEN_ZONES
         ]
+        self.mouse_controller.interrupt_callback = self.check_critical_interrupts
         logger.info("Bot initialized successfully")
 
     def register_states(self):
@@ -608,10 +628,13 @@ class EatventureBot:
         return required
 
     def _sync_window_bindings(self):
-        self.window_capture.ensure_window_ready()
+        hwnd_changed = self.window_capture.ensure_window_ready()
         self.mouse_controller.set_window_handle(self.window_capture.hwnd)
         if self.overlay is not None:
             self.overlay.update_target_hwnd(self.window_capture.hwnd)
+        if hwnd_changed or self._capture_cache_hwnd != self.window_capture.hwnd:
+            self._capture_cache_hwnd = self.window_capture.hwnd
+            self._capture_cache.clear()
 
     def _sleep(self, duration):
         if duration > 0:
@@ -641,10 +664,23 @@ class EatventureBot:
         self.vision_optimizer.reset()
         self.historical_learner.reset()
         self.successful_red_icon_positions = []
+        self._capture_cache.clear()
 
     def _capture(self, max_y=None):
         self._sync_window_bindings()
-        return self.window_capture.capture(max_y=max_y)
+        cache_ttl = max(0.0, float(config.CAPTURE_CACHE_TTL))
+        cache_key = int(max_y) if max_y is not None else None
+        now = time.monotonic()
+        if cache_ttl > 0:
+            cached = self._capture_cache.get(cache_key)
+            if cached is not None:
+                cached_at, image = cached
+                if (now - cached_at) <= cache_ttl:
+                    return image
+        image = self.window_capture.capture(max_y=max_y)
+        if cache_ttl > 0:
+            self._capture_cache[cache_key] = (now, image)
+        return image
 
     def _click_idle(self):
         return self.mouse_controller.click(
@@ -680,7 +716,27 @@ class EatventureBot:
             template_name=name,
         )
 
-    def _detect_new_level_button(self, screenshot):
+    @staticmethod
+    def _crop_region(screenshot, x_min, x_max, y_min, y_max):
+        height, width = screenshot.shape[:2]
+        left = max(0, int(x_min))
+        top = max(0, int(y_min))
+        right = min(width, int(x_max))
+        bottom = min(height, int(y_max))
+        if right <= left or bottom <= top:
+            return screenshot[:0, :0], left, top
+        return screenshot[top:bottom, left:right], left, top
+
+    def _find_template_in_region(self, name, screenshot, threshold, x_min, x_max, y_min, y_max):
+        roi, offset_x, offset_y = self._crop_region(screenshot, x_min, x_max, y_min, y_max)
+        if roi.size == 0:
+            return False, 0.0, 0, 0
+        found, confidence, x, y = self._find_template(name, roi, threshold)
+        if not found:
+            return False, confidence, 0, 0
+        return True, confidence, x + offset_x, y + offset_y
+
+    def _detect_new_level_button(self, screenshot, update_optimizer=True):
         found, confidence, x, y = self._find_template(
             "newLevel",
             screenshot,
@@ -688,13 +744,66 @@ class EatventureBot:
             max_y=config.MAX_SEARCH_Y,
         )
         if found:
-            self.vision_optimizer.update_new_level_confidence(confidence)
+            if update_optimizer:
+                self.vision_optimizer.update_new_level_confidence(confidence)
             return found, confidence, x, y
-        self.vision_optimizer.update_new_level_miss()
+        if update_optimizer:
+            self.vision_optimizer.update_new_level_miss()
         return False, 0.0, 0, 0
 
-    def _detect_new_level_red_icon(self, screenshot):
-        icons = self._detect_red_icons(screenshot, max_y=config.EXTENDED_SEARCH_Y)
+    def _detect_new_level_button_interrupt(self, screenshot, update_optimizer=False):
+        found, confidence, x, y = self._find_template_in_region(
+            "newLevel",
+            screenshot,
+            self.vision_optimizer.new_level_threshold if self.vision_optimizer.enabled else config.NEW_LEVEL_THRESHOLD,
+            config.NEW_LEVEL_INTERRUPT_BUTTON_X_MIN,
+            config.NEW_LEVEL_INTERRUPT_BUTTON_X_MAX,
+            config.NEW_LEVEL_INTERRUPT_BUTTON_Y_MIN,
+            config.NEW_LEVEL_INTERRUPT_BUTTON_Y_MAX,
+        )
+        if found:
+            if update_optimizer:
+                self.vision_optimizer.update_new_level_confidence(confidence)
+            return found, confidence, x, y
+        if update_optimizer:
+            self.vision_optimizer.update_new_level_miss()
+        return False, 0.0, 0, 0
+
+    def _detect_red_icons_in_region(
+        self,
+        screenshot,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        threshold_override=None,
+        record_optimizer=False,
+    ):
+        roi, offset_x, offset_y = self._crop_region(screenshot, x_min, x_max, y_min, y_max)
+        if roi.size == 0:
+            return []
+        icons = self._detect_red_icons(
+            roi,
+            threshold_override=threshold_override,
+            record_optimizer=record_optimizer,
+        )
+        return [(confidence, x + offset_x, y + offset_y) for confidence, x, y in icons]
+
+    def _detect_new_level_red_icon(self, screenshot, update_optimizer=True):
+        threshold = (
+            self.vision_optimizer.new_level_red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_RED_ICON_THRESHOLD
+        )
+        icons = self._detect_red_icons_in_region(
+            screenshot,
+            config.NEW_LEVEL_RED_ICON_X_MIN,
+            config.NEW_LEVEL_RED_ICON_X_MAX,
+            config.NEW_LEVEL_RED_ICON_Y_MIN,
+            config.NEW_LEVEL_RED_ICON_Y_MAX,
+            threshold_override=threshold,
+            record_optimizer=False,
+        )
         best = None
         for confidence, x, y in icons:
             if (
@@ -704,9 +813,11 @@ class EatventureBot:
                 if best is None or confidence > best[1]:
                     best = ("new level red icon", confidence, x, y)
         if best is not None:
-            self.vision_optimizer.update_new_level_red_icon_confidence(best[1])
+            if update_optimizer:
+                self.vision_optimizer.update_new_level_red_icon_confidence(best[1])
             return best
-        self.vision_optimizer.update_new_level_red_icon_miss()
+        if update_optimizer:
+            self.vision_optimizer.update_new_level_red_icon_miss()
         return None
 
     def _cluster_detections(self, detections, distance=10):
@@ -723,33 +834,58 @@ class EatventureBot:
             buckets[key].append((template_name, confidence))
         return buckets
 
-    def _detect_red_icons(self, screenshot, max_y=None):
+    def _detect_red_icons(self, screenshot, max_y=None, threshold_override=None, record_optimizer=True):
         if max_y is not None:
             screenshot = screenshot[:max_y, :]
         detections = []
         confidences = []
-        threshold = self.vision_optimizer.red_icon_threshold if self.vision_optimizer.enabled else config.RED_ICON_THRESHOLD
-        for template_name in self.red_icon_template_names:
-            template, mask = self.templates[template_name]
-            matches = self.image_matcher.find_all_templates(
-                screenshot,
-                template,
-                mask=mask,
-                threshold=threshold,
-                min_distance=80,
-                template_name=template_name,
+        threshold = (
+            float(threshold_override)
+            if threshold_override is not None
+            else (
+                self.vision_optimizer.red_icon_threshold
+                if self.vision_optimizer.enabled
+                else config.RED_ICON_THRESHOLD
             )
-            for confidence, x, y in matches:
-                red_pixels = self.image_matcher.count_red_pixels(screenshot, x, y)
-                if red_pixels < config.RED_ICON_PIXEL_THRESHOLD:
+        )
+        candidates = self.image_matcher.find_red_pixel_candidates(
+            screenshot,
+            config.RED_ICON_PIXEL_THRESHOLD,
+        )
+        for center_x, center_y, red_pixels in candidates:
+            best = None
+            radius = self._red_icon_local_radius
+            left = max(0, int(center_x - radius))
+            top = max(0, int(center_y - radius))
+            right = min(screenshot.shape[1], int(center_x + radius))
+            bottom = min(screenshot.shape[0], int(center_y + radius))
+            roi = screenshot[top:bottom, left:right]
+            if roi.size == 0:
+                continue
+            for template_name, template, mask in self._red_icon_template_specs:
+                found, confidence, x, y = self.image_matcher.find_template(
+                    roi,
+                    template,
+                    mask=mask,
+                    threshold=threshold,
+                    template_name=template_name,
+                )
+                if not found:
                     continue
-                detections.append((confidence, x, y, template_name))
-                confidences.append(confidence)
+                absolute_x = x + left
+                absolute_y = y + top
+                if best is None or confidence > best[0]:
+                    best = (confidence, absolute_x, absolute_y, template_name)
+            if best is None:
+                continue
+            detections.append(best)
+            confidences.append(best[0])
 
-        if confidences:
-            self.vision_optimizer.update_red_icon_scan(confidences)
-        else:
-            self.vision_optimizer.update_red_icon_scan([])
+        if record_optimizer:
+            if confidences:
+                self.vision_optimizer.update_red_icon_scan(confidences)
+            else:
+                self.vision_optimizer.update_red_icon_scan([])
 
         clustered = self._cluster_detections(detections)
         results = []
@@ -760,6 +896,92 @@ class EatventureBot:
             results.append((max(confidence for _, confidence in matches), x, y))
         results.sort(key=lambda item: item[0], reverse=True)
         return results
+
+    def _new_level_interrupt_states(self):
+        return {State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL, State.WAIT_FOR_UNLOCK}
+
+    def _arm_new_level_interrupt(self, target_state):
+        if self._pending_new_level_interrupt_state is None:
+            self._interrupt_resume_state = self.state_machine.get_state()
+        self._pending_new_level_interrupt_state = target_state
+
+    def _dispatch_new_level_interrupt(self):
+        if self._pending_new_level_interrupt_state is None:
+            return False
+        target_state = self._pending_new_level_interrupt_state
+        self._pending_new_level_interrupt_state = None
+        self._last_new_level_interrupt_at = time.monotonic()
+        self.state_machine.transition(target_state)
+        return True
+
+    def _consume_interrupt_resume_state(self):
+        resume_state = self._interrupt_resume_state or State.FIND_RED_ICONS
+        self._interrupt_resume_state = None
+        return resume_state
+
+    def _confirm_new_level_button_interrupt(self, initial_result):
+        confirmations = max(1, int(config.NEW_LEVEL_INTERRUPT_BUTTON_CONFIRMATIONS))
+        best = initial_result
+        for _ in range(confirmations - 1):
+            if config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY > 0:
+                time.sleep(config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY)
+            screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
+            found, confidence, x, y = self._detect_new_level_button_interrupt(screenshot, update_optimizer=False)
+            if not found:
+                return None
+            best = (found, confidence, x, y)
+        self.vision_optimizer.update_new_level_confidence(best[1])
+        return best
+
+    def _confirm_new_level_red_icon_interrupt(self, initial_result):
+        confirmations = max(1, int(config.NEW_LEVEL_INTERRUPT_RED_ICON_CONFIRMATIONS))
+        best = initial_result
+        for _ in range(confirmations - 1):
+            if config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY > 0:
+                time.sleep(config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY)
+            screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+            confirmed = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
+            if confirmed is None:
+                return None
+            if confirmed[1] > best[1]:
+                best = confirmed
+        self.vision_optimizer.update_new_level_red_icon_confidence(best[1])
+        return best
+
+    def check_critical_interrupts(self, raise_exception=True):
+        if not config.NEW_LEVEL_INTERRUPT_ENABLED:
+            return False
+        if self._pending_new_level_interrupt_state is not None:
+            if raise_exception:
+                raise NewLevelInterrupt(self._pending_new_level_interrupt_state)
+            return True
+        current_state = self.state_machine.get_state()
+        if current_state in self._new_level_interrupt_states():
+            return False
+        now = time.monotonic()
+        if (now - self._last_new_level_interrupt_at) < float(config.NEW_LEVEL_INTERRUPT_COOLDOWN):
+            return False
+        if (now - self._last_new_level_interrupt_poll_at) < float(config.NEW_LEVEL_INTERRUPT_POLL_INTERVAL):
+            return False
+        self._last_new_level_interrupt_poll_at = now
+
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        found_level, confidence, x, y = self._detect_new_level_button_interrupt(screenshot, update_optimizer=False)
+        if found_level:
+            if self._confirm_new_level_button_interrupt((found_level, confidence, x, y)) is not None:
+                self._arm_new_level_interrupt(State.TRANSITION_LEVEL)
+                if raise_exception:
+                    raise NewLevelInterrupt(State.TRANSITION_LEVEL)
+                return True
+            return False
+
+        new_level_icon = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
+        if new_level_icon is not None and self._confirm_new_level_red_icon_interrupt(new_level_icon) is not None:
+            self._arm_new_level_interrupt(State.CHECK_NEW_LEVEL)
+            if raise_exception:
+                raise NewLevelInterrupt(State.CHECK_NEW_LEVEL)
+            return True
+        return False
 
     def _filter_safe_red_icons(self, icons):
         safe = []
@@ -788,30 +1010,27 @@ class EatventureBot:
             if self.vision_optimizer.enabled
             else config.STATS_RED_ICON_THRESHOLD
         )
-        for template_name in self.red_icon_template_names:
-            template, mask = self.templates[template_name]
-            icons = self.image_matcher.find_all_templates(
-                screenshot,
-                template,
-                mask=mask,
-                threshold=threshold,
-                min_distance=80,
-                template_name=f"{template_name}-stats",
-            )
-            for confidence, x, y in icons:
-                if (
-                    config.UPGRADE_RED_ICON_X_MIN <= x <= config.UPGRADE_RED_ICON_X_MAX
-                    and config.UPGRADE_RED_ICON_Y_MIN <= y <= config.UPGRADE_RED_ICON_Y_MAX
-                ):
-                    return True, confidence
+        icons = self._detect_red_icons_in_region(
+            screenshot,
+            config.UPGRADE_RED_ICON_X_MIN,
+            config.UPGRADE_RED_ICON_X_MAX,
+            config.UPGRADE_RED_ICON_Y_MIN,
+            config.UPGRADE_RED_ICON_Y_MAX,
+            threshold_override=threshold,
+            record_optimizer=False,
+        )
+        if icons:
+            confidence, _, _ = icons[0]
+            return True, confidence
         return False, 0.0
 
     def _find_boxes(self, screenshot):
         threshold = self.vision_optimizer.box_threshold if self.vision_optimizer.enabled else config.BOX_THRESHOLD
-        found = []
-        for name in [f"box{i}" for i in range(1, 6)]:
-            if name not in self.templates:
-                continue
+        box_names = [f"box{i}" for i in range(1, 6) if f"box{i}" in self.templates]
+        if not box_names:
+            return []
+
+        def find_box(name):
             template, mask = self.templates[name]
             matched, confidence, x, y = self.image_matcher.find_template(
                 screenshot,
@@ -821,7 +1040,15 @@ class EatventureBot:
                 template_name=name,
             )
             if matched:
-                found.append((name, confidence, x, y))
+                return name, confidence, x, y
+            return None
+
+        found = []
+        worker_count = min(len(box_names), 5)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for result in executor.map(find_box, box_names):
+                if result is not None:
+                    found.append(result)
         return found
 
     def _find_upgrade_station(self, screenshot, threshold):
@@ -929,8 +1156,18 @@ class EatventureBot:
     def step(self):
         self._sync_window_bindings()
         self._apply_tuning()
+        if self._dispatch_new_level_interrupt():
+            return
+        if self.check_critical_interrupts(raise_exception=False):
+            self._dispatch_new_level_interrupt()
+            return
         self._enforce_state_min_interval()
-        self.state_machine.update()
+        try:
+            self.state_machine.update()
+        except NewLevelInterrupt:
+            if self._dispatch_new_level_interrupt():
+                return
+            raise
 
     def run(self):
         self.start()
@@ -952,17 +1189,6 @@ class EatventureBot:
             return State.SCROLL
 
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        found_level, confidence, x, y = self._detect_new_level_button(screenshot)
-        if found_level:
-            logger.info("New level button found at (%s, %s)", x, y)
-            return State.TRANSITION_LEVEL
-
-        new_level_icon = self._detect_new_level_red_icon(screenshot)
-        if new_level_icon is not None:
-            _, icon_confidence, icon_x, icon_y = new_level_icon
-            logger.info("New level red icon found at (%s, %s) [%.3f]", icon_x, icon_y, icon_confidence)
-            return State.CHECK_NEW_LEVEL
-
         icons = self._detect_red_icons(screenshot, max_y=config.MAX_SEARCH_Y)
         safe_icons = self._filter_safe_red_icons(icons)
         if safe_icons:
@@ -1096,11 +1322,6 @@ class EatventureBot:
     def handle_upgrade_stats(self, current_state):
         self._click_idle()
         screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        found_level, confidence, x, y = self._detect_new_level_button(screenshot)
-        if found_level:
-            logger.info("New level detected during stats upgrade at (%s, %s)", x, y)
-            return State.TRANSITION_LEVEL
-
         has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(screenshot)
         if not has_stats_icon:
             self.vision_optimizer.update_stats_upgrade_miss()
@@ -1132,11 +1353,6 @@ class EatventureBot:
     def handle_open_boxes(self, current_state):
         self._click_idle()
         screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found_level, confidence, x, y = self._detect_new_level_button(screenshot)
-        if found_level:
-            logger.info("New level detected during box handling at (%s, %s)", x, y)
-            return State.TRANSITION_LEVEL
-
         boxes = self._find_boxes(screenshot)
         if boxes:
             best_confidence = 0.0
@@ -1182,23 +1398,24 @@ class EatventureBot:
 
     def handle_scroll(self, current_state):
         self._click_idle()
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found_level, confidence, x, y = self._detect_new_level_button(screenshot)
-        if found_level:
-            logger.info("New level detected before scroll at (%s, %s)", x, y)
-            return State.TRANSITION_LEVEL
-
         self._perform_oscillating_scroll_step()
         return State.FIND_RED_ICONS
 
     def handle_check_new_level(self, current_state):
         self._click_idle()
+        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
+        new_level_icon = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
+        if new_level_icon is None:
+            logger.info("New-level interrupt was not confirmed; resuming previous state")
+            return self._consume_interrupt_resume_state()
+        self.vision_optimizer.update_new_level_red_icon_confidence(new_level_icon[1])
         logger.info("Handling new-level acknowledgement path")
         self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
         self._sleep(config.NEW_LEVEL_BUTTON_DELAY)
         self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
         self._sleep(config.STATE_DELAY)
         self._reset_search_cycle()
+        self._interrupt_resume_state = None
         return State.FIND_RED_ICONS
 
     def handle_transition_level(self, current_state):
@@ -1216,13 +1433,14 @@ class EatventureBot:
                     self.total_levels_completed,
                     elapsed,
                 )
+                self._interrupt_resume_state = None
                 return State.WAIT_FOR_UNLOCK
             if attempt < int(config.LEVEL_TRANSITION_MAX_ATTEMPTS) - 1:
                 self._sleep(config.TRANSITION_RETRY_DELAY)
 
         logger.warning("Transition button not found after max attempts")
         self._reset_search_cycle()
-        return State.FIND_RED_ICONS
+        return self._consume_interrupt_resume_state()
 
     def handle_wait_for_unlock(self, current_state):
         self._click_idle()
