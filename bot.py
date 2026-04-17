@@ -4,23 +4,17 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 
 import config
-from image_matcher import AssetScanner, ImageMatcher
+from image_matcher import ImageMatcher
 from mouse_controller import MouseController
 from state_machine import State, StateMachine
 from telegram_notifier import TelegramNotifier
-from window_capture import WindowCapture
+from window_capture import ForbiddenAreaOverlay, WindowCapture
 
 logger = logging.getLogger(__name__)
-
-
-class NewLevelInterrupt(Exception):
-    def __init__(self, target_state):
-        super().__init__(target_state.name)
-        self.target_state = target_state
 
 
 class AdaptiveTuner:
@@ -201,27 +195,22 @@ class VisionOptimizer:
         setattr(self, f"{name}_threshold", self._ema(current, target, self.alpha_max))
         self._persist()
 
-    def update_red_icon_confidences(self, confidences):
-        if not self.enabled or not confidences:
-            return
-        average = sum(confidences) / len(confidences)
-        target = max(
-            config.AI_RED_ICON_THRESHOLD_MIN,
-            min(average - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
-        )
-        self.red_icon_threshold = self._ema(
-            self.red_icon_threshold,
-            target,
-            self._adaptive_alpha(average),
-        )
-        self._persist()
-
     def update_red_icon_scan(self, confidences):
         if not self.enabled:
             return
         if confidences:
             self._miss_counts["red_icon"] = 0
-            self.update_red_icon_confidences(confidences)
+            average = sum(confidences) / len(confidences)
+            target = max(
+                config.AI_RED_ICON_THRESHOLD_MIN,
+                min(average - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
+            )
+            self.red_icon_threshold = self._ema(
+                self.red_icon_threshold,
+                target,
+                self._adaptive_alpha(average),
+            )
+            self._persist()
             return
         self._update_miss(
             "red_icon",
@@ -330,9 +319,10 @@ class VisionOptimizer:
             ),
             "box_threshold": (config.AI_BOX_THRESHOLD_MIN, config.AI_BOX_THRESHOLD_MAX),
         }
-        for key, (minimum, maximum) in clamps.items():
+        for key, bounds in clamps.items():
             if key not in state:
                 continue
+            minimum, maximum = bounds
             value = float(state[key])
             setattr(self, key, max(minimum, min(maximum, value)))
 
@@ -484,6 +474,7 @@ class HistoricalLearner:
             behavior = record["behavior"]
             for key in profile:
                 profile[key] += float(behavior.get(key, 0.0))
+
         count = float(len(top))
         for key in profile:
             profile[key] /= count
@@ -534,13 +525,13 @@ class HistoricalLearner:
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot")
+
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
         self.mouse_controller = MouseController(
             self.window_capture.hwnd,
             config.CLICK_DELAY,
             config.MOUSE_MOVE_DELAY,
-            hwnd_provider=lambda: self.window_capture.hwnd,
         )
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
         self.telegram = TelegramNotifier(
@@ -548,6 +539,7 @@ class EatventureBot:
             config.TELEGRAM_CHAT_ID,
             config.TELEGRAM_ENABLED,
         )
+
         self.tuner = AdaptiveTuner()
         self.vision_persistence = VisionPersistence(config.AI_VISION_STATE_FILE, config.AI_VISION_SAVE_INTERVAL)
         self.vision_optimizer = VisionOptimizer(self.vision_persistence)
@@ -557,51 +549,84 @@ class EatventureBot:
             config.AI_LEARNING_SAVE_INTERVAL,
         )
         self.historical_learner = HistoricalLearner(self, self.learning_persistence)
-        self.templates = self.load_templates()
-        self.red_icon_template_names = sorted(
-            name for name in self.templates if name.lower().startswith("redicon")
-        )
-        self._red_icon_template_specs = [
-            (name, *self.templates[name]) for name in self.red_icon_template_names
-        ]
-        self._red_icon_local_radius = max(
-            [max(template.shape[:2]) for _, template, _ in self._red_icon_template_specs] or [24]
-        )
-        self._capture_cache = {}
-        self._capture_cache_hwnd = self.window_capture.hwnd
-        self.overlay = None
+
         self.register_states()
+        self.templates = self.load_templates()
         self.running = False
+        self.red_icon_cycle_count = 0
         self.red_icons = []
         self.current_red_icon_index = 0
-        self.red_icon_cycle_count = 0
         self.wait_for_unlock_attempts = 0
         self.max_wait_for_unlock_attempts = 4
-        self.upgrade_station_pos = None
-        self.successful_red_icon_positions = []
-        self.upgrade_found_in_cycle = False
-        self.consecutive_failed_cycles = 0
+        self.scroll_direction = "down"
+        self.scroll_count = 0
+        self.max_scroll_count = 5
+        self.work_done = False
         self.cycle_counter = 0
         self.upgrade_station_counter = 0
         self.red_icon_processed_count = 0
+        self.successful_red_icon_positions = []
+        self.upgrade_found_in_cycle = False
+        self.consecutive_failed_cycles = 0
         self.total_levels_completed = 0
         self.current_level_start_time = None
-        self.work_done = False
-        self._pending_fallback_scroll = False
+        self.upgrade_station_pos = None
+        self.overlay = None
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
-        self._pending_new_level_interrupt_state = None
-        self._interrupt_resume_state = None
-        self._last_new_level_interrupt_at = 0.0
-        self._last_new_level_interrupt_poll_at = 0.0
-        self._state_last_run_at = {}
         self.forbidden_zones = [
-            (zone["x_min"], zone["x_max"], zone["y_min"], zone["y_max"])
-            for zone in config.FORBIDDEN_ZONES
+            (
+                config.FORBIDDEN_ZONE_1_X_MIN,
+                config.FORBIDDEN_ZONE_1_X_MAX,
+                config.FORBIDDEN_ZONE_1_Y_MIN,
+                config.FORBIDDEN_ZONE_1_Y_MAX,
+            ),
+            (
+                config.FORBIDDEN_ZONE_2_X_MIN,
+                config.FORBIDDEN_ZONE_2_X_MAX,
+                config.FORBIDDEN_ZONE_2_Y_MIN,
+                config.FORBIDDEN_ZONE_2_Y_MAX,
+            ),
+            (
+                config.FORBIDDEN_ZONE_3_X_MIN,
+                config.FORBIDDEN_ZONE_3_X_MAX,
+                config.FORBIDDEN_ZONE_3_Y_MIN,
+                config.FORBIDDEN_ZONE_3_Y_MAX,
+            ),
+            (
+                config.FORBIDDEN_ZONE_4_X_MIN,
+                config.FORBIDDEN_ZONE_4_X_MAX,
+                config.FORBIDDEN_ZONE_4_Y_MIN,
+                config.FORBIDDEN_ZONE_4_Y_MAX,
+            ),
+            (
+                config.FORBIDDEN_ZONE_5_X_MIN,
+                config.FORBIDDEN_ZONE_5_X_MAX,
+                config.FORBIDDEN_ZONE_5_Y_MIN,
+                config.FORBIDDEN_ZONE_5_Y_MAX,
+            ),
         ]
-        self.mouse_controller.interrupt_callback = self.check_critical_interrupts
+
         logger.info("Bot initialized successfully")
+
+    def load_templates(self):
+        templates = {}
+        templates_path = Path(config.ASSETS_DIR)
+        if not templates_path.exists():
+            logger.error("Assets directory not found: %s", templates_path)
+            return templates
+
+        for template_file in templates_path.glob("*.png"):
+            try:
+                template_name = template_file.stem
+                template_img = self.image_matcher.load_template(template_file)
+                templates[template_name] = template_img
+                logger.info("Loaded template: %s", template_name)
+            except Exception as exc:
+                logger.error("Failed to load template %s: %s", template_file, exc)
+
+        return templates
 
     def register_states(self):
         self.state_machine.register_handler(State.FIND_RED_ICONS, self.handle_find_red_icons)
@@ -615,26 +640,6 @@ class EatventureBot:
         self.state_machine.register_handler(State.CHECK_NEW_LEVEL, self.handle_check_new_level)
         self.state_machine.register_handler(State.TRANSITION_LEVEL, self.handle_transition_level)
         self.state_machine.register_handler(State.WAIT_FOR_UNLOCK, self.handle_wait_for_unlock)
-
-    def load_templates(self):
-        scanner = AssetScanner(self.image_matcher)
-        return scanner.scan(config.ASSETS_DIR, required_templates=self._required_template_names())
-
-    def _required_template_names(self):
-        required = {"newLevel", "unlock", "upgradeStation"}
-        required.update(f"box{i}" for i in range(1, 6))
-        required.update({f"RedIcon{i}" for i in range(2, 16)})
-        required.update({"RedIcon", "RedIconNoBG"})
-        return required
-
-    def _sync_window_bindings(self):
-        hwnd_changed = self.window_capture.ensure_window_ready()
-        self.mouse_controller.set_window_handle(self.window_capture.hwnd)
-        if self.overlay is not None:
-            self.overlay.update_target_hwnd(self.window_capture.hwnd)
-        if hwnd_changed or self._capture_cache_hwnd != self.window_capture.hwnd:
-            self._capture_cache_hwnd = self.window_capture.hwnd
-            self._capture_cache.clear()
 
     def _sleep(self, duration):
         if duration > 0:
@@ -664,415 +669,43 @@ class EatventureBot:
         self.vision_optimizer.reset()
         self.historical_learner.reset()
         self.successful_red_icon_positions = []
-        self._capture_cache.clear()
+        self.current_level_start_time = datetime.now() if self.running else None
+        self._apply_tuning()
 
-    def _capture(self, max_y=None):
-        self._sync_window_bindings()
-        cache_ttl = max(0.0, float(config.CAPTURE_CACHE_TTL))
-        cache_key = int(max_y) if max_y is not None else None
-        now = time.monotonic()
-        if cache_ttl > 0:
-            cached = self._capture_cache.get(cache_key)
-            if cached is not None:
-                cached_at, image = cached
-                if (now - cached_at) <= cache_ttl:
-                    return image
-        image = self.window_capture.capture(max_y=max_y)
-        if cache_ttl > 0:
-            self._capture_cache[cache_key] = (now, image)
-        return image
+    def _red_icon_template_names(self):
+        return [
+            "RedIcon",
+            "RedIcon2",
+            "RedIcon3",
+            "RedIcon4",
+            "RedIcon5",
+            "RedIcon6",
+            "RedIcon7",
+            "RedIcon8",
+            "RedIcon9",
+            "RedIcon10",
+            "RedIcon11",
+            "RedIconNoBG",
+        ]
 
-    def _click_idle(self):
-        return self.mouse_controller.click(
-            config.IDLE_CLICK_POS[0],
-            config.IDLE_CLICK_POS[1],
-            relative=True,
-        )
+    def _record_level_completion(self):
+        self.total_levels_completed += 1
+        elapsed = 0.0
+        if self.current_level_start_time is not None:
+            elapsed = (datetime.now() - self.current_level_start_time).total_seconds()
+        self.current_level_start_time = datetime.now()
+        self._reset_search_cycle()
+        self.telegram.notify_new_level(self.total_levels_completed, elapsed)
+        self.historical_learner.record_completion(elapsed, "transition")
+        return elapsed
 
-    def _enforce_state_min_interval(self):
-        state_name = self.state_machine.get_state_name()
-        minimum = float(config.STATE_MIN_INTERVALS.get(state_name, config.STATE_MIN_INTERVAL_DEFAULT))
-        if minimum <= 0:
-            self._state_last_run_at[state_name] = time.monotonic()
-            return
-        now = time.monotonic()
-        last = self._state_last_run_at.get(state_name, 0.0)
-        wait_time = (last + minimum) - now
-        if wait_time > 0:
-            self._sleep(wait_time)
-        self._state_last_run_at[state_name] = time.monotonic()
-
-    def _find_template(self, name, screenshot, threshold, max_y=None):
-        if name not in self.templates:
-            return False, 0.0, 0, 0
-        if max_y is not None:
-            screenshot = screenshot[:max_y, :]
-        template, mask = self.templates[name]
-        return self.image_matcher.find_template(
-            screenshot,
-            template,
-            mask=mask,
-            threshold=threshold,
-            template_name=name,
-        )
-
-    @staticmethod
-    def _crop_region(screenshot, x_min, x_max, y_min, y_max):
-        height, width = screenshot.shape[:2]
-        left = max(0, int(x_min))
-        top = max(0, int(y_min))
-        right = min(width, int(x_max))
-        bottom = min(height, int(y_max))
-        if right <= left or bottom <= top:
-            return screenshot[:0, :0], left, top
-        return screenshot[top:bottom, left:right], left, top
-
-    def _find_template_in_region(self, name, screenshot, threshold, x_min, x_max, y_min, y_max):
-        roi, offset_x, offset_y = self._crop_region(screenshot, x_min, x_max, y_min, y_max)
-        if roi.size == 0:
-            return False, 0.0, 0, 0
-        found, confidence, x, y = self._find_template(name, roi, threshold)
-        if not found:
-            return False, confidence, 0, 0
-        return True, confidence, x + offset_x, y + offset_y
-
-    def _detect_new_level_button(self, screenshot, update_optimizer=True):
-        found, confidence, x, y = self._find_template(
-            "newLevel",
-            screenshot,
-            self.vision_optimizer.new_level_threshold if self.vision_optimizer.enabled else config.NEW_LEVEL_THRESHOLD,
-            max_y=config.MAX_SEARCH_Y,
-        )
-        if found:
-            if update_optimizer:
-                self.vision_optimizer.update_new_level_confidence(confidence)
-            return found, confidence, x, y
-        if update_optimizer:
-            self.vision_optimizer.update_new_level_miss()
-        return False, 0.0, 0, 0
-
-    def _detect_new_level_button_interrupt(self, screenshot, update_optimizer=False):
-        found, confidence, x, y = self._find_template_in_region(
-            "newLevel",
-            screenshot,
-            self.vision_optimizer.new_level_threshold if self.vision_optimizer.enabled else config.NEW_LEVEL_THRESHOLD,
-            config.NEW_LEVEL_INTERRUPT_BUTTON_X_MIN,
-            config.NEW_LEVEL_INTERRUPT_BUTTON_X_MAX,
-            config.NEW_LEVEL_INTERRUPT_BUTTON_Y_MIN,
-            config.NEW_LEVEL_INTERRUPT_BUTTON_Y_MAX,
-        )
-        if found:
-            if update_optimizer:
-                self.vision_optimizer.update_new_level_confidence(confidence)
-            return found, confidence, x, y
-        if update_optimizer:
-            self.vision_optimizer.update_new_level_miss()
-        return False, 0.0, 0, 0
-
-    def _detect_red_icons_in_region(
-        self,
-        screenshot,
-        x_min,
-        x_max,
-        y_min,
-        y_max,
-        threshold_override=None,
-        record_optimizer=False,
-    ):
-        roi, offset_x, offset_y = self._crop_region(screenshot, x_min, x_max, y_min, y_max)
-        if roi.size == 0:
-            return []
-        icons = self._detect_red_icons(
-            roi,
-            threshold_override=threshold_override,
-            record_optimizer=record_optimizer,
-        )
-        return [(confidence, x + offset_x, y + offset_y) for confidence, x, y in icons]
-
-    def _detect_new_level_red_icon(self, screenshot, update_optimizer=True):
-        threshold = (
-            self.vision_optimizer.new_level_red_icon_threshold
-            if self.vision_optimizer.enabled
-            else config.NEW_LEVEL_RED_ICON_THRESHOLD
-        )
-        icons = self._detect_red_icons_in_region(
-            screenshot,
-            config.NEW_LEVEL_RED_ICON_X_MIN,
-            config.NEW_LEVEL_RED_ICON_X_MAX,
-            config.NEW_LEVEL_RED_ICON_Y_MIN,
-            config.NEW_LEVEL_RED_ICON_Y_MAX,
-            threshold_override=threshold,
-            record_optimizer=False,
-        )
-        best = None
-        for confidence, x, y in icons:
-            if (
-                config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX
-                and config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX
-            ):
-                if best is None or confidence > best[1]:
-                    best = ("new level red icon", confidence, x, y)
-        if best is not None:
-            if update_optimizer:
-                self.vision_optimizer.update_new_level_red_icon_confidence(best[1])
-            return best
-        if update_optimizer:
-            self.vision_optimizer.update_new_level_red_icon_miss()
-        return None
-
-    def _cluster_detections(self, detections, distance=10):
-        buckets = {}
-        for confidence, x, y, template_name in detections:
-            key = None
-            for existing in list(buckets.keys()):
-                if abs(existing[0] - x) < distance and abs(existing[1] - y) < distance:
-                    key = existing
-                    break
-            if key is None:
-                key = (x, y)
-                buckets[key] = []
-            buckets[key].append((template_name, confidence))
-        return buckets
-
-    def _detect_red_icons(self, screenshot, max_y=None, threshold_override=None, record_optimizer=True):
-        if max_y is not None:
-            screenshot = screenshot[:max_y, :]
-        detections = []
-        confidences = []
-        threshold = (
-            float(threshold_override)
-            if threshold_override is not None
-            else (
-                self.vision_optimizer.red_icon_threshold
-                if self.vision_optimizer.enabled
-                else config.RED_ICON_THRESHOLD
-            )
-        )
-        candidates = self.image_matcher.find_red_pixel_candidates(
-            screenshot,
-            config.RED_ICON_PIXEL_THRESHOLD,
-        )
-        for center_x, center_y, red_pixels in candidates:
-            best = None
-            radius = self._red_icon_local_radius
-            left = max(0, int(center_x - radius))
-            top = max(0, int(center_y - radius))
-            right = min(screenshot.shape[1], int(center_x + radius))
-            bottom = min(screenshot.shape[0], int(center_y + radius))
-            roi = screenshot[top:bottom, left:right]
-            if roi.size == 0:
-                continue
-            for template_name, template, mask in self._red_icon_template_specs:
-                found, confidence, x, y = self.image_matcher.find_template(
-                    roi,
-                    template,
-                    mask=mask,
-                    threshold=threshold,
-                    template_name=template_name,
-                )
-                if not found:
-                    continue
-                absolute_x = x + left
-                absolute_y = y + top
-                if best is None or confidence > best[0]:
-                    best = (confidence, absolute_x, absolute_y, template_name)
-            if best is None:
-                continue
-            detections.append(best)
-            confidences.append(best[0])
-
-        if record_optimizer:
-            if confidences:
-                self.vision_optimizer.update_red_icon_scan(confidences)
-            else:
-                self.vision_optimizer.update_red_icon_scan([])
-
-        clustered = self._cluster_detections(detections)
-        results = []
-        minimum_matches = max(1, int(config.RED_ICON_MIN_MATCHES))
-        for (x, y), matches in clustered.items():
-            if len(matches) < minimum_matches:
-                continue
-            results.append((max(confidence for _, confidence in matches), x, y))
-        results.sort(key=lambda item: item[0], reverse=True)
-        return results
-
-    def _new_level_interrupt_states(self):
-        return {State.CHECK_NEW_LEVEL, State.TRANSITION_LEVEL, State.WAIT_FOR_UNLOCK}
-
-    def _arm_new_level_interrupt(self, target_state):
-        if self._pending_new_level_interrupt_state is None:
-            self._interrupt_resume_state = self.state_machine.get_state()
-        self._pending_new_level_interrupt_state = target_state
-
-    def _dispatch_new_level_interrupt(self):
-        if self._pending_new_level_interrupt_state is None:
-            return False
-        target_state = self._pending_new_level_interrupt_state
-        self._pending_new_level_interrupt_state = None
-        self._last_new_level_interrupt_at = time.monotonic()
-        self.state_machine.transition(target_state)
-        return True
-
-    def _consume_interrupt_resume_state(self):
-        resume_state = self._interrupt_resume_state or State.FIND_RED_ICONS
-        self._interrupt_resume_state = None
-        return resume_state
-
-    def _confirm_new_level_button_interrupt(self, initial_result):
-        confirmations = max(1, int(config.NEW_LEVEL_INTERRUPT_BUTTON_CONFIRMATIONS))
-        best = initial_result
-        for _ in range(confirmations - 1):
-            if config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY > 0:
-                time.sleep(config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY)
-            screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-            found, confidence, x, y = self._detect_new_level_button_interrupt(screenshot, update_optimizer=False)
-            if not found:
-                return None
-            best = (found, confidence, x, y)
-        self.vision_optimizer.update_new_level_confidence(best[1])
-        return best
-
-    def _confirm_new_level_red_icon_interrupt(self, initial_result):
-        confirmations = max(1, int(config.NEW_LEVEL_INTERRUPT_RED_ICON_CONFIRMATIONS))
-        best = initial_result
-        for _ in range(confirmations - 1):
-            if config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY > 0:
-                time.sleep(config.NEW_LEVEL_INTERRUPT_CONFIRMATION_DELAY)
-            screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-            confirmed = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
-            if confirmed is None:
-                return None
-            if confirmed[1] > best[1]:
-                best = confirmed
-        self.vision_optimizer.update_new_level_red_icon_confidence(best[1])
-        return best
-
-    def check_critical_interrupts(self, raise_exception=True):
-        if not config.NEW_LEVEL_INTERRUPT_ENABLED:
-            return False
-        if self._pending_new_level_interrupt_state is not None:
-            if raise_exception:
-                raise NewLevelInterrupt(self._pending_new_level_interrupt_state)
-            return True
-        current_state = self.state_machine.get_state()
-        if current_state in self._new_level_interrupt_states():
-            return False
-        now = time.monotonic()
-        if (now - self._last_new_level_interrupt_at) < float(config.NEW_LEVEL_INTERRUPT_COOLDOWN):
-            return False
-        if (now - self._last_new_level_interrupt_poll_at) < float(config.NEW_LEVEL_INTERRUPT_POLL_INTERVAL):
-            return False
-        self._last_new_level_interrupt_poll_at = now
-
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        found_level, confidence, x, y = self._detect_new_level_button_interrupt(screenshot, update_optimizer=False)
-        if found_level:
-            if self._confirm_new_level_button_interrupt((found_level, confidence, x, y)) is not None:
-                self._arm_new_level_interrupt(State.TRANSITION_LEVEL)
-                if raise_exception:
-                    raise NewLevelInterrupt(State.TRANSITION_LEVEL)
-                return True
-            return False
-
-        new_level_icon = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
-        if new_level_icon is not None and self._confirm_new_level_red_icon_interrupt(new_level_icon) is not None:
-            self._arm_new_level_interrupt(State.CHECK_NEW_LEVEL)
-            if raise_exception:
-                raise NewLevelInterrupt(State.CHECK_NEW_LEVEL)
-            return True
-        return False
-
-    def _filter_safe_red_icons(self, icons):
-        safe = []
-        for confidence, x, y in icons:
-            click_x = x + config.RED_ICON_OFFSET_X
-            click_y = y + config.RED_ICON_OFFSET_Y
-            if not self.mouse_controller.is_in_forbidden_zone(click_x, click_y, relative=True):
-                safe.append((confidence, x, y))
-        return safe
-
-    def _prioritize_red_icons(self, icons):
-        def sort_key(icon):
-            confidence, _, y = icon
-            preferred = 1
-            for success_y in self.successful_red_icon_positions:
-                if abs(y - success_y) < 50:
-                    preferred = 0
-                    break
-            return (preferred, y, -confidence)
-
-        return sorted(icons, key=sort_key)
-
-    def _has_stats_upgrade_icon(self, screenshot):
-        threshold = (
-            self.vision_optimizer.stats_upgrade_threshold
-            if self.vision_optimizer.enabled
-            else config.STATS_RED_ICON_THRESHOLD
-        )
-        icons = self._detect_red_icons_in_region(
-            screenshot,
-            config.UPGRADE_RED_ICON_X_MIN,
-            config.UPGRADE_RED_ICON_X_MAX,
-            config.UPGRADE_RED_ICON_Y_MIN,
-            config.UPGRADE_RED_ICON_Y_MAX,
-            threshold_override=threshold,
-            record_optimizer=False,
-        )
-        if icons:
-            confidence, _, _ = icons[0]
-            return True, confidence
-        return False, 0.0
-
-    def _find_boxes(self, screenshot):
-        threshold = self.vision_optimizer.box_threshold if self.vision_optimizer.enabled else config.BOX_THRESHOLD
-        box_names = [f"box{i}" for i in range(1, 6) if f"box{i}" in self.templates]
-        if not box_names:
-            return []
-
-        def find_box(name):
-            template, mask = self.templates[name]
-            matched, confidence, x, y = self.image_matcher.find_template(
-                screenshot,
-                template,
-                mask=mask,
-                threshold=threshold,
-                template_name=name,
-            )
-            if matched:
-                return name, confidence, x, y
-            return None
-
-        found = []
-        worker_count = min(len(box_names), 5)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            for result in executor.map(find_box, box_names):
-                if result is not None:
-                    found.append(result)
-        return found
-
-    def _find_upgrade_station(self, screenshot, threshold):
-        if "upgradeStation" not in self.templates:
-            return False, 0.0, 0, 0
-        template, mask = self.templates["upgradeStation"]
-        found, confidence, x, y = self.image_matcher.find_template(
-            screenshot,
-            template,
-            mask=mask,
-            threshold=threshold,
-            template_name="upgradeStation",
-        )
-        if not found:
-            return False, confidence, x, y
-        if not self.image_matcher.check_upgrade_station_hsv(
-            screenshot,
-            x,
-            y,
-            template.shape[0],
-            template.shape[1],
-        ):
-            return False, confidence, 0, 0
-        return True, confidence, x, y
+    def _reset_search_cycle(self):
+        self.scroll_direction = "down"
+        self.scroll_count = 0
+        self.cycle_counter = 0
+        self._oscillation_cycle_index = 1
+        self._oscillation_leg_direction = 1
+        self._oscillation_leg_progress = 0
 
     def _advance_oscillation_progress(self):
         target_steps = max(1, int(self._oscillation_cycle_index) * int(config.SCROLL_INCREMENT_STEP))
@@ -1096,7 +729,7 @@ class EatventureBot:
         logger.info(
             "Oscillating scroll step: cycle=%s direction=%s progress=%s",
             self._oscillation_cycle_index,
-            "DOWN" if direction > 0 else "UP",
+            "down" if direction > 0 else "up",
             self._oscillation_leg_progress + 1,
         )
         moved = self.mouse_controller.drag(
@@ -1111,25 +744,8 @@ class EatventureBot:
             self._sleep(config.POST_SCROLL_SETTLE)
             self._sleep(config.SCROLL_INTERVAL_PAUSE)
             self._advance_oscillation_progress()
-            self._click_idle()
+            self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         return bool(moved)
-
-    def _record_level_completion(self):
-        self.total_levels_completed += 1
-        elapsed = 0.0
-        if self.current_level_start_time is not None:
-            elapsed = (datetime.now() - self.current_level_start_time).total_seconds()
-        self.current_level_start_time = datetime.now()
-        self._reset_search_cycle()
-        self.telegram.notify_new_level(self.total_levels_completed, elapsed)
-        self.historical_learner.record_completion(elapsed, "transition")
-        return elapsed
-
-    def _reset_search_cycle(self):
-        self._oscillation_cycle_index = 1
-        self._oscillation_leg_direction = 1
-        self._oscillation_leg_progress = 0
-        self._pending_fallback_scroll = False
 
     def start(self):
         if self.running:
@@ -1138,14 +754,12 @@ class EatventureBot:
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
         self.historical_learner.start()
-        if config.SHOW_FORBIDDEN_AREA and self.overlay is None:
-            from window_capture import ForbiddenAreaOverlay
-
+        if config.ShowForbiddenArea and self.overlay is None:
             self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
             self.overlay.start()
 
     def stop(self):
-        if not self.running:
+        if not self.running and self.overlay is None:
             return
         self.running = False
         self.historical_learner.stop()
@@ -1154,20 +768,8 @@ class EatventureBot:
             self.overlay = None
 
     def step(self):
-        self._sync_window_bindings()
         self._apply_tuning()
-        if self._dispatch_new_level_interrupt():
-            return
-        if self.check_critical_interrupts(raise_exception=False):
-            self._dispatch_new_level_interrupt()
-            return
-        self._enforce_state_min_interval()
-        try:
-            self.state_machine.update()
-        except NewLevelInterrupt:
-            if self._dispatch_new_level_interrupt():
-                return
-            raise
+        self.state_machine.update()
 
     def run(self):
         self.start()
@@ -1177,56 +779,188 @@ class EatventureBot:
                     logger.error("Window '%s' is no longer active", config.WINDOW_TITLE)
                     break
                 self.step()
+                time.sleep(0.1)
         finally:
             self.stop()
 
     def handle_find_red_icons(self, current_state):
-        self._click_idle()
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+
         self.cycle_counter += 1
+        logger.info("Cycle %s/2", self.cycle_counter)
         if self.cycle_counter >= 2:
             self.cycle_counter = 0
-            logger.info("Find-red cycle threshold reached; forcing SCROLL")
             return State.SCROLL
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        icons = self._detect_red_icons(screenshot, max_y=config.MAX_SEARCH_Y)
-        safe_icons = self._filter_safe_red_icons(icons)
-        if safe_icons:
-            self.red_icons = self._prioritize_red_icons(safe_icons)
+        self.work_done = False
+
+        screenshot = self.window_capture.capture()
+        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+        extended_screenshot = screenshot[: config.EXTENDED_SEARCH_Y, :]
+
+        new_level_threshold = (
+            self.vision_optimizer.new_level_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_THRESHOLD
+        )
+        if "newLevel" in self.templates:
+            template, mask = self.templates["newLevel"]
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=new_level_threshold,
+                template_name="newLevel",
+            )
+            if found:
+                self.vision_optimizer.update_new_level_confidence(confidence)
+                logger.info("newLevel.png found at (%s, %s)", x, y)
+                return State.TRANSITION_LEVEL
+            self.vision_optimizer.update_new_level_miss()
+
+        scan_threshold = config.RED_ICON_THRESHOLD
+        if self.vision_optimizer.enabled:
+            scan_threshold = min(
+                self.vision_optimizer.red_icon_threshold,
+                self.vision_optimizer.new_level_red_icon_threshold,
+            )
+
+        all_detections = {}
+        all_detections_extended = {}
+
+        for template_name in self._red_icon_template_names():
+            if template_name not in self.templates:
+                continue
+
+            template, mask = self.templates[template_name]
+            icons = self.image_matcher.find_all_templates(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=scan_threshold,
+                min_distance=80,
+                template_name=template_name,
+            )
+            for confidence, x, y in icons:
+                merged = False
+                for existing_x, existing_y in list(all_detections.keys()):
+                    if abs(x - existing_x) < 10 and abs(y - existing_y) < 10:
+                        all_detections[(existing_x, existing_y)].append((template_name, confidence))
+                        merged = True
+                        break
+                if not merged:
+                    all_detections[(x, y)] = [(template_name, confidence)]
+
+            icons_extended = self.image_matcher.find_all_templates(
+                extended_screenshot,
+                template,
+                mask=mask,
+                threshold=scan_threshold,
+                min_distance=80,
+                template_name=template_name,
+            )
+            for confidence, x, y in icons_extended:
+                merged = False
+                for existing_x, existing_y in list(all_detections_extended.keys()):
+                    if abs(x - existing_x) < 10 and abs(y - existing_y) < 10:
+                        all_detections_extended[(existing_x, existing_y)].append((template_name, confidence))
+                        merged = True
+                        break
+                if not merged:
+                    all_detections_extended[(x, y)] = [(template_name, confidence)]
+
+        min_matches = config.RED_ICON_MIN_MATCHES
+        self.red_icons = []
+        valid_red_icon_confidences = []
+        for x_y, matches in all_detections.items():
+            if len(matches) >= min_matches:
+                max_confidence = max(confidence for _, confidence in matches)
+                x, y = x_y
+                self.red_icons.append((max_confidence, x, y))
+                valid_red_icon_confidences.append(max_confidence)
+
+        self.vision_optimizer.update_red_icon_scan(valid_red_icon_confidences)
+
+        all_red_icons_extended = []
+        for x_y, matches in all_detections_extended.items():
+            if len(matches) >= min_matches:
+                max_confidence = max(confidence for _, confidence in matches)
+                x, y = x_y
+                all_red_icons_extended.append((max_confidence, x, y))
+
+        new_level_icon_threshold = (
+            self.vision_optimizer.new_level_red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_RED_ICON_THRESHOLD
+        )
+        best_new_level_icon = None
+        for confidence, x, y in all_red_icons_extended:
+            if (
+                config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX
+                and config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX
+                and confidence >= new_level_icon_threshold
+            ):
+                if best_new_level_icon is None or confidence > best_new_level_icon[0]:
+                    best_new_level_icon = (confidence, x, y)
+
+        if best_new_level_icon is not None:
+            self.vision_optimizer.update_new_level_red_icon_confidence(best_new_level_icon[0])
+            logger.info(
+                "New level red icon detected at (%s, %s) [%.3f]",
+                best_new_level_icon[1],
+                best_new_level_icon[2],
+                best_new_level_icon[0],
+            )
+            return State.CHECK_NEW_LEVEL
+        self.vision_optimizer.update_new_level_red_icon_miss()
+
+        if self.red_icons:
+            filtered_icons = []
+            for confidence, x, y in self.red_icons:
+                click_x = x + config.RED_ICON_OFFSET_X
+                click_y = y + config.RED_ICON_OFFSET_Y
+                if not self.mouse_controller.is_in_forbidden_zone(click_x, click_y, relative=True):
+                    filtered_icons.append((confidence, x, y))
+
+            if not filtered_icons:
+                logger.info("No valid red icons after forbidden-zone filtering")
+                return State.OPEN_BOXES
+
+            def get_priority(icon):
+                confidence, x, y = icon
+                for success_y in self.successful_red_icon_positions:
+                    if abs(y - success_y) < 50:
+                        return (0, y, -confidence)
+                return (1, y, -confidence)
+
+            filtered_icons.sort(key=get_priority)
+            self.red_icons = filtered_icons
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
             self.work_done = True
-            self._pending_fallback_scroll = False
-            logger.info("Red icon scan found %s actionable targets", len(self.red_icons))
+            logger.info("%s red icons ready to process", len(self.red_icons))
             return State.CLICK_RED_ICON
 
-        self.red_icons = []
-        self.current_red_icon_index = 0
-        self.red_icon_cycle_count = 0
-        self._pending_fallback_scroll = True
-        logger.info("No actionable red icons detected; falling back to OPEN_BOXES")
         return State.OPEN_BOXES
 
     def handle_click_red_icon(self, current_state):
         if self.current_red_icon_index >= len(self.red_icons):
-            logger.info("All red icons processed for this scan")
+            logger.info("All red icons processed, continuing cycle")
             return State.OPEN_BOXES
 
         confidence, x, y = self.red_icons[self.current_red_icon_index]
         click_x = x + config.RED_ICON_OFFSET_X
         click_y = y + config.RED_ICON_OFFSET_Y
-        if self.mouse_controller.is_in_forbidden_zone(click_x, click_y, relative=True):
-            logger.warning("Red icon click blocked at (%s, %s)", click_x, click_y)
-            self.current_red_icon_index += 1
-            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
 
         clicked = self.mouse_controller.click(click_x, click_y, relative=True)
         self.tuner.record_click_result(clicked)
         self._apply_tuning()
         if not clicked:
-            self.current_red_icon_index += 1
             logger.warning("Red icon click failed at (%s, %s)", click_x, click_y)
-            return State.CLICK_RED_ICON if self.current_red_icon_index < len(self.red_icons) else State.OPEN_BOXES
+            self.current_red_icon_index += 1
+            if self.current_red_icon_index < len(self.red_icons):
+                return State.CLICK_RED_ICON
+            return State.OPEN_BOXES
 
         logger.info(
             "Clicked red icon %s/%s at (%s, %s) [%.3f]",
@@ -1236,19 +970,26 @@ class EatventureBot:
             click_y,
             confidence,
         )
+        self.red_icon_cycle_count = 0
         return State.CHECK_UNLOCK
 
     def handle_check_unlock(self, current_state):
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        found, confidence, x, y = self._find_template(
-            "unlock",
-            screenshot,
-            config.UNLOCK_THRESHOLD,
-        )
-        if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-            logger.info("Unlock found at (%s, %s) [%.3f]", x, y, confidence)
-            self.mouse_controller.click(x, y, relative=True)
-            self._sleep(config.STATE_DELAY)
+        screenshot = self.window_capture.capture()
+        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+
+        if "unlock" in self.templates:
+            template, mask = self.templates["unlock"]
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=config.UNLOCK_THRESHOLD,
+                template_name="unlock",
+            )
+            if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                logger.info("Unlock found at (%s, %s) [%.3f]", x, y, confidence)
+                self.mouse_controller.click(x, y, relative=True)
+
         return State.SEARCH_UPGRADE_STATION
 
     def handle_search_upgrade_station(self, current_state):
@@ -1257,43 +998,58 @@ class EatventureBot:
             if self.vision_optimizer.enabled
             else config.UPGRADE_STATION_THRESHOLD
         )
-        relaxed_threshold = max(0.0, base_threshold - config.UPGRADE_STATION_RELAXED_THRESHOLD_DROP)
-        for attempt in range(int(config.UPGRADE_STATION_SEARCH_MAX_ATTEMPTS)):
-            screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-            threshold = (
-                base_threshold
-                if attempt < int(config.UPGRADE_STATION_RELAXED_ATTEMPT_TRIGGER)
-                else relaxed_threshold
+        relaxed_threshold = max(0.0, base_threshold - 0.05)
+        max_attempts = 5
+
+        for attempt in range(max_attempts):
+            screenshot = self.window_capture.capture()
+            limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+
+            if "upgradeStation" not in self.templates:
+                break
+
+            template, mask = self.templates["upgradeStation"]
+            current_threshold = base_threshold if attempt < 2 else relaxed_threshold
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=current_threshold,
+                template_name="upgradeStation",
+                check_color=config.UPGRADE_STATION_COLOR_CHECK,
             )
-            found, confidence, x, y = self._find_upgrade_station(screenshot, threshold)
             if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                logger.info("Upgrade station found at (%s, %s) on attempt %s", x, y, attempt + 1)
                 self.upgrade_station_pos = (x, y)
                 self.upgrade_found_in_cycle = True
                 self.consecutive_failed_cycles = 0
                 self.vision_optimizer.update_upgrade_station_confidence(confidence)
                 self.tuner.record_search_result(True)
+                self._apply_tuning()
                 if self.current_red_icon_index < len(self.red_icons):
-                    red_y = self.red_icons[self.current_red_icon_index][2]
+                    _, _, red_y = self.red_icons[self.current_red_icon_index]
                     if red_y not in self.successful_red_icon_positions:
                         self.successful_red_icon_positions.append(red_y)
-                logger.info("Upgrade station found at (%s, %s) on attempt %s", x, y, attempt + 1)
                 return State.HOLD_UPGRADE_STATION
-            if attempt < int(config.UPGRADE_STATION_SEARCH_MAX_ATTEMPTS) - 1:
+
+            if attempt < max_attempts - 1:
                 self._sleep(self.tuner.search_interval)
 
         self.vision_optimizer.update_upgrade_station_miss()
         self.tuner.record_search_result(False)
-        self.consecutive_failed_cycles += 1
+        self._apply_tuning()
         self.red_icon_processed_count += 1
-        logger.info("Upgrade station not found after search attempts; falling back to OPEN_BOXES")
+        self.consecutive_failed_cycles += 1
+        logger.info("Upgrade station not found, returning to OPEN_BOXES")
         return State.OPEN_BOXES
 
     def handle_hold_upgrade_station(self, current_state):
-        if self.upgrade_station_pos is None:
+        if not self.upgrade_station_pos:
             return State.OPEN_BOXES
+
         x, y = self.upgrade_station_pos
         if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-            logger.warning("Upgrade station is in a forbidden zone at (%s, %s)", x, y)
+            logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", x, y)
             return State.OPEN_BOXES
 
         logger.info("Spam-clicking upgrade station at (%s, %s)", x, y)
@@ -1306,29 +1062,83 @@ class EatventureBot:
             relative=True,
         )
         if not completed:
-            logger.warning("Spam-click sequence ended early; continuing to OPEN_BOXES")
+            logger.warning("Spam-click sequence ended early")
             return State.OPEN_BOXES
 
-        self._click_idle()
-        self._sleep(config.IDLE_CLICK_SETTLE_DELAY)
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._sleep(config.STATE_DELAY)
         self.red_icon_processed_count += 1
         self.upgrade_station_counter += 1
         if self.upgrade_station_counter >= 2:
             self.upgrade_station_counter = 0
             logger.info("Upgrade counter reached stats threshold")
             return State.UPGRADE_STATS
+
         return State.OPEN_BOXES
 
     def handle_upgrade_stats(self, current_state):
-        self._click_idle()
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        has_stats_icon, stats_confidence = self._has_stats_upgrade_icon(screenshot)
-        if not has_stats_icon:
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+
+        screenshot = self.window_capture.capture()
+        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+        extended_screenshot = screenshot[: config.EXTENDED_SEARCH_Y, :]
+
+        if "newLevel" in self.templates:
+            template, mask = self.templates["newLevel"]
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=(
+                    self.vision_optimizer.new_level_threshold
+                    if self.vision_optimizer.enabled
+                    else config.NEW_LEVEL_THRESHOLD
+                ),
+                template_name="newLevel",
+            )
+            if found:
+                self.vision_optimizer.update_new_level_confidence(confidence)
+                return State.TRANSITION_LEVEL
+
+        has_upgrade_icon = False
+        best_stats_confidence = 0.0
+        stats_threshold = (
+            self.vision_optimizer.stats_upgrade_threshold
+            if self.vision_optimizer.enabled
+            else config.STATS_RED_ICON_THRESHOLD
+        )
+        for template_name in self._red_icon_template_names():
+            if template_name not in self.templates:
+                continue
+
+            template, mask = self.templates[template_name]
+            icons = self.image_matcher.find_all_templates(
+                extended_screenshot,
+                template,
+                mask=mask,
+                threshold=stats_threshold,
+                min_distance=80,
+                template_name=template_name,
+            )
+            for confidence, x, y in icons:
+                if (
+                    config.UPGRADE_RED_ICON_X_MIN <= x <= config.UPGRADE_RED_ICON_X_MAX
+                    and config.UPGRADE_RED_ICON_Y_MIN <= y <= config.UPGRADE_RED_ICON_Y_MAX
+                ):
+                    has_upgrade_icon = True
+                    best_stats_confidence = max(best_stats_confidence, confidence)
+                    break
+
+            if has_upgrade_icon:
+                break
+
+        if not has_upgrade_icon:
             self.vision_optimizer.update_stats_upgrade_miss()
-            logger.info("No stats icon present; returning to SCROLL")
+            logger.info("No stats icon detected")
             return State.SCROLL
 
-        self.vision_optimizer.update_stats_upgrade_confidence(stats_confidence)
+        self.vision_optimizer.update_stats_upgrade_confidence(best_stats_confidence)
+        logger.info("Stats icon found, upgrading")
         opened = self.mouse_controller.click(
             config.STATS_UPGRADE_BUTTON_POS[0],
             config.STATS_UPGRADE_BUTTON_POS[1],
@@ -1338,132 +1148,192 @@ class EatventureBot:
             return State.OPEN_BOXES
 
         self._sleep(config.STATE_DELAY)
-        self.mouse_controller.spam_click_at(
-            config.STATS_UPGRADE_POS[0],
-            config.STATS_UPGRADE_POS[1],
-            duration=config.STATS_UPGRADE_CLICK_DURATION,
-            click_delay=config.STATS_UPGRADE_CLICK_DELAY,
-            jitter=0,
-            relative=True,
-        )
-        self._click_idle()
+        for _ in range(config.STATS_UPGRADE_CLICK_COUNT):
+            self.mouse_controller.click(
+                config.STATS_UPGRADE_POS[0],
+                config.STATS_UPGRADE_POS[1],
+                relative=True,
+                delay=0.0,
+            )
+            self._sleep(config.STATS_UPGRADE_CLICK_DELAY)
+
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         logger.info("Stats upgrade completed")
         return State.OPEN_BOXES
 
     def handle_open_boxes(self, current_state):
-        self._click_idle()
-        screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-        boxes = self._find_boxes(screenshot)
-        if boxes:
-            best_confidence = 0.0
-            opened = 0
-            for name, confidence, x, y in boxes:
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+
+        screenshot = self.window_capture.capture()
+        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+
+        if "newLevel" in self.templates:
+            template, mask = self.templates["newLevel"]
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=(
+                    self.vision_optimizer.new_level_threshold
+                    if self.vision_optimizer.enabled
+                    else config.NEW_LEVEL_THRESHOLD
+                ),
+                template_name="newLevel",
+            )
+            if found:
+                self.vision_optimizer.update_new_level_confidence(confidence)
+                logger.info("New level found while opening boxes")
+                return State.TRANSITION_LEVEL
+
+        box_names = ["box1", "box2", "box3", "box4", "box5"]
+        box_threshold = self.vision_optimizer.box_threshold if self.vision_optimizer.enabled else config.BOX_THRESHOLD
+        boxes_found = 0
+        best_box_confidence = 0.0
+
+        for box_name in box_names:
+            if box_name not in self.templates:
+                continue
+
+            template, mask = self.templates[box_name]
+            found, confidence, x, y = self.image_matcher.find_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                threshold=box_threshold,
+                template_name=box_name,
+            )
+            if found:
                 if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                    logger.debug("%s is in a forbidden zone", box_name)
                     continue
-                if self.mouse_controller.click(x, y, relative=True):
-                    opened += 1
-                    best_confidence = max(best_confidence, confidence)
-            if opened > 0:
-                self.work_done = True
-                self.vision_optimizer.update_box_confidence(best_confidence)
-                logger.info("Opened %s boxes", opened)
-            else:
-                self.vision_optimizer.update_box_miss()
+                clicked = self.mouse_controller.click(x, y, relative=True)
+                if clicked:
+                    boxes_found += 1
+                    best_box_confidence = max(best_box_confidence, confidence)
+
+        if boxes_found > 0:
+            self.work_done = True
+            self.vision_optimizer.update_box_confidence(best_box_confidence)
+            logger.info("Opened %s boxes", boxes_found)
         else:
             self.vision_optimizer.update_box_miss()
 
         if self.upgrade_found_in_cycle:
             self.upgrade_found_in_cycle = False
             self.cycle_counter = 0
-            logger.info("Upgrade found in current cycle; returning to FIND_RED_ICONS")
+            logger.info("Upgrade found in cycle, staying in current area")
             return State.FIND_RED_ICONS
-
-        if self._pending_fallback_scroll:
-            self._pending_fallback_scroll = False
-            self.cycle_counter = 0
-            logger.info("Red-scan miss fallback complete; continuing to SCROLL")
-            return State.SCROLL
 
         self.cycle_counter += 1
         if self.consecutive_failed_cycles >= 3:
             self.consecutive_failed_cycles = 0
             self.cycle_counter = 0
-            logger.info("Repeated search misses reached threshold; forcing SCROLL")
+            logger.info("Repeated search failures reached threshold, forcing scroll")
             return State.SCROLL
+
         if self.cycle_counter >= 2:
             self.cycle_counter = 0
-            logger.info("Open-box cycle threshold reached; forcing SCROLL")
             return State.SCROLL
+
         return State.FIND_RED_ICONS
 
     def handle_scroll(self, current_state):
-        self._click_idle()
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         self._perform_oscillating_scroll_step()
         return State.FIND_RED_ICONS
 
     def handle_check_new_level(self, current_state):
-        self._click_idle()
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        new_level_icon = self._detect_new_level_red_icon(screenshot, update_optimizer=False)
-        if new_level_icon is None:
-            logger.info("New-level interrupt was not confirmed; resuming previous state")
-            return self._consume_interrupt_resume_state()
-        self.vision_optimizer.update_new_level_red_icon_confidence(new_level_icon[1])
-        logger.info("Handling new-level acknowledgement path")
-        self.mouse_controller.click(config.NEW_LEVEL_BUTTON_POS[0], config.NEW_LEVEL_BUTTON_POS[1], relative=True)
-        self._sleep(config.NEW_LEVEL_BUTTON_DELAY)
-        self.mouse_controller.click(config.LEVEL_TRANSITION_POS[0], config.LEVEL_TRANSITION_POS[1], relative=True)
-        self._sleep(config.STATE_DELAY)
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._sleep(0.05)
+        self.mouse_controller.click(
+            config.NEW_LEVEL_BUTTON_POS[0],
+            config.NEW_LEVEL_BUTTON_POS[1],
+            relative=True,
+        )
+        self._sleep(0.30)
+        self.mouse_controller.click(
+            config.LEVEL_TRANSITION_POS[0],
+            config.LEVEL_TRANSITION_POS[1],
+            relative=True,
+        )
+        self._sleep(0.20)
         self._reset_search_cycle()
-        self._interrupt_resume_state = None
         return State.FIND_RED_ICONS
 
     def handle_transition_level(self, current_state):
-        self._click_idle()
-        for attempt in range(int(config.LEVEL_TRANSITION_MAX_ATTEMPTS)):
-            screenshot = self._capture(max_y=config.MAX_SEARCH_Y)
-            found, confidence, x, y = self._detect_new_level_button(screenshot)
-            if found:
-                logger.info("Transition button found at (%s, %s) on attempt %s", x, y, attempt + 1)
-                self.mouse_controller.click(x, y, relative=True)
-                self._sleep(config.TRANSITION_POST_CLICK_DELAY)
-                elapsed = self._record_level_completion()
-                logger.info(
-                    "Level %s completed in %.2fs; waiting for unlock",
-                    self.total_levels_completed,
-                    elapsed,
-                )
-                self._interrupt_resume_state = None
-                return State.WAIT_FOR_UNLOCK
-            if attempt < int(config.LEVEL_TRANSITION_MAX_ATTEMPTS) - 1:
-                self._sleep(config.TRANSITION_RETRY_DELAY)
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
 
-        logger.warning("Transition button not found after max attempts")
+        max_attempts = 5
+        threshold = (
+            self.vision_optimizer.new_level_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_THRESHOLD
+        )
+        for attempt in range(max_attempts):
+            screenshot = self.window_capture.capture()
+            limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+
+            if "newLevel" in self.templates:
+                template, mask = self.templates["newLevel"]
+                found, confidence, x, y = self.image_matcher.find_template(
+                    limited_screenshot,
+                    template,
+                    mask=mask,
+                    threshold=threshold,
+                    template_name="newLevel",
+                )
+                if found:
+                    self.vision_optimizer.update_new_level_confidence(confidence)
+                    logger.info("New level button found at (%s, %s) on attempt %s", x, y, attempt + 1)
+                    self.mouse_controller.click(x, y, relative=True)
+                    self._sleep(1.0)
+                    elapsed = self._record_level_completion()
+                    logger.info(
+                        "Level %s completed. Time spent: %.1fs",
+                        self.total_levels_completed,
+                        elapsed,
+                    )
+                    return State.WAIT_FOR_UNLOCK
+
+            if attempt < max_attempts - 1:
+                self._sleep(0.20)
+
+        self.vision_optimizer.update_new_level_miss()
+        logger.warning("New level button not found after %s attempts", max_attempts)
         self._reset_search_cycle()
-        return self._consume_interrupt_resume_state()
+        return State.FIND_RED_ICONS
 
     def handle_wait_for_unlock(self, current_state):
-        self._click_idle()
+        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        self._sleep(0.05)
+
         self.wait_for_unlock_attempts += 1
         if self.wait_for_unlock_attempts > self.max_wait_for_unlock_attempts:
-            logger.warning("Unlock button not found after %s attempts", self.max_wait_for_unlock_attempts)
+            logger.warning(
+                "Unlock button not found after %s attempts, resetting",
+                self.max_wait_for_unlock_attempts,
+            )
             self.wait_for_unlock_attempts = 0
             self._reset_search_cycle()
             return State.FIND_RED_ICONS
 
-        screenshot = self._capture(max_y=config.EXTENDED_SEARCH_Y)
-        found, confidence, x, y = self._find_template(
-            "unlock",
-            screenshot,
-            config.UNLOCK_THRESHOLD,
-        )
-        if found:
-            logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
-            self.mouse_controller.click(x, y, relative=True)
-            self._sleep(config.UNLOCK_REGISTER_WAIT)
-            self.wait_for_unlock_attempts = 0
-            self._reset_search_cycle()
-            return State.FIND_RED_ICONS
+        screenshot = self.window_capture.capture()
+        if "unlock" in self.templates:
+            template, mask = self.templates["unlock"]
+            found, confidence, x, y = self.image_matcher.find_template(
+                screenshot,
+                template,
+                mask=mask,
+                threshold=config.UNLOCK_THRESHOLD,
+                template_name="unlock",
+            )
+            if found:
+                logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
+                self.mouse_controller.click(x, y, relative=True)
+                self._sleep(0.50)
+                self.wait_for_unlock_attempts = 0
+                self._reset_search_cycle()
+                return State.FIND_RED_ICONS
 
-        self._sleep(config.UNLOCK_POLL_INTERVAL)
+        self._sleep(0.30)
         return State.WAIT_FOR_UNLOCK

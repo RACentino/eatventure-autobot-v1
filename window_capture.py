@@ -3,22 +3,14 @@ import win32ui
 import win32con
 import win32api
 import ctypes
-import time
 import numpy as np
+from PIL import Image
 import logging
 import threading
-import config
 
 logger = logging.getLogger(__name__)
 
-def _set_dpi_awareness():
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except (AttributeError, OSError):
-        logger.debug("DPI awareness API unavailable; continuing without it.")
-
-
-_set_dpi_awareness()
+ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
 
 class WindowCapture:
@@ -27,7 +19,6 @@ class WindowCapture:
         self.hwnd = None
         self.target_width = target_width
         self.target_height = target_height
-        self._capture_lock = threading.Lock()
         self.find_window()
         self.resize_window()
     
@@ -43,7 +34,7 @@ class WindowCapture:
         
         rect = win32gui.GetWindowRect(self.hwnd)
         x, y = rect[0], rect[1]
-
+        
         SWP_NOZORDER = 0x0004
         SWP_SHOWWINDOW = 0x0040
         ctypes.windll.user32.SetWindowPos(
@@ -62,118 +53,42 @@ class WindowCapture:
         width = rect[2] - rect[0]
         height = rect[3] - rect[1]
         return x, y, width, height
-
-    @staticmethod
-    def _ensure_print_window_succeeded(result, window_title, hwnd):
-        if result:
-            return
-        raise RuntimeError(f"PrintWindow failed for '{window_title}' (hwnd={hwnd})")
-
-    def ensure_window_ready(self, resize_on_refresh=False):
-        previous_hwnd = self.hwnd
-        if not self.hwnd or not win32gui.IsWindow(self.hwnd):
-            self.find_window()
-        if resize_on_refresh:
-            self.resize_window()
-        return previous_hwnd != self.hwnd
     
     def capture(self, max_y=None):
-        retries = 2
-        retry_delay = 0.05
-        last_exc = None
-
-        with self._capture_lock:
-            for attempt in range(1, retries + 1):
-                try:
-                    self.ensure_window_ready()
-                    _, _, width, height = self.get_window_rect()
-
-                    if max_y is not None:
-                        height = min(height, max_y)
-
-                    if width <= 0 or height <= 0:
-                        raise RuntimeError(
-                            f"Window '{self.window_title}' has invalid capture bounds: width={width}, height={height}"
-                        )
-
-                    hwndDC = None
-                    mfcDC = None
-                    saveDC = None
-                    saveBitMap = None
-
-                    try:
-                        hwndDC = win32gui.GetWindowDC(self.hwnd)
-                        if not hwndDC:
-                            raise RuntimeError(
-                                f"GetWindowDC returned null for '{self.window_title}' (hwnd={self.hwnd})"
-                            )
-
-                        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-                        saveDC = mfcDC.CreateCompatibleDC()
-
-                        saveBitMap = win32ui.CreateBitmap()
-                        saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-                        saveDC.SelectObject(saveBitMap)
-
-                        print_result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
-                        self._ensure_print_window_succeeded(print_result, self.window_title, self.hwnd)
-
-                        bmpstr = saveBitMap.GetBitmapBits(True)
-                        expected_size = width * height * 4
-                        if len(bmpstr) != expected_size:
-                            raise RuntimeError(
-                                f"Capture buffer size mismatch for '{self.window_title}': "
-                                f"expected {expected_size}, got {len(bmpstr)}"
-                            )
-
-                        img = np.frombuffer(bmpstr, dtype=np.uint8)
-                        img.shape = (height, width, 4)
-                        return np.ascontiguousarray(img[:, :, :3])
-                    finally:
-                        if saveBitMap is not None:
-                            try:
-                                win32gui.DeleteObject(saveBitMap.GetHandle())
-                            except Exception:
-                                pass
-                        if saveDC is not None:
-                            try:
-                                saveDC.DeleteDC()
-                            except Exception:
-                                pass
-                        if mfcDC is not None:
-                            try:
-                                mfcDC.DeleteDC()
-                            except Exception:
-                                pass
-                        if hwndDC is not None:
-                            try:
-                                win32gui.ReleaseDC(self.hwnd, hwndDC)
-                            except Exception:
-                                pass
-                except Exception as exc:
-                    last_exc = exc
-                    self.hwnd = None
-                    if attempt >= retries:
-                        break
-                    logger.warning(
-                        "Capture attempt %s/%s failed for '%s': %s",
-                        attempt,
-                        retries,
-                        self.window_title,
-                        exc,
-                    )
-                    if retry_delay > 0:
-                        time.sleep(retry_delay)
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError(f"Capture failed for '{self.window_title}' without a reported exception")
+        if not self.hwnd:
+            self.find_window()
+        
+        x, y, width, height = self.get_window_rect()
+        
+        if max_y:
+            height = min(height, max_y)
+        
+        hwndDC = win32gui.GetWindowDC(self.hwnd)
+        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+        saveDC = mfcDC.CreateCompatibleDC()
+        
+        saveBitMap = win32ui.CreateBitmap()
+        saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+        saveDC.SelectObject(saveBitMap)
+        
+        result = ctypes.windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 3)
+        
+        bmpinfo = saveBitMap.GetInfo()
+        bmpstr = saveBitMap.GetBitmapBits(True)
+        img = np.frombuffer(bmpstr, dtype=np.uint8)
+        img.shape = (height, width, 4)
+        
+        win32gui.DeleteObject(saveBitMap.GetHandle())
+        saveDC.DeleteDC()
+        mfcDC.DeleteDC()
+        win32gui.ReleaseDC(self.hwnd, hwndDC)
+        
+        img = img[:, :, :3]
+        img = np.ascontiguousarray(img)
+        
+        return img
     
     def is_window_active(self):
-        try:
-            self.ensure_window_ready()
-        except Exception:
-            return False
         return win32gui.IsWindow(self.hwnd) if self.hwnd else False
 
 
@@ -197,15 +112,10 @@ class ForbiddenAreaOverlay:
         if self.overlay_hwnd:
             try:
                 win32gui.DestroyWindow(self.overlay_hwnd)
-            except Exception as exc:
-                logger.debug("Overlay destroy failed: %s", exc)
+            except:
+                pass
             self.overlay_hwnd = None
         logger.info("Forbidden area overlay stopped")
-
-    def update_target_hwnd(self, target_hwnd):
-        if target_hwnd and target_hwnd != self.target_hwnd:
-            self.target_hwnd = target_hwnd
-            logger.info("Forbidden area overlay rebound to hwnd %s", target_hwnd)
     
     def _create_overlay(self):
         try:
@@ -216,9 +126,8 @@ class ForbiddenAreaOverlay:
             wc.hbrBackground = win32gui.GetStockObject(win32con.NULL_BRUSH)
             
             try:
-                win32gui.RegisterClass(wc)
-            except Exception:
-                # Class already exists in most runs.
+                class_atom = win32gui.RegisterClass(wc)
+            except Exception as e:
                 pass
             
             target_rect = win32gui.GetClientRect(self.target_hwnd)
@@ -241,6 +150,12 @@ class ForbiddenAreaOverlay:
                 self.overlay_hwnd,
                 0,
                 128,  # 50% transparency
+                win32con.LWA_ALPHA
+            )
+            win32gui.SetLayeredWindowAttributes(
+                self.overlay_hwnd,
+                0,
+                128,
                 win32con.LWA_ALPHA
             )
             
@@ -268,7 +183,8 @@ class ForbiddenAreaOverlay:
                     logger.error(f"Error in overlay update loop: {e}")
                     break
                 
-                time.sleep(config.OVERLAY_UPDATE_INTERVAL)
+                import time
+                time.sleep(0.1)
                 
         except Exception as e:
             logger.error(f"Failed to create overlay window: {e}")
@@ -315,3 +231,4 @@ class ForbiddenAreaOverlay:
             win32gui.PostQuitMessage(0)
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+

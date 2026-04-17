@@ -1,98 +1,65 @@
-"""Utility script to discover Telegram chat IDs for the configured bot token."""
+"""
+Helper script to get your Telegram Chat ID
 
-import argparse
-import sys
-from typing import Any, Dict, Iterable, Optional
+Steps:
+1. Start your bot by messaging @YourBotName on Telegram
+2. Send any message to your bot (e.g., "Hello")
+3. Run this script: python get_chat_id.py
+4. Copy your chat_id from the output
+5. Paste it into config.py as TELEGRAM_CHAT_ID
+"""
 
 import requests
-
 import config
 
+bot_token = config.TELEGRAM_BOT_TOKEN
 
-def _load_token(cli_token: str | None) -> str:
-    # FIX: Support explicit CLI token override and sanitize whitespace.
-    token = (cli_token or config.TELEGRAM_BOT_TOKEN or "").strip()
-    if not token:
-        raise ValueError("No bot token found. Provide --token or set TELEGRAM_BOT_TOKEN in config.py")
-    return token
+if not bot_token:
+    print("ERROR: No bot token found in config.py")
+    print("Please set TELEGRAM_BOT_TOKEN in config.py")
+    exit(1)
 
+url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
 
-def _extract_chat_ids(updates: Iterable[dict]) -> dict[int, dict]:
-    # FIX: Defensively parse nested response objects to avoid KeyError crashes.
-    chats: dict[int, dict] = {}
-    for update in updates:
-        message = update.get("message") if isinstance(update, dict) else None
-        if not isinstance(message, dict):
-            continue
-
-        chat = message.get("chat")
-        if not isinstance(chat, dict):
-            continue
-
-        chat_id = chat.get("id")
-        if isinstance(chat_id, int):
-            chats[chat_id] = chat
-    return chats
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch Telegram updates and print discovered chat IDs")
-    parser.add_argument("--token", help="Telegram bot token override")
-    parser.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
-    args = parser.parse_args()
-
-    try:
-        token = _load_token(args.token)
-    except ValueError as exc:
-        print(f"ERROR: {exc}")
-        return 1
-
-    url = f"https://api.telegram.org/bot{token}/getUpdates"
-
-    try:
-        # FIX: Use explicit timeout and raise_for_status to fail fast on transport errors.
-        response = requests.get(url, timeout=max(1.0, args.timeout))
-        response.raise_for_status()
-        data = response.json()
-    except requests.RequestException as exc:
-        print(f"ERROR: request failed: {exc}")
-        return 1
-    except ValueError as exc:
-        print(f"ERROR: invalid JSON response: {exc}")
-        return 1
-
-    if not data.get("ok"):
-        print(f"ERROR: Telegram API returned failure payload: {data}")
-        return 1
-
-    updates = data.get("result", [])
-    if not isinstance(updates, list) or not updates:
-        print("No messages found. Send a message to your bot and run this script again.")
-        return 0
-
-    chats = _extract_chat_ids(updates)
-    if not chats:
-        print("No chat IDs found in updates payload.")
-        return 0
-
-    print("Found chat IDs:\n")
-    for chat_id, chat in sorted(chats.items()):
-        print(f"Chat ID: {chat_id}")
-        print(f"Chat Type: {chat.get('type', 'unknown')}")
-        username = chat.get("username")
-        first_name = chat.get("first_name")
-        if username:
-            print(f"Username: @{username}")
-        if first_name:
-            print(f"Name: {first_name}")
-        print("-" * 40)
-
-    example_chat_id = next(iter(chats))
-    print("\nCopy one of the Chat IDs above.")
-    print("Paste it into config.py as TELEGRAM_CHAT_ID.")
-    print('\nExample:\nTELEGRAM_CHAT_ID = "{}"'.format(example_chat_id))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+try:
+    response = requests.get(url)
+    data = response.json()
+    
+    if data.get("ok"):
+        updates = data.get("result", [])
+        
+        if not updates:
+            print("No messages found!")
+            print("\nPlease:")
+            print("1. Open Telegram and find your bot")
+            print("2. Send any message to your bot (e.g., 'Hello')")
+            print("3. Run this script again")
+        else:
+            print("Found messages!\n")
+            
+            # Get unique chat IDs
+            chat_ids = set()
+            for update in updates:
+                if "message" in update:
+                    chat = update["message"]["chat"]
+                    chat_id = chat["id"]
+                    chat_ids.add(chat_id)
+                    
+                    print(f"Chat ID: {chat_id}")
+                    print(f"Chat Type: {chat['type']}")
+                    if "username" in chat:
+                        print(f"Username: @{chat['username']}")
+                    if "first_name" in chat:
+                        print(f"Name: {chat['first_name']}")
+                    print("-" * 40)
+            
+            if chat_ids:
+                print("\n✅ Copy one of the Chat IDs above")
+                print("✅ Paste it into config.py as TELEGRAM_CHAT_ID")
+                print(f"\nExample:")
+                print(f'TELEGRAM_CHAT_ID = "{list(chat_ids)[0]}"')
+    else:
+        print(f"Error: {data}")
+        
+except Exception as e:
+    print(f"Error: {e}")
