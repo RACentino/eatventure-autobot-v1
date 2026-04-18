@@ -44,10 +44,10 @@ ShowForbiddenArea = False
 MATCH_THRESHOLD = 0.98
 
 # This is the starting confidence score for normal red-icon detection before AI vision fine-tunes it.
-RED_ICON_THRESHOLD = 0.94
+RED_ICON_THRESHOLD = 0.932
 
 # This is the starting confidence score for the special red icon that means a new level button is available.
-NEW_LEVEL_RED_ICON_THRESHOLD = 0.94
+NEW_LEVEL_RED_ICON_THRESHOLD = 0.932
 
 # This is the starting confidence score for the red icon that tells the bot a stats upgrade is ready.
 STATS_RED_ICON_THRESHOLD = 0.97
@@ -65,23 +65,23 @@ UNLOCK_THRESHOLD = 0.90
 NEW_LEVEL_THRESHOLD = 0.98
 
 # This tells the bot how many separate red-icon matches must agree at nearly the same spot before it trusts the icon.
-RED_ICON_MIN_MATCHES = 2
+RED_ICON_MIN_MATCHES = 3
 
 
 # Base timing and pacing
 
 # This is the normal pause after each click so the game has time to react.
-CLICK_DELAY = 0.28
+CLICK_DELAY = 0.36
 
 # This is the short pause after moving the mouse so the cursor settles before the next action fires.
-MOUSE_MOVE_DELAY = 0.04
+MOUSE_MOVE_DELAY = 0.05
 
 # This is the starting wait between repeated upgrade-station searches.
 # The adaptive tuner and learner can move this up or down while the bot runs.
-UPGRADE_SEARCH_INTERVAL = 0.32
+UPGRADE_SEARCH_INTERVAL = 0.42
 
 # This is a tiny settle pause the bot uses after important menu actions before doing the next step.
-STATE_DELAY = 0.18
+STATE_DELAY = 0.22
 
 
 # Telegram notifications
@@ -135,10 +135,10 @@ LEVEL_TRANSITION_POS = (174, 520)
 UPGRADE_STATION_COLOR_CHECK = False
 
 # This is how many upgrade taps the bot sends inside the stats menu each time it opens that menu.
-STATS_UPGRADE_CLICK_COUNT = 12
+STATS_UPGRADE_CLICK_COUNT = 30
 
 # This is the tiny pause between those repeated stat-upgrade taps.
-STATS_UPGRADE_CLICK_DELAY = 0.05
+STATS_UPGRADE_CLICK_DELAY = 0.016
 
 
 # Red-icon click adjustments
@@ -195,13 +195,13 @@ MAX_SCROLL_CYCLES = 7
 SCROLL_INCREMENT_STEP = 1
 
 # This is the short pause after a scroll drag finishes before the bot starts scanning again.
-SCROLL_INTERVAL_PAUSE = 0.22
+SCROLL_INTERVAL_PAUSE = 0.34
 
 # This is extra settling time to let the list stop moving after the drag.
-POST_SCROLL_SETTLE = 0.60
+POST_SCROLL_SETTLE = 1.00
 
 # This is how long the drag gesture itself lasts.
-SCROLL_DURATION = 0.32
+SCROLL_DURATION = 0.36
 
 
 # High-speed clicking
@@ -313,19 +313,19 @@ AI_BOX_MISS_STEP = 0.0025
 # AI vision normal red-icon tuning
 
 # This is the lowest normal red-icon threshold AI vision is allowed to relax down to.
-AI_RED_ICON_THRESHOLD_MIN = 0.90
+AI_RED_ICON_THRESHOLD_MIN = 0.926
 
 # This is the highest normal red-icon threshold AI vision is allowed to tighten up to.
-AI_RED_ICON_THRESHOLD_MAX = 0.95
+AI_RED_ICON_THRESHOLD_MAX = 0.938
 
 # This is the safety gap AI vision subtracts from the average red-icon confidence so it keeps a little breathing room.
 AI_RED_ICON_MARGIN = 0.018
 
 # This is how many missed normal red-icon scans in a row it takes before AI vision loosens the threshold.
-AI_RED_ICON_MISS_WINDOW = 4
+AI_RED_ICON_MISS_WINDOW = 6
 
 # This is how much the normal red-icon threshold is loosened when that miss window is reached.
-AI_RED_ICON_MISS_STEP = 0.0020
+AI_RED_ICON_MISS_STEP = 0.0010
 
 
 # AI vision big new-level button tuning
@@ -346,16 +346,16 @@ AI_NEW_LEVEL_MISS_STEP = 0.0020
 # AI vision new-level red-icon tuning
 
 # This is the lowest special new-level red-icon threshold AI vision is allowed to relax down to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.90
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.926
 
 # This is the highest special new-level red-icon threshold AI vision is allowed to tighten up to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.98
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.938
 
 # This is how many missed special new-level red-icon checks in a row it takes before AI vision loosens the threshold.
-AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 4
+AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 6
 
 # This is how much the special new-level red-icon threshold is loosened when that miss window is reached.
-AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0015
+AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0010
 
 
 # AI vision upgrade-station tuning
@@ -481,7 +481,7 @@ FORBIDDEN_ZONE_1_X_MAX = 350
 FORBIDDEN_ZONE_1_Y_MIN = 93
 
 # This is the bottom edge of forbidden zone 1. If a click lands inside the full zone 1 box, the bot refuses to click there.
-FORBIDDEN_ZONE_1_Y_MAX = 270
+FORBIDDEN_ZONE_1_Y_MAX = 320
 
 
 # Forbidden zone 2
