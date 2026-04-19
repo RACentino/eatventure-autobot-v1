@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
+import pywintypes
 from image_matcher import ImageMatcher
 from mouse_controller import MouseController
 from state_machine import State, StateMachine
@@ -790,6 +791,10 @@ class EatventureBot:
             return bool(self.state_machine.update())
         except (WindowNotAvailableError, WindowCaptureError) as exc:
             logger.error("Stopping bot: %s", exc)
+            self.stop()
+            return False
+        except pywintypes.error as exc:
+            logger.error("Stopping bot due to Windows input failure: %s", exc)
             self.stop()
             return False
 

@@ -189,19 +189,19 @@ SCROLL_PIXEL_STEP = 125
 SCROLL_DISTANCE_RATIO = 1.0
 
 # This is how many outward oscillation cycles the bot completes before the pattern resets back to the beginning.
-MAX_SCROLL_CYCLES = 2
+MAX_SCROLL_CYCLES = 1
 
 # This controls how long the bot stays moving in one direction before the oscillation expands and flips direction.
-SCROLL_INCREMENT_STEP = 4
+SCROLL_INCREMENT_STEP = 8
 
 # This is the short pause after a scroll drag finishes before the bot starts scanning again.
-SCROLL_INTERVAL_PAUSE = 0.34
+SCROLL_INTERVAL_PAUSE = 0.5
 
 # This is extra settling time to let the list stop moving after the drag.
-POST_SCROLL_SETTLE = 1.00
+POST_SCROLL_SETTLE = 0.5
 
 # This is how long the drag gesture itself lasts.
-SCROLL_DURATION = 0.36
+SCROLL_DURATION = 0.250
 
 
 # High-speed clicking
@@ -210,14 +210,14 @@ SCROLL_DURATION = 0.36
 SPAM_CLICK_DURATION = 5
 
 # This is the gap between clicks during a spam-click burst.
-SPAM_CLICK_DELAY = 0.016
+SPAM_CLICK_DELAY = 0.008
 
 # This adds random pixel wiggle to spam-clicking so the pointer can vary slightly around the target.
 # Set this to 0 if you want every spam click to land in exactly the same place.
 SPAM_CLICK_JITTER = 0
 
 # This is how long the mouse button stays down during one very fast click before it is released again.
-RAPID_CLICK_DOWN_UP_DELAY = 0.018
+RAPID_CLICK_DOWN_UP_DELAY = 0.008
 
 
 # Adaptive tuner
