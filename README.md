@@ -23,16 +23,16 @@ The bot's intelligence is built upon a formal **Finite State Machine (FSM)**. Ev
 
 ### Priority and Interrupts
 
-The bot features a **Priority Resolver** that allows critical events to interrupt standard gameplay. Using **Exception-Based Control Flow**, the bot can immediately halt a long-press or a scroll operation if a "New Level" button or a critical "Level Complete" red icon is detected. This ensures that the bot never wastes time on a completed restaurant and transitions as fast as possible.
+The bot gives level transitions priority during normal state processing. Before it commits to most upgrade, box, and red-icon actions, it re-checks for the large **New Level** button or the bottom **Level Complete** indicator so completed restaurants are handled before the next search cycle continues.
 
 ### Better Computer Vision
 
-The vision system goes far beyond simple template matching:
+The vision system is built around masked OpenCV template matching with a few practical safeguards:
 
-* **OpenCV Integration**: Uses optimized template matching with masks to handle transparency.
-* **Dual-Gate Color Verification**: Before clicking, the bot validates the **Red Channel Dominance** and **Red Pixel Density**. This prevents "false positives" caused by similar-looking background textures.
-* **Temporal Consistency (Stability Check)**: The bot must "see" an icon consistently across multiple frames before it is considered a valid target, eliminating clicks on transient animations or visual noise.
-* **Sub-Pixel Refinement**: After initial detection, the bot performs a localized "micro-scan" to center the click coordinate perfectly on the asset.
+* **Masked Template Matching**: Uses transparent PNG masks so icon shape matching stays stable.
+* **Multi-Template Consensus**: Red icons are only trusted after enough template variants agree on roughly the same location.
+* **Optional Color Verification**: Upgrade-station matching can apply an additional color-histogram check when needed.
+* **Adaptive Thresholds**: Detection thresholds can tighten or relax over time based on observed confidence.
 
 ### Adaptive and Historical Learning
 
@@ -54,7 +54,6 @@ A comprehensive logging system tracks every decision the bot makes. It includes:
 
 The bot provides tools for real-time calibration and transparency:
 
-* **Debug Vision**: Displays the bot's internal HSV masks, showing exactly what red pixels it is detecting. This is essential for tweaking `RED_ICON_PIXEL_THRESHOLD` and HSV bounds.
 * **Forbidden Zone Overlay**: When enabled, the bot draws a **semi-transparent red overlay** directly over the game window. This visualizes the "Dead Zones" where the bot is forbidden from clicking (e.g., ad menus, settings buttons), allowing for pixel-perfect configuration of the `FORBIDDEN_ZONES`.
 
 ### Forbidden Zone Configuration
@@ -63,7 +62,7 @@ The bot utilizes a refactored **Forbidden Zone Handling** system. Zones are defi
 
 1. Filters out any detections located inside these zones.
 2. If a critical asset (like an Upgrade Station) is trapped in a forbidden zone, the bot triggers an **Oscillating Scroll** to move the asset into a safe, clickable area.
-3. Implements a **Blackout Cache** to temporarily ignore coordinates that have repeatedly failed safety checks.
+3. Prioritizes previously successful red-icon rows so the search tends to revisit productive regions first.
 
 ## Requirements
 

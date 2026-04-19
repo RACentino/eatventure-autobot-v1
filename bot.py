@@ -12,7 +12,12 @@ from image_matcher import ImageMatcher
 from mouse_controller import MouseController
 from state_machine import State, StateMachine
 from telegram_notifier import TelegramNotifier
-from window_capture import ForbiddenAreaOverlay, WindowCapture
+from window_capture import (
+    ForbiddenAreaOverlay,
+    WindowCapture,
+    WindowCaptureError,
+    WindowNotAvailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +534,7 @@ class EatventureBot:
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
         self.mouse_controller = MouseController(
-            self.window_capture.hwnd,
+            self.window_capture.get_hwnd,
             config.CLICK_DELAY,
             config.MOUSE_MOVE_DELAY,
         )
@@ -673,20 +678,21 @@ class EatventureBot:
         self._apply_tuning()
 
     def _red_icon_template_names(self):
-        return [
-            "RedIcon",
-            "RedIcon2",
-            "RedIcon3",
-            "RedIcon4",
-            "RedIcon5",
-            "RedIcon6",
-            "RedIcon7",
-            "RedIcon8",
-            "RedIcon9",
-            "RedIcon10",
-            "RedIcon11",
-            "RedIconNoBG",
-        ]
+        template_names = [name for name in self.templates if name.startswith("RedIcon")]
+        if not template_names:
+            return ["RedIcon"]
+
+        def sort_key(name):
+            if name == "RedIcon":
+                return (0, 0)
+            if name == "RedIconNoBG":
+                return (2, 0)
+            suffix = name.replace("RedIcon", "", 1)
+            if suffix.isdigit():
+                return (1, int(suffix))
+            return (3, suffix)
+
+        return sorted(template_names, key=sort_key)
 
     def _record_level_completion(self):
         self.total_levels_completed += 1
@@ -749,7 +755,13 @@ class EatventureBot:
 
     def start(self):
         if self.running:
-            return
+            return True
+        try:
+            self.window_capture.ensure_window(resize=True)
+        except WindowNotAvailableError as exc:
+            logger.error("Cannot start bot: %s", exc)
+            self.running = False
+            return False
         self.running = True
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
@@ -757,6 +769,7 @@ class EatventureBot:
         if config.ShowForbiddenArea and self.overlay is None:
             self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
             self.overlay.start()
+        return True
 
     def stop(self):
         if not self.running and self.overlay is None:
@@ -768,8 +781,17 @@ class EatventureBot:
             self.overlay = None
 
     def step(self):
-        self._apply_tuning()
-        self.state_machine.update()
+        try:
+            if not self.window_capture.is_window_active():
+                logger.error("Window '%s' is not available", config.WINDOW_TITLE)
+                self.stop()
+                return False
+            self._apply_tuning()
+            return bool(self.state_machine.update())
+        except (WindowNotAvailableError, WindowCaptureError) as exc:
+            logger.error("Stopping bot: %s", exc)
+            self.stop()
+            return False
 
     def run(self):
         self.start()
@@ -785,12 +807,6 @@ class EatventureBot:
 
     def handle_find_red_icons(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
-
-        self.cycle_counter += 1
-        logger.info("Cycle %s/2", self.cycle_counter)
-        if self.cycle_counter >= 2:
-            self.cycle_counter = 0
-            return State.SCROLL
 
         self.work_done = False
 
@@ -813,6 +829,7 @@ class EatventureBot:
                 template_name="newLevel",
             )
             if found:
+                self.cycle_counter = 0
                 self.vision_optimizer.update_new_level_confidence(confidence)
                 logger.info("newLevel.png found at (%s, %s)", x, y)
                 return State.TRANSITION_LEVEL
@@ -937,6 +954,7 @@ class EatventureBot:
             self.red_icons = filtered_icons
             self.current_red_icon_index = 0
             self.red_icon_cycle_count = 0
+            self.cycle_counter = 0
             self.work_done = True
             logger.info("%s red icons ready to process", len(self.red_icons))
             return State.CLICK_RED_ICON
@@ -1023,6 +1041,7 @@ class EatventureBot:
                 self.upgrade_station_pos = (x, y)
                 self.upgrade_found_in_cycle = True
                 self.consecutive_failed_cycles = 0
+                self.cycle_counter = 0
                 self.vision_optimizer.update_upgrade_station_confidence(confidence)
                 self.tuner.record_search_result(True)
                 self._apply_tuning()
@@ -1138,6 +1157,7 @@ class EatventureBot:
             return State.SCROLL
 
         self.vision_optimizer.update_stats_upgrade_confidence(best_stats_confidence)
+        self.cycle_counter = 0
         logger.info("Stats icon found, upgrading")
         opened = self.mouse_controller.click(
             config.STATS_UPGRADE_BUTTON_POS[0],
@@ -1213,10 +1233,17 @@ class EatventureBot:
 
         if boxes_found > 0:
             self.work_done = True
+            self.cycle_counter = 0
             self.vision_optimizer.update_box_confidence(best_box_confidence)
             logger.info("Opened %s boxes", boxes_found)
         else:
             self.vision_optimizer.update_box_miss()
+
+        if self.consecutive_failed_cycles >= 3:
+            self.consecutive_failed_cycles = 0
+            self.cycle_counter = 0
+            logger.info("Repeated search failures reached threshold, forcing scroll")
+            return State.SCROLL
 
         if self.upgrade_found_in_cycle:
             self.upgrade_found_in_cycle = False
@@ -1224,13 +1251,13 @@ class EatventureBot:
             logger.info("Upgrade found in cycle, staying in current area")
             return State.FIND_RED_ICONS
 
-        self.cycle_counter += 1
-        if self.consecutive_failed_cycles >= 3:
-            self.consecutive_failed_cycles = 0
+        if self.work_done:
             self.cycle_counter = 0
-            logger.info("Repeated search failures reached threshold, forcing scroll")
-            return State.SCROLL
+            logger.info("Work completed in current area, rescanning before scrolling")
+            return State.FIND_RED_ICONS
 
+        self.cycle_counter += 1
+        logger.info("No work detected in current area (idle pass %s/2)", self.cycle_counter)
         if self.cycle_counter >= 2:
             self.cycle_counter = 0
             return State.SCROLL
@@ -1240,22 +1267,31 @@ class EatventureBot:
     def handle_scroll(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         self._perform_oscillating_scroll_step()
+        self.cycle_counter = 0
         return State.FIND_RED_ICONS
 
     def handle_check_new_level(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        if not self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True):
+            logger.warning("Failed to clear focus before confirming the new level")
+            return State.CHECK_NEW_LEVEL
         self._sleep(0.05)
-        self.mouse_controller.click(
+        opened = self.mouse_controller.click(
             config.NEW_LEVEL_BUTTON_POS[0],
             config.NEW_LEVEL_BUTTON_POS[1],
             relative=True,
         )
+        if not opened:
+            logger.warning("Failed to click the new level button at %s", config.NEW_LEVEL_BUTTON_POS)
+            return State.CHECK_NEW_LEVEL
         self._sleep(0.30)
-        self.mouse_controller.click(
+        advanced = self.mouse_controller.click(
             config.LEVEL_TRANSITION_POS[0],
             config.LEVEL_TRANSITION_POS[1],
             relative=True,
         )
+        if not advanced:
+            logger.warning("Failed to click the level transition button at %s", config.LEVEL_TRANSITION_POS)
+            return State.CHECK_NEW_LEVEL
         self._sleep(0.20)
         self._reset_search_cycle()
         return State.FIND_RED_ICONS
@@ -1285,7 +1321,10 @@ class EatventureBot:
                 if found:
                     self.vision_optimizer.update_new_level_confidence(confidence)
                     logger.info("New level button found at (%s, %s) on attempt %s", x, y, attempt + 1)
-                    self.mouse_controller.click(x, y, relative=True)
+                    clicked = self.mouse_controller.click(x, y, relative=True)
+                    if not clicked:
+                        logger.warning("New level button click failed at (%s, %s)", x, y)
+                        return State.CHECK_NEW_LEVEL
                     self._sleep(1.0)
                     elapsed = self._record_level_completion()
                     logger.info(
@@ -1304,7 +1343,9 @@ class EatventureBot:
         return State.FIND_RED_ICONS
 
     def handle_wait_for_unlock(self, current_state):
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        if not self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True):
+            logger.warning("Failed to clear focus while waiting for the next unlock")
+            return State.WAIT_FOR_UNLOCK
         self._sleep(0.05)
 
         self.wait_for_unlock_attempts += 1
@@ -1329,7 +1370,9 @@ class EatventureBot:
             )
             if found:
                 logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
-                self.mouse_controller.click(x, y, relative=True)
+                if not self.mouse_controller.click(x, y, relative=True):
+                    logger.warning("Unlock button click failed at (%s, %s)", x, y)
+                    return State.WAIT_FOR_UNLOCK
                 self._sleep(0.50)
                 self.wait_for_unlock_attempts = 0
                 self._reset_search_cycle()

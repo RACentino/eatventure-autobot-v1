@@ -44,10 +44,10 @@ ShowForbiddenArea = False
 MATCH_THRESHOLD = 0.98
 
 # This is the starting confidence score for normal red-icon detection before AI vision fine-tunes it.
-RED_ICON_THRESHOLD = 0.932
+RED_ICON_THRESHOLD = 0.942
 
 # This is the starting confidence score for the special red icon that means a new level button is available.
-NEW_LEVEL_RED_ICON_THRESHOLD = 0.932
+NEW_LEVEL_RED_ICON_THRESHOLD = 0.942
 
 # This is the starting confidence score for the red icon that tells the bot a stats upgrade is ready.
 STATS_RED_ICON_THRESHOLD = 0.97
@@ -65,7 +65,7 @@ UNLOCK_THRESHOLD = 0.90
 NEW_LEVEL_THRESHOLD = 0.98
 
 # This tells the bot how many separate red-icon matches must agree at nearly the same spot before it trusts the icon.
-RED_ICON_MIN_MATCHES = 3
+RED_ICON_MIN_MATCHES = 6
 
 
 # Base timing and pacing
@@ -189,10 +189,10 @@ SCROLL_PIXEL_STEP = 125
 SCROLL_DISTANCE_RATIO = 1.0
 
 # This is how many outward oscillation cycles the bot completes before the pattern resets back to the beginning.
-MAX_SCROLL_CYCLES = 7
+MAX_SCROLL_CYCLES = 2
 
 # This controls how long the bot stays moving in one direction before the oscillation expands and flips direction.
-SCROLL_INCREMENT_STEP = 1
+SCROLL_INCREMENT_STEP = 4
 
 # This is the short pause after a scroll drag finishes before the bot starts scanning again.
 SCROLL_INTERVAL_PAUSE = 0.34
@@ -207,10 +207,10 @@ SCROLL_DURATION = 0.36
 # High-speed clicking
 
 # This is how long the bot keeps machine-gun clicking an upgrade station during one spam-click burst.
-SPAM_CLICK_DURATION = 3.2
+SPAM_CLICK_DURATION = 5
 
 # This is the gap between clicks during a spam-click burst.
-SPAM_CLICK_DELAY = 0.05
+SPAM_CLICK_DELAY = 0.016
 
 # This adds random pixel wiggle to spam-clicking so the pointer can vary slightly around the target.
 # Set this to 0 if you want every spam click to land in exactly the same place.
@@ -313,10 +313,10 @@ AI_BOX_MISS_STEP = 0.0025
 # AI vision normal red-icon tuning
 
 # This is the lowest normal red-icon threshold AI vision is allowed to relax down to.
-AI_RED_ICON_THRESHOLD_MIN = 0.926
+AI_RED_ICON_THRESHOLD_MIN = 0.942
 
 # This is the highest normal red-icon threshold AI vision is allowed to tighten up to.
-AI_RED_ICON_THRESHOLD_MAX = 0.938
+AI_RED_ICON_THRESHOLD_MAX = 0.942
 
 # This is the safety gap AI vision subtracts from the average red-icon confidence so it keeps a little breathing room.
 AI_RED_ICON_MARGIN = 0.018
@@ -346,10 +346,10 @@ AI_NEW_LEVEL_MISS_STEP = 0.0020
 # AI vision new-level red-icon tuning
 
 # This is the lowest special new-level red-icon threshold AI vision is allowed to relax down to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.926
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.942
 
 # This is the highest special new-level red-icon threshold AI vision is allowed to tighten up to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.938
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.942
 
 # This is how many missed special new-level red-icon checks in a row it takes before AI vision loosens the threshold.
 AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 6

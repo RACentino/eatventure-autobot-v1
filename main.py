@@ -22,14 +22,15 @@ def on_press(key):
 
         logger = logging.getLogger(__name__)
         if key.char == "x":
-            if bot_instance and bot_instance.window_capture.hwnd:
+            if bot_instance and bot_instance.window_capture.is_window_active():
+                hwnd = bot_instance.window_capture.get_hwnd()
                 screen_x, screen_y = win32api.GetCursorPos()
-                win_x, win_y = win32gui.ClientToScreen(bot_instance.window_capture.hwnd, (0, 0))
+                win_x, win_y = win32gui.ClientToScreen(hwnd, (0, 0))
                 rel_x = screen_x - win_x
                 rel_y = screen_y - win_y
                 logger.info("[X pressed] Window position: (%s, %s)", rel_x, rel_y)
             else:
-                logger.info("[X pressed] Bot not initialized yet")
+                logger.info("[X pressed] Bot window is not available")
         elif key.char == "z":
             if bot_instance:
                 if bot_instance.running:
@@ -37,9 +38,12 @@ def on_press(key):
                     bot_instance.telegram.notify_bot_stopped()
                     logger.info("[Z pressed] Bot STOPPED")
                 else:
-                    bot_instance.start()
-                    bot_instance.telegram.notify_bot_started()
-                    logger.info("[Z pressed] Bot STARTED")
+                    started = bot_instance.start()
+                    if started:
+                        bot_instance.telegram.notify_bot_started()
+                        logger.info("[Z pressed] Bot STARTED")
+                    else:
+                        logger.warning("[Z pressed] Bot START failed")
         elif key.char == "c":
             if bot_instance:
                 bot_instance.wipe_memory()

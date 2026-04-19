@@ -12,13 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 class MouseController:
-    def __init__(self, hwnd, click_delay=None, move_delay=None):
-        self.hwnd = hwnd
+    def __init__(self, hwnd_source, click_delay=None, move_delay=None):
+        self._hwnd_source = hwnd_source
         self.click_delay = config.CLICK_DELAY if click_delay is None else click_delay
         self.move_delay = config.MOUSE_MOVE_DELAY if move_delay is None else move_delay
 
+    def _get_hwnd(self):
+        hwnd = self._hwnd_source() if callable(self._hwnd_source) else self._hwnd_source
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            raise RuntimeError("Target window is not available")
+        return hwnd
+
     def get_window_position(self):
-        x, y = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        hwnd = self._get_hwnd()
+        x, y = win32gui.ClientToScreen(hwnd, (0, 0))
         return x, y
 
     def is_in_forbidden_zone(self, x, y, relative=True):
@@ -72,15 +79,19 @@ class MouseController:
         return False
 
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
-        if relative:
-            if check_forbidden and self.is_in_forbidden_zone(x, y, relative=True):
-                return None
-            win_x, win_y = self.get_window_position()
-            return int(win_x + x), int(win_y + y)
+        try:
+            if relative:
+                if check_forbidden and self.is_in_forbidden_zone(x, y, relative=True):
+                    return None
+                win_x, win_y = self.get_window_position()
+                return int(win_x + x), int(win_y + y)
 
-        if check_forbidden and self.is_in_forbidden_zone(x, y, relative=False):
+            if check_forbidden and self.is_in_forbidden_zone(x, y, relative=False):
+                return None
+            return int(x), int(y)
+        except RuntimeError as exc:
+            logger.error("Cannot resolve screen position: %s", exc)
             return None
-        return int(x), int(y)
 
     def move_to(self, x, y, relative=True):
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
@@ -230,17 +241,21 @@ class MouseController:
         if duration is None:
             duration = config.SCROLL_DURATION
 
-        if relative:
-            win_x, win_y = self.get_window_position()
-            screen_from_x = win_x + from_x
-            screen_from_y = win_y + from_y
-            screen_to_x = win_x + to_x
-            screen_to_y = win_y + to_y
-        else:
-            screen_from_x = from_x
-            screen_from_y = from_y
-            screen_to_x = to_x
-            screen_to_y = to_y
+        try:
+            if relative:
+                win_x, win_y = self.get_window_position()
+                screen_from_x = win_x + from_x
+                screen_from_y = win_y + from_y
+                screen_to_x = win_x + to_x
+                screen_to_y = win_y + to_y
+            else:
+                screen_from_x = from_x
+                screen_from_y = from_y
+                screen_to_x = to_x
+                screen_to_y = to_y
+        except RuntimeError as exc:
+            logger.error("Cannot start drag: %s", exc)
+            return False
 
         win32api.SetCursorPos((int(screen_from_x), int(screen_from_y)))
         if self.move_delay > 0:
