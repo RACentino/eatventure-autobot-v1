@@ -31,7 +31,7 @@ class StateMachine:
     
     def transition(self, new_state):
         if new_state != self.current_state:
-            logger.info(f"State transition: {self.current_state.name} -> {new_state.name}")
+            logger.debug(f"State transition: {self.current_state.name} -> {new_state.name}")
             self.previous_state = self.current_state
             self.current_state = new_state
     

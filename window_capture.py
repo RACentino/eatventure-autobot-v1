@@ -116,12 +116,9 @@ class WindowCapture:
             self.ensure_window()
             self._resize_bound_window()
 
-    def get_window_rect(self):
-        hwnd = self.ensure_window()
-
+    def _get_client_size(self, hwnd):
         try:
             rect = win32gui.GetClientRect(hwnd)
-            x, y = win32gui.ClientToScreen(hwnd, (rect[0], rect[1]))
         except pywintypes.error as exc:
             raise self._translate_win32_error(exc, "reading the window bounds") from exc
 
@@ -131,11 +128,20 @@ class WindowCapture:
             raise WindowCaptureError(
                 f"Window '{self.window_title}' has an invalid client size: {width}x{height}"
             )
+        return rect, width, height
+
+    def get_window_rect(self):
+        hwnd = self.ensure_window()
+        rect, width, height = self._get_client_size(hwnd)
+        try:
+            x, y = win32gui.ClientToScreen(hwnd, (rect[0], rect[1]))
+        except pywintypes.error as exc:
+            raise self._translate_win32_error(exc, "reading the window bounds") from exc
         return x, y, width, height
 
     def capture(self, max_y=None):
         hwnd = self.ensure_window()
-        _, _, width, height = self.get_window_rect()
+        _, width, height = self._get_client_size(hwnd)
 
         if max_y is not None:
             height = min(height, int(max_y))

@@ -32,7 +32,7 @@ WINDOW_HEIGHT = 780
 # Logging and visual helpers
 
 # Turn this on if you want more detailed troubleshooting messages in the console and log file.
-DEBUG = True
+DEBUG = False
 
 # Turn this on if you want the bot to draw a red overlay over places it is not allowed to click.
 ShowForbiddenArea = False
@@ -41,7 +41,7 @@ ShowForbiddenArea = False
 # Base picture-matching confidence
 
 # This is the fallback confidence score for picture matching when a search does not use its own special threshold.
-MATCH_THRESHOLD = 0.976
+MATCH_THRESHOLD = 0.98
 
 # This is the starting confidence score for normal red-icon detection before AI vision fine-tunes it.
 RED_ICON_THRESHOLD = 0.950
@@ -56,7 +56,7 @@ STATS_RED_ICON_THRESHOLD = 0.966
 UPGRADE_STATION_THRESHOLD = 0.939
 
 # This is the starting confidence score for finding reward boxes.
-BOX_THRESHOLD = 0.972
+BOX_THRESHOLD = 0.97
 
 # This is the confidence score the bot needs before it trusts that the unlock button is really on screen.
 UNLOCK_THRESHOLD = 0.905
@@ -65,7 +65,7 @@ UNLOCK_THRESHOLD = 0.905
 NEW_LEVEL_THRESHOLD = 0.965
 
 # This tells the bot how many separate red-icon matches must agree at nearly the same spot before it trusts the icon.
-RED_ICON_MIN_MATCHES = 6
+RED_ICON_MIN_MATCHES = 3
 
 
 # Base timing and pacing
@@ -186,19 +186,19 @@ UPGRADE_RED_ICON_Y_MAX = 680
 SCROLL_PIXEL_STEP = 125
 
 # This multiplies the base scroll distance if you want each drag to be shorter or longer without changing the base step.
-SCROLL_DISTANCE_RATIO = 1.0
+SCROLL_DISTANCE_RATIO = 2.0
 
 # This is how many outward oscillation cycles the bot completes before the pattern resets back to the beginning.
-MAX_SCROLL_CYCLES = 1
+MAX_SCROLL_CYCLES = 5
 
 # This controls how long the bot stays moving in one direction before the oscillation expands and flips direction.
-SCROLL_INCREMENT_STEP = 12
+SCROLL_INCREMENT_STEP = 1
 
 # This is the short pause after a scroll drag finishes before the bot starts scanning again.
-SCROLL_INTERVAL_PAUSE = 0.5
+SCROLL_INTERVAL_PAUSE = 0.250
 
 # This is extra settling time to let the list stop moving after the drag.
-POST_SCROLL_SETTLE = 0.5
+POST_SCROLL_SETTLE = 0.250
 
 # This is how long the drag gesture itself lasts.
 SCROLL_DURATION = 0.200
@@ -280,7 +280,7 @@ ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.24
 # AI vision general behavior
 
 # Turn this on if you want picture-matching thresholds to learn and adjust themselves while the bot runs.
-AI_VISION_ENABLED = True
+AI_VISION_ENABLED = False
 
 # This is the normal learning speed AI vision uses when updating a threshold from new evidence.
 AI_VISION_ALPHA = 0.14

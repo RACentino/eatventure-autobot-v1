@@ -98,42 +98,42 @@ class MouseController:
             y >= config.FORBIDDEN_CLICK_Y_MIN
             and config.FORBIDDEN_CLICK_X_MIN <= x <= config.FORBIDDEN_CLICK_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_CLICK zone", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_CLICK zone", x, y)
             return True
 
         if (
             config.FORBIDDEN_ZONE_1_Y_MIN <= y <= config.FORBIDDEN_ZONE_1_Y_MAX
             and config.FORBIDDEN_ZONE_1_X_MIN <= x <= config.FORBIDDEN_ZONE_1_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_1", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_1", x, y)
             return True
 
         if (
             config.FORBIDDEN_ZONE_2_Y_MIN <= y <= config.FORBIDDEN_ZONE_2_Y_MAX
             and config.FORBIDDEN_ZONE_2_X_MIN <= x <= config.FORBIDDEN_ZONE_2_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_2", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_2", x, y)
             return True
 
         if (
             config.FORBIDDEN_ZONE_3_Y_MIN <= y <= config.FORBIDDEN_ZONE_3_Y_MAX
             and config.FORBIDDEN_ZONE_3_X_MIN <= x <= config.FORBIDDEN_ZONE_3_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_3", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_3", x, y)
             return True
 
         if (
             config.FORBIDDEN_ZONE_4_Y_MIN <= y <= config.FORBIDDEN_ZONE_4_Y_MAX
             and config.FORBIDDEN_ZONE_4_X_MIN <= x <= config.FORBIDDEN_ZONE_4_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_4", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_4", x, y)
             return True
 
         if (
             config.FORBIDDEN_ZONE_5_Y_MIN <= y <= config.FORBIDDEN_ZONE_5_Y_MAX
             and config.FORBIDDEN_ZONE_5_X_MIN <= x <= config.FORBIDDEN_ZONE_5_X_MAX
         ):
-            logger.warning("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_5", x, y)
+            logger.debug("Coordinates (%s, %s) blocked - FORBIDDEN_ZONE_5", x, y)
             return True
 
         return False
@@ -163,7 +163,7 @@ class MouseController:
             return False
         if self.move_delay > 0:
             time.sleep(self.move_delay)
-        logger.info("Cursor moved to (%s, %s)", screen_x, screen_y)
+        logger.debug("Cursor moved to (%s, %s)", screen_x, screen_y)
         return True
 
     def click(self, x, y, relative=True, delay=None):
@@ -192,7 +192,7 @@ class MouseController:
                 self._best_effort_left_up(screen_x, screen_y)
                 continue
 
-            logger.info("Clicked at (%s, %s)", screen_x, screen_y)
+            logger.debug("Clicked at (%s, %s)", screen_x, screen_y)
             wait_time = self.click_delay if delay is None else delay
             if wait_time > 0:
                 time.sleep(wait_time)
@@ -224,7 +224,7 @@ class MouseController:
         if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
             self._best_effort_left_up(screen_x, screen_y)
             return False
-        logger.info("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
+        logger.debug("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
 
         end_time = time.monotonic() + max(0.0, float(duration))
         while time.monotonic() < end_time:
@@ -272,7 +272,7 @@ class MouseController:
         next_click_at = start_time
         click_count = 0
 
-        logger.info(
+        logger.debug(
             "Spam-clicking at (%s, %s) for %.2fs (interval=%.3fs, jitter=%s)",
             base_x,
             base_y,
@@ -283,7 +283,7 @@ class MouseController:
 
         while True:
             if interrupt_check and interrupt_check():
-                logger.info("Spam-click interrupted after %s clicks", click_count)
+                logger.debug("Spam-click interrupted after %s clicks", click_count)
                 return False
 
             now = time.perf_counter()
@@ -316,7 +316,7 @@ class MouseController:
             click_count += 1
             next_click_at += click_delay
 
-        logger.info("Spam-click complete: %s clicks", click_count)
+        logger.debug("Spam-click complete: %s clicks", click_count)
         if self.click_delay > 0:
             time.sleep(self.click_delay)
         return True
@@ -365,7 +365,7 @@ class MouseController:
         if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_to_x, screen_to_y):
             self._best_effort_left_up(screen_to_x, screen_to_y)
             return False
-        logger.info("Dragged from (%s, %s) to (%s, %s)", from_x, from_y, to_x, to_y)
+        logger.debug("Dragged from (%s, %s) to (%s, %s)", from_x, from_y, to_x, to_y)
         if self.click_delay > 0:
             time.sleep(self.click_delay)
         return True

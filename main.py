@@ -1,7 +1,9 @@
 import logging
+import queue
 from pathlib import Path
 import sys
 import time
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 import win32api
 import win32gui
@@ -12,6 +14,7 @@ from bot import EatventureBot
 
 bot_instance = None
 should_exit = False
+log_listener = None
 
 
 def on_press(key):
@@ -56,8 +59,9 @@ def on_press(key):
 
 
 def setup_logging():
+    global log_listener
     logs_dir = Path(config.LOGS_DIR)
-    logs_dir.mkdir(exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     log_level = logging.DEBUG if config.DEBUG else logging.INFO
@@ -66,19 +70,37 @@ def setup_logging():
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    file_handler = logging.FileHandler(logs_dir / "bot.log", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
+    file_handler = RotatingFileHandler(
+        logs_dir / "bot.log",
+        maxBytes=5_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(log_format))
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(log_level)
     root_logger.handlers.clear()
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
+
+    if log_listener is not None:
+        log_listener.stop()
+
+    log_queue = queue.SimpleQueue()
+    queue_handler = QueueHandler(log_queue)
+    root_logger.addHandler(queue_handler)
+
+    log_listener = QueueListener(
+        log_queue,
+        console_handler,
+        file_handler,
+        respect_handler_level=True,
+    )
+    log_listener.start()
 
 
 def main():
-    global bot_instance, should_exit
+    global bot_instance, should_exit, log_listener
 
     print("=" * 60)
     print("Eatventure Bot - Screen Automation Tool")
@@ -119,7 +141,12 @@ def main():
     finally:
         if bot_instance is not None and bot_instance.running:
             bot_instance.stop()
+        if bot_instance is not None:
+            bot_instance.telegram.close()
         listener.stop()
+        if log_listener is not None:
+            log_listener.stop()
+            log_listener = None
 
     return 0
 
