@@ -41,28 +41,28 @@ ShowForbiddenArea = False
 # Base picture-matching confidence
 
 # This is the fallback confidence score for picture matching when a search does not use its own special threshold.
-MATCH_THRESHOLD = 0.98
+MATCH_THRESHOLD = 0.976
 
 # This is the starting confidence score for normal red-icon detection before AI vision fine-tunes it.
-RED_ICON_THRESHOLD = 0.942
+RED_ICON_THRESHOLD = 0.950
 
 # This is the starting confidence score for the special red icon that means a new level button is available.
-NEW_LEVEL_RED_ICON_THRESHOLD = 0.942
+NEW_LEVEL_RED_ICON_THRESHOLD = 0.950
 
 # This is the starting confidence score for the red icon that tells the bot a stats upgrade is ready.
-STATS_RED_ICON_THRESHOLD = 0.97
+STATS_RED_ICON_THRESHOLD = 0.966
 
 # This is the starting confidence score for finding the upgrade station button.
-UPGRADE_STATION_THRESHOLD = 0.94
+UPGRADE_STATION_THRESHOLD = 0.939
 
 # This is the starting confidence score for finding reward boxes.
-BOX_THRESHOLD = 0.97
+BOX_THRESHOLD = 0.972
 
 # This is the confidence score the bot needs before it trusts that the unlock button is really on screen.
-UNLOCK_THRESHOLD = 0.90
+UNLOCK_THRESHOLD = 0.905
 
 # This is the confidence score the bot needs before it trusts that the big new-level button is really on screen.
-NEW_LEVEL_THRESHOLD = 0.98
+NEW_LEVEL_THRESHOLD = 0.965
 
 # This tells the bot how many separate red-icon matches must agree at nearly the same spot before it trusts the icon.
 RED_ICON_MIN_MATCHES = 6
@@ -71,17 +71,17 @@ RED_ICON_MIN_MATCHES = 6
 # Base timing and pacing
 
 # This is the normal pause after each click so the game has time to react.
-CLICK_DELAY = 0.36
+CLICK_DELAY = 0.12
 
 # This is the short pause after moving the mouse so the cursor settles before the next action fires.
-MOUSE_MOVE_DELAY = 0.05
+MOUSE_MOVE_DELAY = 0.015
 
 # This is the starting wait between repeated upgrade-station searches.
 # The adaptive tuner and learner can move this up or down while the bot runs.
-UPGRADE_SEARCH_INTERVAL = 0.42
+UPGRADE_SEARCH_INTERVAL = 0.15
 
 # This is a tiny settle pause the bot uses after important menu actions before doing the next step.
-STATE_DELAY = 0.22
+STATE_DELAY = 0.12
 
 
 # Telegram notifications
@@ -138,7 +138,7 @@ UPGRADE_STATION_COLOR_CHECK = False
 STATS_UPGRADE_CLICK_COUNT = 30
 
 # This is the tiny pause between those repeated stat-upgrade taps.
-STATS_UPGRADE_CLICK_DELAY = 0.016
+STATS_UPGRADE_CLICK_DELAY = 0.010
 
 
 # Red-icon click adjustments
@@ -192,7 +192,7 @@ SCROLL_DISTANCE_RATIO = 1.0
 MAX_SCROLL_CYCLES = 1
 
 # This controls how long the bot stays moving in one direction before the oscillation expands and flips direction.
-SCROLL_INCREMENT_STEP = 8
+SCROLL_INCREMENT_STEP = 12
 
 # This is the short pause after a scroll drag finishes before the bot starts scanning again.
 SCROLL_INTERVAL_PAUSE = 0.5
@@ -201,7 +201,7 @@ SCROLL_INTERVAL_PAUSE = 0.5
 POST_SCROLL_SETTLE = 0.5
 
 # This is how long the drag gesture itself lasts.
-SCROLL_DURATION = 0.250
+SCROLL_DURATION = 0.200
 
 
 # High-speed clicking
@@ -226,55 +226,55 @@ RAPID_CLICK_DOWN_UP_DELAY = 0.008
 ADAPTIVE_TUNER_ENABLED = False
 
 # This controls how strongly the tuner reacts to fresh success and failure data.
-ADAPTIVE_TUNER_ALPHA = 0.12
+ADAPTIVE_TUNER_ALPHA = 0.10
 
 # If the recent click success score falls below this line, the tuner slows clicking down.
-ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD = 0.94
+ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD = 0.985
 
 # If the recent click success score rises above this line, the tuner speeds clicking up.
 ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD = 0.999
 
 # If the recent search success score falls below this line, the tuner waits longer between searches.
-ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD = 0.94
+ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD = 0.97
 
 # If the recent search success score rises above this line, the tuner retries searches faster.
-ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD = 0.998
+ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD = 0.997
 
 # This is how much extra wait time gets added when the tuner decides clicks are too aggressive.
-ADAPTIVE_TUNER_CLICK_DELAY_STEP = 0.015
+ADAPTIVE_TUNER_CLICK_DELAY_STEP = 0.008
 
 # This is how much extra mouse-settle time gets added when the tuner decides movement is too aggressive.
-ADAPTIVE_TUNER_MOVE_DELAY_STEP = 0.004
+ADAPTIVE_TUNER_MOVE_DELAY_STEP = 0.002
 
 # This is how much click wait time gets removed when the tuner decides the bot can safely go faster.
-ADAPTIVE_TUNER_CLICK_DECREMENT = 0.002
+ADAPTIVE_TUNER_CLICK_DECREMENT = 0.0010
 
 # This is how much mouse-settle time gets removed when the tuner decides the bot can safely go faster.
-ADAPTIVE_TUNER_MOVE_DECREMENT = 0.001
+ADAPTIVE_TUNER_MOVE_DECREMENT = 0.0004
 
 # This is how much extra wait time gets added between searches when search results are poor.
-ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.04
+ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.015
 
 # This is how much wait time gets removed between searches when search results are strong.
-ADAPTIVE_TUNER_SEARCH_DECREMENT = 0.005
+ADAPTIVE_TUNER_SEARCH_DECREMENT = 0.002
 
 # This is the fastest click delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.22
+ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.11
 
 # This is the slowest click delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.40
+ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.24
 
 # This is the fastest mouse-settle delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.03
+ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.012
 
 # This is the slowest mouse-settle delay the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.08
+ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.032
 
 # This is the fastest search retry interval the tuner is allowed to use.
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.28
+ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.14
 
 # This is the slowest search retry interval the tuner is allowed to use.
-ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.55
+ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.24
 
 
 # AI vision general behavior
@@ -283,109 +283,109 @@ ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.55
 AI_VISION_ENABLED = True
 
 # This is the normal learning speed AI vision uses when updating a threshold from new evidence.
-AI_VISION_ALPHA = 0.12
+AI_VISION_ALPHA = 0.14
 
 # This is the fastest learning speed AI vision is ever allowed to use.
-AI_VISION_ALPHA_MAX = 0.24
+AI_VISION_ALPHA_MAX = 0.28
 
 # This adds extra learning speed when the bot sees very confident matches.
-AI_VISION_CONFIDENCE_BOOST = 0.10
+AI_VISION_CONFIDENCE_BOOST = 0.12
 
 # A detection must beat this confidence before AI vision starts applying that extra learning boost.
-AI_VISION_CONFIDENCE_THRESHOLD = 0.94
+AI_VISION_CONFIDENCE_THRESHOLD = 0.95
 
 
 # AI vision box tuning
 
 # This is the lowest box-detection threshold AI vision is allowed to relax down to.
-AI_BOX_THRESHOLD_MIN = 0.90
+AI_BOX_THRESHOLD_MIN = 0.91
 
 # This is the highest box-detection threshold AI vision is allowed to tighten up to.
-AI_BOX_THRESHOLD_MAX = 0.992
+AI_BOX_THRESHOLD_MAX = 0.994
 
 # This is how many missed box checks in a row it takes before AI vision loosens the box threshold.
-AI_BOX_MISS_WINDOW = 4
+AI_BOX_MISS_WINDOW = 3
 
 # This is how much the box threshold is loosened when that miss window is reached.
-AI_BOX_MISS_STEP = 0.0025
+AI_BOX_MISS_STEP = 0.0030
 
 
 # AI vision normal red-icon tuning
 
 # This is the lowest normal red-icon threshold AI vision is allowed to relax down to.
-AI_RED_ICON_THRESHOLD_MIN = 0.942
+AI_RED_ICON_THRESHOLD_MIN = 0.946
 
 # This is the highest normal red-icon threshold AI vision is allowed to tighten up to.
-AI_RED_ICON_THRESHOLD_MAX = 0.942
+AI_RED_ICON_THRESHOLD_MAX = 0.956
 
 # This is the safety gap AI vision subtracts from the average red-icon confidence so it keeps a little breathing room.
-AI_RED_ICON_MARGIN = 0.018
+AI_RED_ICON_MARGIN = 0.016
 
 # This is how many missed normal red-icon scans in a row it takes before AI vision loosens the threshold.
-AI_RED_ICON_MISS_WINDOW = 6
+AI_RED_ICON_MISS_WINDOW = 5
 
 # This is how much the normal red-icon threshold is loosened when that miss window is reached.
-AI_RED_ICON_MISS_STEP = 0.0010
+AI_RED_ICON_MISS_STEP = 0.0012
 
 
 # AI vision big new-level button tuning
 
 # This is the lowest big new-level button threshold AI vision is allowed to relax down to.
-AI_NEW_LEVEL_THRESHOLD_MIN = 0.95
+AI_NEW_LEVEL_THRESHOLD_MIN = 0.945
 
 # This is the highest big new-level button threshold AI vision is allowed to tighten up to.
-AI_NEW_LEVEL_THRESHOLD_MAX = 0.992
+AI_NEW_LEVEL_THRESHOLD_MAX = 0.988
 
 # This is how many missed big new-level button checks in a row it takes before AI vision loosens the threshold.
-AI_NEW_LEVEL_MISS_WINDOW = 4
+AI_NEW_LEVEL_MISS_WINDOW = 3
 
 # This is how much the big new-level button threshold is loosened when that miss window is reached.
-AI_NEW_LEVEL_MISS_STEP = 0.0020
+AI_NEW_LEVEL_MISS_STEP = 0.0025
 
 
 # AI vision new-level red-icon tuning
 
 # This is the lowest special new-level red-icon threshold AI vision is allowed to relax down to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.942
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.946
 
 # This is the highest special new-level red-icon threshold AI vision is allowed to tighten up to.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.942
+AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.958
 
 # This is how many missed special new-level red-icon checks in a row it takes before AI vision loosens the threshold.
-AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 6
+AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 5
 
 # This is how much the special new-level red-icon threshold is loosened when that miss window is reached.
-AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0010
+AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0012
 
 
 # AI vision upgrade-station tuning
 
 # This is the lowest upgrade-station threshold AI vision is allowed to relax down to.
-AI_UPGRADE_STATION_THRESHOLD_MIN = 0.90
+AI_UPGRADE_STATION_THRESHOLD_MIN = 0.892
 
 # This is the highest upgrade-station threshold AI vision is allowed to tighten up to.
-AI_UPGRADE_STATION_THRESHOLD_MAX = 0.97
+AI_UPGRADE_STATION_THRESHOLD_MAX = 0.948
 
 # This is how many missed upgrade-station searches in a row it takes before AI vision loosens the threshold.
 AI_UPGRADE_STATION_MISS_WINDOW = 3
 
 # This is how much the upgrade-station threshold is loosened when that miss window is reached.
-AI_UPGRADE_STATION_MISS_STEP = 0.0035
+AI_UPGRADE_STATION_MISS_STEP = 0.0040
 
 
 # AI vision stats-upgrade tuning
 
 # This is the lowest stats-upgrade threshold AI vision is allowed to relax down to.
-AI_STATS_UPGRADE_THRESHOLD_MIN = 0.90
+AI_STATS_UPGRADE_THRESHOLD_MIN = 0.912
 
 # This is the highest stats-upgrade threshold AI vision is allowed to tighten up to.
-AI_STATS_UPGRADE_THRESHOLD_MAX = 0.99
+AI_STATS_UPGRADE_THRESHOLD_MAX = 0.988
 
 # This is how many missed stats-upgrade checks in a row it takes before AI vision loosens the threshold.
-AI_STATS_UPGRADE_MISS_WINDOW = 4
+AI_STATS_UPGRADE_MISS_WINDOW = 3
 
 # This is how much the stats-upgrade threshold is loosened when that miss window is reached.
-AI_STATS_UPGRADE_MISS_STEP = 0.0020
+AI_STATS_UPGRADE_MISS_STEP = 0.0025
 
 
 # AI vision saved state
@@ -394,7 +394,7 @@ AI_STATS_UPGRADE_MISS_STEP = 0.0020
 AI_VISION_STATE_FILE = str(MEMORY_DIR / "vision_state.json")
 
 # This is the minimum wait between automatic saves of AI vision memory.
-AI_VISION_SAVE_INTERVAL = 15.0
+AI_VISION_SAVE_INTERVAL = 30.0
 
 
 # AI learning general behavior
@@ -406,7 +406,7 @@ AI_LEARNING_ENABLED = False
 AI_LEARNING_STATE_FILE = str(MEMORY_DIR / "learning_state_stable.json")
 
 # This is the minimum wait between automatic saves of the learning system's memory.
-AI_LEARNING_SAVE_INTERVAL = 5.0
+AI_LEARNING_SAVE_INTERVAL = 10.0
 
 # This is the maximum number of past completion records the learning system keeps.
 AI_LEARNING_RECORDS_LIMIT = 256
@@ -421,7 +421,7 @@ AI_LEARNING_THREAD_INTERVAL = 0.75
 AI_LEARNING_PAIR_WINDOW = 5
 
 # This is the larger recent-run window used for slower, broader learning passes.
-AI_LEARNING_BATCH_WINDOW = 15
+AI_LEARNING_BATCH_WINDOW = 12
 
 # This controls how strongly the learner moves toward a better timing profile instead of jumping there all at once.
 AI_LEARNING_EMA_ALPHA = 0.10
@@ -436,22 +436,22 @@ AI_LEARNING_MIN_IMPROVEMENT_RATIO = 0.08
 AI_LEARNING_APPLY_COOLDOWN = 30.0
 
 # This is the fastest click delay the learner is allowed to apply.
-AI_LEARNING_MIN_CLICK_DELAY = 0.22
+AI_LEARNING_MIN_CLICK_DELAY = 0.11
 
 # This is the slowest click delay the learner is allowed to apply.
-AI_LEARNING_MAX_CLICK_DELAY = 0.40
+AI_LEARNING_MAX_CLICK_DELAY = 0.24
 
 # This is the fastest mouse-settle delay the learner is allowed to apply.
-AI_LEARNING_MIN_MOVE_DELAY = 0.03
+AI_LEARNING_MIN_MOVE_DELAY = 0.012
 
 # This is the slowest mouse-settle delay the learner is allowed to apply.
-AI_LEARNING_MAX_MOVE_DELAY = 0.08
+AI_LEARNING_MAX_MOVE_DELAY = 0.032
 
 # This is the fastest search retry interval the learner is allowed to apply.
-AI_LEARNING_MIN_SEARCH_INTERVAL = 0.28
+AI_LEARNING_MIN_SEARCH_INTERVAL = 0.14
 
 # This is the slowest search retry interval the learner is allowed to apply.
-AI_LEARNING_MAX_SEARCH_INTERVAL = 0.55
+AI_LEARNING_MAX_SEARCH_INTERVAL = 0.26
 
 # This is the hard minimum sleep time for the learner loop so it never spins too fast.
 LEARNING_LOOP_MIN_SLEEP = 0.10
