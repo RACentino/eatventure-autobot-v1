@@ -35,7 +35,7 @@ WINDOW_HEIGHT = 780
 DEBUG = False
 
 # Turn this on if you want the bot to draw a red overlay over places it is not allowed to click.
-ShowForbiddenArea = False
+ShowForbiddenArea = True
 
 
 # Base picture-matching confidence
@@ -56,7 +56,7 @@ STATS_RED_ICON_THRESHOLD = 0.966
 UPGRADE_STATION_THRESHOLD = 0.939
 
 # This is the starting confidence score for finding reward boxes.
-BOX_THRESHOLD = 0.97
+BOX_THRESHOLD = 0.973
 
 # This is the confidence score the bot needs before it trusts that the unlock button is really on screen.
 UNLOCK_THRESHOLD = 0.905
@@ -298,7 +298,7 @@ AI_VISION_CONFIDENCE_THRESHOLD = 0.95
 # AI vision box tuning
 
 # This is the lowest box-detection threshold AI vision is allowed to relax down to.
-AI_BOX_THRESHOLD_MIN = 0.96
+AI_BOX_THRESHOLD_MIN = 0.973
 
 # This is the highest box-detection threshold AI vision is allowed to tighten up to.
 AI_BOX_THRESHOLD_MAX = 0.994
@@ -508,7 +508,7 @@ FORBIDDEN_ZONE_3_X_MIN = 0
 FORBIDDEN_ZONE_3_X_MAX = 60
 
 # This is the top edge of forbidden zone 3. If a click lands inside the full zone 3 box, the bot refuses to click there.
-FORBIDDEN_ZONE_3_Y_MIN = 590
+FORBIDDEN_ZONE_3_Y_MIN = 600
 
 # This is the bottom edge of forbidden zone 3. If a click lands inside the full zone 3 box, the bot refuses to click there.
 FORBIDDEN_ZONE_3_Y_MAX = 667
