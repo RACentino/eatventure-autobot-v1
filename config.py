@@ -298,7 +298,7 @@ AI_VISION_CONFIDENCE_THRESHOLD = 0.95
 # AI vision box tuning
 
 # This is the lowest box-detection threshold AI vision is allowed to relax down to.
-AI_BOX_THRESHOLD_MIN = 0.91
+AI_BOX_THRESHOLD_MIN = 0.96
 
 # This is the highest box-detection threshold AI vision is allowed to tighten up to.
 AI_BOX_THRESHOLD_MAX = 0.994
