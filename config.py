@@ -35,7 +35,7 @@ WINDOW_HEIGHT = 780
 DEBUG = False
 
 # Turn this on if you want the bot to draw a red overlay over places it is not allowed to click.
-ShowForbiddenArea = True
+ShowForbiddenArea = False
 
 
 # Base picture-matching confidence
