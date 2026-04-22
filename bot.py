@@ -1276,6 +1276,8 @@ class EatventureBot:
                 mask=mask,
                 threshold=box_threshold,
                 template_name=box_name,
+                check_color=config.BOX_COLOR_CHECK,
+                color_threshold=config.BOX_COLOR_THRESHOLD,
             )
             if found:
                 if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):

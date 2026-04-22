@@ -23,7 +23,16 @@ class ImageMatcher:
         
         return template, mask
     
-    def find_template(self, screenshot, template, mask=None, threshold=None, template_name="Unknown", check_color=False):
+    def find_template(
+        self,
+        screenshot,
+        template,
+        mask=None,
+        threshold=None,
+        template_name="Unknown",
+        check_color=False,
+        color_threshold=0.7,
+    ):
         thresh = threshold if threshold else self.threshold
         
         if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
@@ -42,7 +51,13 @@ class ImageMatcher:
             center_y = min_loc[1] + h // 2
             
             if check_color:
-                color_match = self._check_color_similarity(screenshot, template, min_loc, mask)
+                color_match = self._check_color_similarity(
+                    screenshot,
+                    template,
+                    min_loc,
+                    mask,
+                    color_threshold=color_threshold,
+                )
                 if not color_match:
                     logger.debug(f"[{template_name}] Color check failed at ({center_x}, {center_y}), confidence: {confidence:.2%}")
                     return False, confidence, 0, 0
@@ -51,7 +66,7 @@ class ImageMatcher:
         
         return False, confidence, 0, 0
     
-    def _check_color_similarity(self, screenshot, template, location, mask=None):
+    def _check_color_similarity(self, screenshot, template, location, mask=None, color_threshold=0.7):
         x, y = location
         h, w = template.shape[:2]
         
@@ -88,7 +103,6 @@ class ImageMatcher:
         
         avg_corr = (corr_b + corr_g + corr_r) / 3
         
-        color_threshold = 0.7
         return avg_corr >= color_threshold
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):

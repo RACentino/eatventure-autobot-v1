@@ -58,6 +58,10 @@ UPGRADE_STATION_THRESHOLD = 0.939
 # This is the starting confidence score for finding reward boxes.
 BOX_THRESHOLD = 0.973
 
+BOX_COLOR_CHECK = True
+
+BOX_COLOR_THRESHOLD = 0.70
+
 # This is the confidence score the bot needs before it trusts that the unlock button is really on screen.
 UNLOCK_THRESHOLD = 0.905
 
@@ -183,13 +187,13 @@ UPGRADE_RED_ICON_Y_MAX = 680
 # Oscillating scroll behavior
 
 # This is the base vertical drag distance the bot uses for one scroll move before any multiplier is applied.
-SCROLL_PIXEL_STEP = 125
+SCROLL_PIXEL_STEP = 90
 
 # This multiplies the base scroll distance if you want each drag to be shorter or longer without changing the base step.
-SCROLL_DISTANCE_RATIO = 2.0
+SCROLL_DISTANCE_RATIO = 1.0
 
-# This is how many outward oscillation cycles the bot completes before the pattern resets back to the beginning.
-MAX_SCROLL_CYCLES = 5
+# This is how many otward oscillation cycles the bot completes before the pattern resets back to the beginning.
+MAX_SCROLL_CYCLES = 12
 
 # This controls how long the bot stays moving in one direction before the oscillation expands and flips direction.
 SCROLL_INCREMENT_STEP = 1
@@ -201,7 +205,7 @@ SCROLL_INTERVAL_PAUSE = 0.250
 POST_SCROLL_SETTLE = 0.250
 
 # This is how long the drag gesture itself lasts.
-SCROLL_DURATION = 0.200
+SCROLL_DURATION = 0.300
 
 
 # High-speed clicking
