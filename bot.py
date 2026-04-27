@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -170,8 +171,19 @@ class VisionOptimizer:
         blend = self.alpha if alpha is None else alpha
         return (1.0 - blend) * current + blend * new_value
 
+    @staticmethod
+    def _finite_float(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return number
+
     def _adaptive_alpha(self, confidence):
-        if confidence <= 0:
+        confidence = self._finite_float(confidence)
+        if confidence is None or confidence <= 0:
             return self.alpha
         boost = (
             max(0.0, min(1.0, confidence - config.AI_VISION_CONFIDENCE_THRESHOLD))
@@ -180,7 +192,8 @@ class VisionOptimizer:
         return min(self.alpha + boost, self.alpha_max)
 
     def _update_threshold(self, name, confidence, minimum, maximum):
-        if not self.enabled or confidence <= 0:
+        confidence = self._finite_float(confidence)
+        if not self.enabled or confidence is None or confidence <= 0:
             return
         self._miss_counts[name] = 0
         current = getattr(self, f"{name}_threshold")
@@ -205,7 +218,20 @@ class VisionOptimizer:
             return
         if confidences:
             self._miss_counts["red_icon"] = 0
-            average = sum(confidences) / len(confidences)
+            finite_confidences = []
+            for confidence in confidences:
+                value = self._finite_float(confidence)
+                if value is not None:
+                    finite_confidences.append(value)
+            if not finite_confidences:
+                self._update_miss(
+                    "red_icon",
+                    config.AI_RED_ICON_THRESHOLD_MIN,
+                    config.AI_RED_ICON_MISS_STEP,
+                    config.AI_RED_ICON_MISS_WINDOW,
+                )
+                return
+            average = sum(finite_confidences) / len(finite_confidences)
             target = max(
                 config.AI_RED_ICON_THRESHOLD_MIN,
                 min(average - config.AI_RED_ICON_MARGIN, config.AI_RED_ICON_THRESHOLD_MAX),
@@ -328,7 +354,14 @@ class VisionOptimizer:
             if key not in state:
                 continue
             minimum, maximum = bounds
-            value = float(state[key])
+            try:
+                value = float(state[key])
+            except (TypeError, ValueError):
+                logger.warning("Ignoring invalid persisted vision value for %s", key)
+                continue
+            if not math.isfinite(value):
+                logger.warning("Ignoring non-finite persisted vision value for %s", key)
+                continue
             setattr(self, key, max(minimum, min(maximum, value)))
 
     def reset(self):
@@ -379,14 +412,56 @@ class HistoricalLearner:
         self._tuned_behavior = {}
 
         persisted = self.persistence.load() if self.enabled and self.persistence else {}
-        if persisted:
-            self._records = list(persisted.get("records", []))[-config.AI_LEARNING_RECORDS_LIMIT :]
-            self._total_completions = int(persisted.get("total_completions", len(self._records)))
-            self._last_pair_processed = int(persisted.get("last_pair_processed", 0))
-            self._last_batch_processed = int(persisted.get("last_batch_processed", 0))
-            self._tuned_behavior = dict(persisted.get("tuned_behavior", {}))
+        if isinstance(persisted, dict) and persisted:
+            records = persisted.get("records", [])
+            if isinstance(records, list):
+                self._records = [record for record in records if isinstance(record, dict)][
+                    -config.AI_LEARNING_RECORDS_LIMIT :
+                ]
+            self._total_completions = max(
+                0,
+                self._safe_int(persisted.get("total_completions"), len(self._records)),
+            )
+            self._last_pair_processed = max(0, self._safe_int(persisted.get("last_pair_processed"), 0))
+            self._last_batch_processed = max(0, self._safe_int(persisted.get("last_batch_processed"), 0))
+            self._tuned_behavior = self._sanitize_behavior(persisted.get("tuned_behavior", {}))
             if self._tuned_behavior:
                 self.bot.apply_learned_behavior(self._tuned_behavior)
+
+    @staticmethod
+    def _safe_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return int(default)
+
+    @staticmethod
+    def _safe_float(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return number
+
+    def _sanitize_behavior(self, behavior):
+        if not isinstance(behavior, dict):
+            return {}
+        bounds = {
+            "click_delay": (config.AI_LEARNING_MIN_CLICK_DELAY, config.AI_LEARNING_MAX_CLICK_DELAY),
+            "move_delay": (config.AI_LEARNING_MIN_MOVE_DELAY, config.AI_LEARNING_MAX_MOVE_DELAY),
+            "search_interval": (
+                config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+                config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+            ),
+        }
+        sanitized = {}
+        for key, (minimum, maximum) in bounds.items():
+            value = self._safe_float(behavior.get(key))
+            if value is not None:
+                sanitized[key] = self._clamp(value, minimum, maximum)
+        return sanitized
 
     def start(self):
         if not self.enabled:
@@ -434,7 +509,7 @@ class HistoricalLearner:
                 self._run_cycle()
             except Exception:
                 logger.exception("Historical learner cycle failed")
-            time.sleep(self.interval)
+            self._stop.wait(self.interval)
 
     def _run_cycle(self):
         with self._lock:
@@ -458,7 +533,14 @@ class HistoricalLearner:
         self._persist()
 
     def _apply_profile(self, records):
-        valid = [record for record in records if record.get("time_spent", 0) > 0 and record.get("behavior")]
+        valid = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            duration = self._safe_float(record.get("time_spent"))
+            behavior = self._sanitize_behavior(record.get("behavior", {}))
+            if duration is not None and duration > 0 and behavior:
+                valid.append({"time_spent": duration, "behavior": behavior})
         if not valid:
             return False
 
@@ -530,6 +612,7 @@ class HistoricalLearner:
 class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot")
+        self._stop_requested = threading.Event()
 
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
@@ -559,6 +642,7 @@ class EatventureBot:
         self.templates = self.load_templates()
         self._red_icon_template_names_cache = self._red_icon_template_names()
         self._red_icon_max_width, self._red_icon_max_height = self._red_icon_template_span()
+        self.ready = self._validate_required_templates()
         self._successful_red_icon_history_limit = 24
         self.running = False
         self.red_icons = []
@@ -578,6 +662,7 @@ class EatventureBot:
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
+        self._new_level_red_icon_verified = False
         self.forbidden_zones = [
             (
                 config.FORBIDDEN_ZONE_1_X_MIN,
@@ -620,7 +705,7 @@ class EatventureBot:
             logger.error("Assets directory not found: %s", templates_path)
             return templates
 
-        for template_file in templates_path.glob("*.png"):
+        for template_file in sorted(templates_path.glob("*.png")):
             try:
                 template_name = template_file.stem
                 template_img = self.image_matcher.load_template(template_file)
@@ -630,6 +715,32 @@ class EatventureBot:
                 logger.error("Failed to load template %s: %s", template_file, exc)
 
         return templates
+
+    def _available_red_icon_template_count(self):
+        return sum(1 for name in self.templates if name.startswith("RedIcon"))
+
+    def _red_icon_min_matches(self):
+        available = self._available_red_icon_template_count()
+        if available <= 0:
+            return 1
+        configured = max(1, int(config.RED_ICON_MIN_MATCHES))
+        return min(configured, available)
+
+    def _validate_required_templates(self):
+        missing = [name for name in ("newLevel", "unlock", "upgradeStation") if name not in self.templates]
+        red_icon_count = self._available_red_icon_template_count()
+        if red_icon_count <= 0:
+            missing.append("RedIcon*")
+        if missing:
+            logger.error("Missing required templates: %s", ", ".join(missing))
+            return False
+        if red_icon_count < int(config.RED_ICON_MIN_MATCHES):
+            logger.warning(
+                "Only %s red-icon templates are available; consensus requirement reduced from %s",
+                red_icon_count,
+                config.RED_ICON_MIN_MATCHES,
+            )
+        return True
 
     def register_states(self):
         self.state_machine.register_handler(State.FIND_RED_ICONS, self.handle_find_red_icons)
@@ -646,7 +757,8 @@ class EatventureBot:
 
     def _sleep(self, duration):
         if duration > 0:
-            time.sleep(duration)
+            return not self._stop_requested.wait(duration)
+        return not self._stop_requested.is_set()
 
     def _apply_tuning(self):
         self.mouse_controller.click_delay = float(self.tuner.click_delay)
@@ -660,6 +772,7 @@ class EatventureBot:
         }
 
     def apply_learned_behavior(self, learned):
+        learned = self.historical_learner._sanitize_behavior(learned) if hasattr(self, "historical_learner") else learned
         if not learned:
             return
         self.tuner.click_delay = float(learned.get("click_delay", self.tuner.click_delay))
@@ -798,6 +911,53 @@ class EatventureBot:
                     best_match = (confidence, global_x, global_y)
         return best_match
 
+    def _find_new_level_red_icon(self, screenshot=None, scan_threshold=None, min_matches=None):
+        if screenshot is None:
+            screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+        if scan_threshold is None:
+            scan_threshold = config.RED_ICON_THRESHOLD
+            if self.vision_optimizer.enabled:
+                scan_threshold = min(
+                    self.vision_optimizer.red_icon_threshold,
+                    self.vision_optimizer.new_level_red_icon_threshold,
+                )
+        if min_matches is None:
+            min_matches = self._red_icon_min_matches()
+
+        footer_region, offset_x, offset_y = self._extract_region(
+            screenshot,
+            config.NEW_LEVEL_RED_ICON_X_MIN,
+            config.NEW_LEVEL_RED_ICON_X_MAX,
+            config.NEW_LEVEL_RED_ICON_Y_MIN,
+            config.NEW_LEVEL_RED_ICON_Y_MAX,
+            pad_x=self._red_icon_max_width,
+            pad_y=self._red_icon_max_height,
+        )
+        footer_detections = self._collect_red_icon_detections(
+            footer_region,
+            scan_threshold,
+            min_distance=80,
+            offset_x=offset_x,
+            offset_y=offset_y,
+        )
+        all_red_icons_extended, _ = self._icons_from_detections(footer_detections, min_matches)
+
+        new_level_icon_threshold = (
+            self.vision_optimizer.new_level_red_icon_threshold
+            if self.vision_optimizer.enabled
+            else config.NEW_LEVEL_RED_ICON_THRESHOLD
+        )
+        best_new_level_icon = None
+        for confidence, x, y in all_red_icons_extended:
+            if (
+                config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX
+                and config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX
+                and confidence >= new_level_icon_threshold
+            ):
+                if best_new_level_icon is None or confidence > best_new_level_icon[0]:
+                    best_new_level_icon = (confidence, x, y)
+        return best_new_level_icon
+
     def _remember_successful_red_icon_position(self, y_value):
         y_value = int(y_value)
         for existing_y in self.successful_red_icon_positions:
@@ -821,6 +981,7 @@ class EatventureBot:
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
+        self._new_level_red_icon_verified = False
 
     def _advance_oscillation_progress(self):
         target_steps = max(1, int(self._oscillation_cycle_index) * int(config.SCROLL_INCREMENT_STEP))
@@ -862,15 +1023,37 @@ class EatventureBot:
             self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         return bool(moved)
 
+    def _perform_single_down_scroll(self):
+        distance = int(round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO)))
+        start_x, start_y = config.SCROLL_START_POS
+        target_y = start_y - distance
+        logger.info("Verification scroll down before confirming new level red icon")
+        moved = self.mouse_controller.drag(
+            start_x,
+            start_y,
+            start_x,
+            target_y,
+            duration=config.SCROLL_DURATION,
+            relative=True,
+        )
+        if moved:
+            self._sleep(config.POST_SCROLL_SETTLE)
+            self._sleep(config.SCROLL_INTERVAL_PAUSE)
+        return bool(moved)
+
     def start(self):
         if self.running:
             return True
+        if not self.ready:
+            logger.error("Cannot start bot because required templates are missing")
+            return False
         try:
             self.window_capture.ensure_window(resize=True)
         except WindowNotAvailableError as exc:
             logger.error("Cannot start bot: %s", exc)
             self.running = False
             return False
+        self._stop_requested.clear()
         self.running = True
         if self.current_level_start_time is None:
             self.current_level_start_time = datetime.now()
@@ -881,7 +1064,9 @@ class EatventureBot:
         return True
 
     def stop(self):
+        self._stop_requested.set()
         if not self.running and self.overlay is None:
+            self.historical_learner.stop()
             return
         self.running = False
         self.historical_learner.stop()
@@ -891,6 +1076,9 @@ class EatventureBot:
 
     def step(self):
         try:
+            if self._stop_requested.is_set():
+                self.stop()
+                return False
             if not self.window_capture.is_window_active():
                 logger.error("Window '%s' is not available", config.WINDOW_TITLE)
                 self.stop()
@@ -905,9 +1093,14 @@ class EatventureBot:
             logger.error("Stopping bot due to Windows input failure: %s", exc)
             self.stop()
             return False
+        except Exception:
+            logger.exception("Stopping bot due to unexpected state-handler failure")
+            self.stop()
+            return False
 
     def run(self):
-        self.start()
+        if not self.start():
+            return
         try:
             while self.running:
                 if not self.window_capture.is_window_active():
@@ -954,7 +1147,7 @@ class EatventureBot:
                 self.vision_optimizer.new_level_red_icon_threshold,
             )
 
-        min_matches = config.RED_ICON_MIN_MATCHES
+        min_matches = self._red_icon_min_matches()
         all_detections = self._collect_red_icon_detections(
             limited_screenshot,
             scan_threshold,
@@ -967,39 +1160,7 @@ class EatventureBot:
 
         self.vision_optimizer.update_red_icon_scan(valid_red_icon_confidences)
 
-        footer_region, offset_x, offset_y = self._extract_region(
-            screenshot,
-            config.NEW_LEVEL_RED_ICON_X_MIN,
-            config.NEW_LEVEL_RED_ICON_X_MAX,
-            config.NEW_LEVEL_RED_ICON_Y_MIN,
-            config.NEW_LEVEL_RED_ICON_Y_MAX,
-            pad_x=self._red_icon_max_width,
-            pad_y=self._red_icon_max_height,
-        )
-        footer_detections = self._collect_red_icon_detections(
-            footer_region,
-            scan_threshold,
-            min_distance=80,
-            offset_x=offset_x,
-            offset_y=offset_y,
-        )
-        all_red_icons_extended, _ = self._icons_from_detections(footer_detections, min_matches)
-
-        new_level_icon_threshold = (
-            self.vision_optimizer.new_level_red_icon_threshold
-            if self.vision_optimizer.enabled
-            else config.NEW_LEVEL_RED_ICON_THRESHOLD
-        )
-        best_new_level_icon = None
-        for confidence, x, y in all_red_icons_extended:
-            if (
-                config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX
-                and config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX
-                and confidence >= new_level_icon_threshold
-            ):
-                if best_new_level_icon is None or confidence > best_new_level_icon[0]:
-                    best_new_level_icon = (confidence, x, y)
-
+        best_new_level_icon = self._find_new_level_red_icon(screenshot, scan_threshold, min_matches)
         if best_new_level_icon is not None:
             self.vision_optimizer.update_new_level_red_icon_confidence(best_new_level_icon[0])
             logger.info(
@@ -1008,6 +1169,7 @@ class EatventureBot:
                 best_new_level_icon[2],
                 best_new_level_icon[0],
             )
+            self._new_level_red_icon_verified = False
             return State.CHECK_NEW_LEVEL
         self.vision_optimizer.update_new_level_red_icon_miss()
 
@@ -1153,6 +1315,7 @@ class EatventureBot:
             click_delay=config.SPAM_CLICK_DELAY,
             jitter=config.SPAM_CLICK_JITTER,
             relative=True,
+            interrupt_check=self._stop_requested.is_set,
         )
         if not completed:
             logger.warning("Spam-click sequence ended early")
@@ -1225,13 +1388,16 @@ class EatventureBot:
 
         self._sleep(config.STATE_DELAY)
         for _ in range(config.STATS_UPGRADE_CLICK_COUNT):
+            if self._stop_requested.is_set():
+                return State.OPEN_BOXES
             self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
                 config.STATS_UPGRADE_POS[1],
                 relative=True,
                 delay=0.0,
             )
-            self._sleep(config.STATS_UPGRADE_CLICK_DELAY)
+            if not self._sleep(config.STATS_UPGRADE_CLICK_DELAY):
+                return State.OPEN_BOXES
 
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         logger.info("Stats upgrade completed")
@@ -1332,6 +1498,28 @@ class EatventureBot:
             logger.warning("Failed to clear focus before confirming the new level")
             return State.CHECK_NEW_LEVEL
         self._sleep(0.05)
+        if not self._new_level_red_icon_verified:
+            if not self._perform_single_down_scroll():
+                logger.warning("Failed to perform verification scroll for new level red icon")
+                return State.CHECK_NEW_LEVEL
+
+            confirmed_icon = self._find_new_level_red_icon()
+            if confirmed_icon is None:
+                logger.info("New level red icon disappeared after verification scroll; resuming main flow")
+                self._new_level_red_icon_verified = False
+                self.vision_optimizer.update_new_level_red_icon_miss()
+                self._reset_search_cycle()
+                return State.FIND_RED_ICONS
+
+            self._new_level_red_icon_verified = True
+            self.vision_optimizer.update_new_level_red_icon_confidence(confirmed_icon[0])
+            logger.info(
+                "New level red icon confirmed after verification scroll at (%s, %s) [%.3f]",
+                confirmed_icon[1],
+                confirmed_icon[2],
+                confirmed_icon[0],
+            )
+
         opened = self.mouse_controller.click(
             config.NEW_LEVEL_BUTTON_POS[0],
             config.NEW_LEVEL_BUTTON_POS[1],
@@ -1351,6 +1539,7 @@ class EatventureBot:
             return State.CHECK_NEW_LEVEL
         self._sleep(0.20)
         self._reset_search_cycle()
+        self._new_level_red_icon_verified = False
         return State.FIND_RED_ICONS
 
     def handle_transition_level(self, current_state):

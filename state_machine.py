@@ -23,15 +23,15 @@ class StateMachine:
         self.current_state = initial_state
         self.previous_state = None
         self.state_handlers = {}
-        logger.info(f"State machine initialized in state: {initial_state.name}")
+        logger.info("State machine initialized in state: %s", initial_state.name)
     
     def register_handler(self, state, handler):
         self.state_handlers[state] = handler
-        logger.debug(f"Registered handler for state: {state.name}")
+        logger.debug("Registered handler for state: %s", state.name)
     
     def transition(self, new_state):
         if new_state != self.current_state:
-            logger.debug(f"State transition: {self.current_state.name} -> {new_state.name}")
+            logger.debug("State transition: %s -> %s", self.current_state.name, new_state.name)
             self.previous_state = self.current_state
             self.current_state = new_state
     
@@ -40,12 +40,20 @@ class StateMachine:
             handler = self.state_handlers[self.current_state]
             next_state = handler(self.current_state)
             
-            if next_state is not None and isinstance(next_state, State):
-                self.transition(next_state)
+            if next_state is not None:
+                if isinstance(next_state, State):
+                    self.transition(next_state)
+                else:
+                    logger.error(
+                        "Handler for %s returned invalid state: %r",
+                        self.current_state.name,
+                        next_state,
+                    )
+                    return False
             
             return True
         else:
-            logger.warning(f"No handler registered for state: {self.current_state.name}")
+            logger.warning("No handler registered for state: %s", self.current_state.name)
             return False
     
     def get_state(self):

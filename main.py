@@ -20,11 +20,13 @@ log_listener = None
 def on_press(key):
     global should_exit
     try:
-        if not hasattr(key, "char"):
+        char = getattr(key, "char", None)
+        if char is None:
             return
+        char = char.lower()
 
         logger = logging.getLogger(__name__)
-        if key.char == "x":
+        if char == "x":
             if bot_instance and bot_instance.window_capture.is_window_active():
                 hwnd = bot_instance.window_capture.get_hwnd()
                 screen_x, screen_y = win32api.GetCursorPos()
@@ -34,7 +36,7 @@ def on_press(key):
                 logger.info("[X pressed] Window position: (%s, %s)", rel_x, rel_y)
             else:
                 logger.info("[X pressed] Bot window is not available")
-        elif key.char == "z":
+        elif char == "z":
             if bot_instance:
                 if bot_instance.running:
                     bot_instance.stop()
@@ -47,11 +49,11 @@ def on_press(key):
                         logger.info("[Z pressed] Bot STARTED")
                     else:
                         logger.warning("[Z pressed] Bot START failed")
-        elif key.char == "c":
+        elif char == "c":
             if bot_instance:
                 bot_instance.wipe_memory()
                 logger.info("[C pressed] AI memory wiped")
-        elif key.char == "p":
+        elif char == "p":
             logger.info("[P pressed] Exiting program")
             should_exit = True
     except Exception as exc:
@@ -101,6 +103,7 @@ def setup_logging():
 
 def main():
     global bot_instance, should_exit, log_listener
+    listener = None
 
     print("=" * 60)
     print("Eatventure Bot - Screen Automation Tool")
@@ -110,13 +113,13 @@ def main():
     print(f"Assets Directory: {config.ASSETS_DIR}")
     print("=" * 60)
 
-    setup_logging()
-    should_exit = False
-
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
-
     try:
+        setup_logging()
+        should_exit = False
+
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+
         bot_instance = EatventureBot()
 
         logger = logging.getLogger(__name__)
@@ -143,7 +146,9 @@ def main():
             bot_instance.stop()
         if bot_instance is not None:
             bot_instance.telegram.close()
-        listener.stop()
+        if listener is not None:
+            listener.stop()
+            listener.join(timeout=1.0)
         if log_listener is not None:
             log_listener.stop()
             log_listener = None

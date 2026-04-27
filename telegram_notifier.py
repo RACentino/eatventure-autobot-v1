@@ -4,6 +4,8 @@ import threading
 
 import requests
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +16,7 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.timeout = 5
         self.enabled = bool(enabled and self.bot_token and self.chat_id)
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=max(1, int(getattr(config, "TELEGRAM_QUEUE_MAXSIZE", 100))))
         self._stop = threading.Event()
         self._thread = None
         self._session = requests.Session() if self.enabled else None
@@ -24,10 +26,10 @@ class TelegramNotifier:
             self._thread.start()
             logger.info("Telegram notifier enabled")
         else:
-            logger.warning("Telegram notifier disabled")
+            logger.info("Telegram notifier disabled")
 
     def _worker_loop(self):
-        while not self._stop.is_set():
+        while not self._stop.is_set() or not self._queue.empty():
             try:
                 message = self._queue.get(timeout=0.2)
             except queue.Empty:
@@ -51,44 +53,60 @@ class TelegramNotifier:
             }
 
             response = self._session.post(url, json=data, timeout=self.timeout)
-            response_data = response.json()
+            try:
+                response_data = response.json()
+            except ValueError:
+                response_data = {}
 
             if response.ok and response_data.get("ok"):
                 logger.debug("Telegram message sent successfully")
                 return True
+
+            description = response_data.get("description") if isinstance(response_data, dict) else None
+            if not description:
+                description = response.text[:200] if response.text else "unavailable"
             logger.error(
                 "Failed to send Telegram message: status=%s description=%s",
                 response.status_code,
-                response_data.get("description", "unavailable"),
+                description,
             )
             return False
-        except (requests.RequestException, ValueError) as exc:
-            logger.error("Error sending Telegram message: %s", exc)
+        except requests.RequestException as exc:
+            logger.error("Error sending Telegram message: %s", exc.__class__.__name__)
             return False
 
     def send_message(self, message):
         if not self.enabled:
             return False
 
-        self._queue.put(str(message))
-        return True
+        message = str(message)
+        if not message:
+            return False
+        try:
+            self._queue.put_nowait(message)
+            return True
+        except queue.Full:
+            logger.warning("Telegram queue is full; dropping notification")
+            return False
 
     def close(self):
         if not self.enabled:
             return
         self._stop.set()
         if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=0.5)
+            self._thread.join(timeout=float(getattr(config, "TELEGRAM_CLOSE_TIMEOUT", 2.0)))
+            if self._thread.is_alive():
+                logger.warning("Telegram notifier did not stop before timeout")
         if self._session is not None:
             self._session.close()
             self._session = None
 
     def notify_bot_started(self):
-        message = "🤖 <b>Bot Started</b>"
+        message = "<b>Bot Started</b>"
         self.send_message(message)
 
     def notify_bot_stopped(self):
-        message = "⏹️ <b>Bot Stopped</b>"
+        message = "<b>Bot Stopped</b>"
         self.send_message(message)
 
     def notify_new_level(self, level_number, time_spent):
@@ -100,5 +118,5 @@ class TelegramNotifier:
         self.send_message(message)
 
     def notify_level_milestone(self, total_levels):
-        message = f"📊 <b>Milestone Reached!</b>\nTotal cities completed: {total_levels}"
+        message = f"<b>Milestone Reached</b>\nTotal cities completed: {total_levels}"
         self.send_message(message)

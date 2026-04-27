@@ -21,8 +21,8 @@ REQUEST_TIMEOUT = 10
 def main():
     bot_token = str(config.TELEGRAM_BOT_TOKEN or "").strip()
     if not bot_token:
-        print("ERROR: No bot token found in config.py")
-        print("Please set TELEGRAM_BOT_TOKEN in config.py")
+        print("ERROR: No bot token found in config.py or environment")
+        print("Please set EATVENTURE_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN")
         return 1
 
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
@@ -32,7 +32,7 @@ def main():
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as exc:
-        print(f"Error contacting Telegram: {exc}")
+        print(f"Error contacting Telegram: {exc.__class__.__name__}")
         return 1
     except ValueError as exc:
         print(f"Error decoding Telegram response: {exc}")
@@ -76,8 +76,8 @@ def main():
 
     if chat_ids:
         example_chat_id = sorted(chat_ids)[0]
-        print("\n✅ Copy one of the Chat IDs above")
-        print("✅ Paste it into config.py as TELEGRAM_CHAT_ID")
+        print("\nOK: Copy one of the Chat IDs above")
+        print("OK: Paste it into config.py as TELEGRAM_CHAT_ID")
         print("\nExample:")
         print(f'TELEGRAM_CHAT_ID = "{example_chat_id}"')
     else:

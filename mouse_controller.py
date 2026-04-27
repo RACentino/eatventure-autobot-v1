@@ -27,12 +27,29 @@ class MouseController:
         return hwnd
 
     def get_window_position(self):
+        win_x, win_y, _, _ = self.get_window_bounds()
+        return win_x, win_y
+
+    def get_window_bounds(self):
         try:
             hwnd = self._get_hwnd()
+            rect = win32gui.GetClientRect(hwnd)
+            width = int(rect[2] - rect[0])
+            height = int(rect[3] - rect[1])
+            if width <= 0 or height <= 0:
+                raise RuntimeError(f"Target window has invalid client size: {width}x{height}")
             x, y = win32gui.ClientToScreen(hwnd, (0, 0))
-            return x, y
+            return int(x), int(y), width, height
         except pywintypes.error as exc:
-            raise RuntimeError(f"Cannot read target window position: {exc}") from exc
+            raise RuntimeError(f"Cannot read target window bounds: {exc}") from exc
+
+    def _relative_from_screen(self, x, y):
+        win_x, win_y, width, height = self.get_window_bounds()
+        return int(x) - win_x, int(y) - win_y, win_x, win_y, width, height
+
+    @staticmethod
+    def _within_client(x, y, width, height):
+        return 0 <= int(x) < int(width) and 0 <= int(y) < int(height)
 
     def _set_cursor_pos(self, x, y):
         screen_x = int(x)
@@ -89,10 +106,12 @@ class MouseController:
         return True
 
     def is_in_forbidden_zone(self, x, y, relative=True):
-        if not relative:
-            win_x, win_y = self.get_window_position()
-            x = x - win_x
-            y = y - win_y
+        try:
+            if not relative:
+                x, y, _, _, _, _ = self._relative_from_screen(x, y)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.error("Cannot evaluate forbidden zone: %s", exc)
+            return True
 
         if (
             y >= config.FORBIDDEN_CLICK_Y_MIN
@@ -141,15 +160,27 @@ class MouseController:
     def _resolve_screen_position(self, x, y, relative=True, check_forbidden=True):
         try:
             if relative:
-                if check_forbidden and self.is_in_forbidden_zone(x, y, relative=True):
-                    return None
-                win_x, win_y = self.get_window_position()
-                return int(win_x + x), int(win_y + y)
+                win_x, win_y, width, height = self.get_window_bounds()
+                rel_x = int(x)
+                rel_y = int(y)
+            else:
+                rel_x, rel_y, win_x, win_y, width, height = self._relative_from_screen(x, y)
 
-            if check_forbidden and self.is_in_forbidden_zone(x, y, relative=False):
+            if not self._within_client(rel_x, rel_y, width, height):
+                logger.warning(
+                    "Rejected input outside target window: relative=(%s, %s), bounds=%sx%s",
+                    rel_x,
+                    rel_y,
+                    width,
+                    height,
+                )
                 return None
-            return int(x), int(y)
-        except RuntimeError as exc:
+
+            if check_forbidden and self.is_in_forbidden_zone(rel_x, rel_y, relative=True):
+                return None
+
+            return int(win_x + rel_x), int(win_y + rel_y)
+        except (RuntimeError, TypeError, ValueError) as exc:
             logger.error("Cannot resolve screen position: %s", exc)
             return None
 
@@ -299,9 +330,10 @@ class MouseController:
             if jitter > 0:
                 target_x += random.randint(-jitter, jitter)
                 target_y += random.randint(-jitter, jitter)
-                if self.is_in_forbidden_zone(target_x, target_y, relative=False):
-                    logger.warning("Spam-click target blocked at (%s, %s)", target_x, target_y)
+                jittered_pos = self._resolve_screen_position(target_x, target_y, relative=False)
+                if jittered_pos is None:
                     return False
+                target_x, target_y = jittered_pos
                 if not self._set_cursor_pos(target_x, target_y):
                     return False
 
@@ -325,21 +357,12 @@ class MouseController:
         if duration is None:
             duration = config.SCROLL_DURATION
 
-        try:
-            if relative:
-                win_x, win_y = self.get_window_position()
-                screen_from_x = win_x + from_x
-                screen_from_y = win_y + from_y
-                screen_to_x = win_x + to_x
-                screen_to_y = win_y + to_y
-            else:
-                screen_from_x = from_x
-                screen_from_y = from_y
-                screen_to_x = to_x
-                screen_to_y = to_y
-        except RuntimeError as exc:
-            logger.error("Cannot start drag: %s", exc)
+        from_pos = self._resolve_screen_position(from_x, from_y, relative=relative)
+        to_pos = self._resolve_screen_position(to_x, to_y, relative=relative)
+        if from_pos is None or to_pos is None:
             return False
+        screen_from_x, screen_from_y = from_pos
+        screen_to_x, screen_to_y = to_pos
 
         if not self._set_cursor_pos(screen_from_x, screen_from_y):
             return False

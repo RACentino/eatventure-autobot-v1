@@ -7,7 +7,58 @@ logger = logging.getLogger(__name__)
 
 class ImageMatcher:
     def __init__(self, threshold=0.85):
-        self.threshold = threshold
+        self.threshold = self._normalize_threshold(threshold)
+
+    @staticmethod
+    def _normalize_threshold(value):
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            return 0.85
+        if not np.isfinite(threshold):
+            return 0.85
+        return max(0.0, min(1.0, threshold))
+
+    @staticmethod
+    def _normalize_image(image, label):
+        if image is None or not hasattr(image, "shape") or image.size == 0:
+            raise ValueError(f"{label} is empty")
+        if image.ndim == 2:
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        if image.ndim == 3 and image.shape[2] == 3:
+            return image
+        if image.ndim == 3 and image.shape[2] == 4:
+            return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        raise ValueError(f"{label} has unsupported shape {image.shape}")
+
+    @staticmethod
+    def _normalize_mask(mask, template_shape, template_name):
+        if mask is None:
+            return None
+        if mask.ndim == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        if mask.shape[:2] != template_shape[:2]:
+            logger.warning(
+                "[%s] Ignoring mask with shape %s for template shape %s",
+                template_name,
+                mask.shape,
+                template_shape,
+            )
+            return None
+        normalized = np.zeros(mask.shape[:2], dtype=np.uint8)
+        normalized[mask > 0] = 255
+        return normalized
+
+    @staticmethod
+    def _safe_match_template(screenshot, template, mask, template_name):
+        try:
+            result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
+        except cv2.error as exc:
+            logger.warning("[%s] Template matching failed: %s", template_name, exc)
+            return None
+        if result.size == 0:
+            return None
+        return np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
@@ -15,11 +66,11 @@ class ImageMatcher:
             raise FileNotFoundError(f"Template not found: {template_path}")
         
         mask = None
-        if len(template.shape) == 3 and template.shape[2] == 4:
+        if template.ndim == 3 and template.shape[2] == 4:
             alpha = template[:, :, 3]
             mask = np.zeros_like(alpha)
             mask[alpha > 0] = 255
-            template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
+        template = self._normalize_image(template, str(template_path))
         
         return template, mask
     
@@ -33,17 +84,27 @@ class ImageMatcher:
         check_color=False,
         color_threshold=0.7,
     ):
-        thresh = threshold if threshold else self.threshold
-        
+        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
+        try:
+            screenshot = self._normalize_image(screenshot, "screenshot")
+            template = self._normalize_image(template, template_name)
+        except ValueError as exc:
+            logger.warning("[%s] Invalid match input: %s", template_name, exc)
+            return False, 0.0, 0, 0
+        mask = self._normalize_mask(mask, template.shape, template_name)
+
         if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
             logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
             return False, 0.0, 0, 0
-        
-        result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
-        
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-        
-        confidence = 1 - min_val
+
+        result = self._safe_match_template(screenshot, template, mask, template_name)
+        if result is None:
+            return False, 0.0, 0, 0
+
+        min_val, _, min_loc, _ = cv2.minMaxLoc(result)
+        confidence = float(1.0 - min_val)
+        if not np.isfinite(confidence):
+            return False, 0.0, 0, 0
         
         if confidence >= thresh:
             h, w = template.shape[:2]
@@ -73,7 +134,7 @@ class ImageMatcher:
         roi = screenshot[y:y+h, x:x+w]
         
         if roi.shape[:2] != template.shape[:2]:
-            return True
+            return False
         
         if mask is not None:
             template_masked = cv2.bitwise_and(template, template, mask=mask)
@@ -101,14 +162,24 @@ class ImageMatcher:
         corr_g = cv2.compareHist(hist_template_g, hist_roi_g, cv2.HISTCMP_CORREL)
         corr_r = cv2.compareHist(hist_template_r, hist_roi_r, cv2.HISTCMP_CORREL)
         
-        avg_corr = (corr_b + corr_g + corr_r) / 3
-        
-        return avg_corr >= color_threshold
+        correlations = (corr_b, corr_g, corr_r)
+        if not all(np.isfinite(value) for value in correlations):
+            return False
+
+        avg_corr = sum(correlations) / 3
+        return avg_corr >= self._normalize_threshold(color_threshold)
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
-        thresh = threshold if threshold else self.threshold
+        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
         all_matches = []
-        
+        try:
+            screenshot = self._normalize_image(screenshot, "screenshot")
+            template = self._normalize_image(template, template_name)
+        except ValueError as exc:
+            logger.warning("[%s] Invalid multi-match input: %s", template_name, exc)
+            return []
+        mask = self._normalize_mask(mask, template.shape, template_name)
+
         if scales is None:
             scales = [1.0]
         
@@ -117,11 +188,17 @@ class ImageMatcher:
             return []
         
         for scale in scales:
+            try:
+                scale = float(scale)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(scale) or scale <= 0:
+                continue
             if scale != 1.0:
                 scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
                 scaled_mask = None
                 if mask is not None:
-                    scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                    scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
                     scaled_mask[scaled_mask > 0] = 255
             else:
                 scaled_template = template
@@ -130,13 +207,17 @@ class ImageMatcher:
             if scaled_template.shape[0] > screenshot.shape[0] or scaled_template.shape[1] > screenshot.shape[1]:
                 continue
             
-            result = cv2.matchTemplate(screenshot, scaled_template, cv2.TM_SQDIFF_NORMED, mask=scaled_mask)
+            result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
+            if result is None:
+                continue
             
             locations = np.where(result <= (1 - thresh))
             
             h, w = scaled_template.shape[:2]
             for pt in zip(*locations[::-1]):
-                confidence = 1 - result[pt[1], pt[0]]
+                confidence = float(1.0 - result[pt[1], pt[0]])
+                if not np.isfinite(confidence):
+                    continue
                 center_x = pt[0] + w // 2
                 center_y = pt[1] + h // 2
                 all_matches.append((confidence, center_x, center_y, w, h))

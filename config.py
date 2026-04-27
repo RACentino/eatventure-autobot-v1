@@ -1,4 +1,12 @@
+import os
 from pathlib import Path
+
+
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = str(BASE_DIR / "Assets")
@@ -29,9 +37,11 @@ MOUSE_MOVE_DELAY = 0.05
 UPGRADE_SEARCH_INTERVAL = 0.40
 STATE_DELAY = 0.50
 
-TELEGRAM_ENABLED = False
-TELEGRAM_BOT_TOKEN = ""
-TELEGRAM_CHAT_ID = ""
+TELEGRAM_ENABLED = _env_flag("EATVENTURE_TELEGRAM_ENABLED", False)
+TELEGRAM_BOT_TOKEN = os.getenv("EATVENTURE_TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+TELEGRAM_CHAT_ID = os.getenv("EATVENTURE_TELEGRAM_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")).strip()
+TELEGRAM_QUEUE_MAXSIZE = 100
+TELEGRAM_CLOSE_TIMEOUT = 2.0
 
 MAX_SEARCH_Y = 660
 EXTENDED_SEARCH_Y = 710
@@ -44,8 +54,8 @@ NEW_LEVEL_BUTTON_POS = (30, 692)
 LEVEL_TRANSITION_POS = (174, 520)
 
 UPGRADE_STATION_COLOR_CHECK = False
-STATS_UPGRADE_CLICK_COUNT = 30
-STATS_UPGRADE_CLICK_DELAY = 0.010
+STATS_UPGRADE_CLICK_COUNT = 20
+STATS_UPGRADE_CLICK_DELAY = 0.016
 
 RED_ICON_OFFSET_X = 10
 RED_ICON_OFFSET_Y = 10

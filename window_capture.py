@@ -35,7 +35,7 @@ class WindowCapture:
         self._lock = threading.RLock()
         try:
             self.ensure_window(resize=True)
-        except WindowNotAvailableError as exc:
+        except WindowCaptureError as exc:
             logger.warning("%s", exc)
 
     def _find_window_handle(self):
@@ -60,10 +60,13 @@ class WindowCapture:
         if not self.hwnd or not win32gui.IsWindow(self.hwnd):
             return
 
-        rect = win32gui.GetWindowRect(self.hwnd)
+        try:
+            rect = win32gui.GetWindowRect(self.hwnd)
+        except pywintypes.error as exc:
+            raise self._translate_win32_error(exc, "resizing the window") from exc
         x, y = rect[0], rect[1]
 
-        ctypes.windll.user32.SetWindowPos(
+        result = ctypes.windll.user32.SetWindowPos(
             self.hwnd,
             0,
             int(x),
@@ -72,6 +75,8 @@ class WindowCapture:
             int(self.target_height),
             win32con.SWP_NOZORDER | win32con.SWP_SHOWWINDOW,
         )
+        if not result:
+            raise WindowCaptureError(f"SetWindowPos failed for '{self.window_title}'")
         logger.info("Window resized to %sx%s", self.target_width, self.target_height)
 
     def find_window(self):
@@ -144,7 +149,10 @@ class WindowCapture:
         _, width, height = self._get_client_size(hwnd)
 
         if max_y is not None:
-            height = min(height, int(max_y))
+            try:
+                height = min(height, int(max_y))
+            except (TypeError, ValueError) as exc:
+                raise WindowCaptureError(f"Invalid capture height limit: {max_y}") from exc
         if width <= 0 or height <= 0:
             raise WindowCaptureError(
                 f"Window '{self.window_title}' cannot be captured with size {width}x{height}"
@@ -168,12 +176,18 @@ class WindowCapture:
                 raise WindowCaptureError(f"PrintWindow failed for '{self.window_title}'")
 
             bitmap_bytes = save_bitmap.GetBitmapBits(True)
-            img = np.frombuffer(bitmap_bytes, dtype=np.uint8)
-            img.shape = (height, width, 4)
+            expected_size = height * width * 4
+            if len(bitmap_bytes) != expected_size:
+                raise WindowCaptureError(
+                    f"Captured bitmap size mismatch: expected {expected_size} bytes, got {len(bitmap_bytes)}"
+                )
+            img = np.frombuffer(bitmap_bytes, dtype=np.uint8).reshape((height, width, 4))
             img = np.ascontiguousarray(img[:, :, :3])
             return img
         except pywintypes.error as exc:
             raise self._translate_win32_error(exc, "capturing the window") from exc
+        except ValueError as exc:
+            raise WindowCaptureError(f"Captured bitmap could not be decoded: {exc}") from exc
         finally:
             if save_bitmap is not None:
                 win32gui.DeleteObject(save_bitmap.GetHandle())
@@ -212,9 +226,11 @@ class ForbiddenAreaOverlay:
         if self.overlay_hwnd:
             try:
                 win32gui.DestroyWindow(self.overlay_hwnd)
-            except:
-                pass
+            except pywintypes.error as exc:
+                logger.debug("Overlay destroy failed: %s", exc)
             self.overlay_hwnd = None
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
         logger.info("Forbidden area overlay stopped")
     
     def _create_overlay(self):
@@ -226,8 +242,8 @@ class ForbiddenAreaOverlay:
             wc.hbrBackground = win32gui.GetStockObject(win32con.NULL_BRUSH)
             
             try:
-                class_atom = win32gui.RegisterClass(wc)
-            except Exception as e:
+                win32gui.RegisterClass(wc)
+            except pywintypes.error:
                 pass
             
             target_rect = win32gui.GetClientRect(self.target_hwnd)
@@ -245,13 +261,6 @@ class ForbiddenAreaOverlay:
                 0, 0, 0, None
             )
             
-            # Set transparency (255 = opaque, 128 = 50% transparent, 0 = fully transparent)
-            win32gui.SetLayeredWindowAttributes(
-                self.overlay_hwnd,
-                0,
-                128,  # 50% transparency
-                win32con.LWA_ALPHA
-            )
             win32gui.SetLayeredWindowAttributes(
                 self.overlay_hwnd,
                 0,
@@ -279,13 +288,13 @@ class ForbiddenAreaOverlay:
                         )
                         self._draw_zones()
                     
-                except Exception as e:
+                except pywintypes.error as e:
                     logger.error(f"Error in overlay update loop: {e}")
                     break
                 
                 time.sleep(0.1)
                 
-        except Exception as e:
+        except pywintypes.error as e:
             logger.error(f"Failed to create overlay window: {e}")
         finally:
             self.running = False
@@ -294,9 +303,10 @@ class ForbiddenAreaOverlay:
         if not self.overlay_hwnd:
             return
             
+        hdc = None
+        red_brush = None
         try:
             hdc = win32gui.GetDC(self.overlay_hwnd)
-            
             red_brush = win32gui.CreateSolidBrush(win32api.RGB(255, 0, 0))
             
             for x_min, x_max, y_min, y_max in self.forbidden_zones:
@@ -306,11 +316,13 @@ class ForbiddenAreaOverlay:
                 
                 win32gui.SelectObject(hdc, old_brush)
             
-            win32gui.DeleteObject(red_brush)
-            win32gui.ReleaseDC(self.overlay_hwnd, hdc)
-            
-        except Exception as e:
+        except pywintypes.error as e:
             logger.error(f"Error drawing zones: {e}")
+        finally:
+            if red_brush is not None:
+                win32gui.DeleteObject(red_brush)
+            if hdc is not None:
+                win32gui.ReleaseDC(self.overlay_hwnd, hdc)
     
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == win32con.WM_PAINT:
