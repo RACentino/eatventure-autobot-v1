@@ -1041,6 +1041,29 @@ class EatventureBot:
             self._sleep(config.SCROLL_INTERVAL_PAUSE)
         return bool(moved)
 
+    def _upgrade_station_threshold(self):
+        if self.vision_optimizer.enabled:
+            return self.vision_optimizer.upgrade_station_threshold
+        return config.UPGRADE_STATION_THRESHOLD
+
+    def _find_upgrade_station_match(self, threshold):
+        if "upgradeStation" not in self.templates:
+            return None
+
+        limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
+        template, mask = self.templates["upgradeStation"]
+        found, confidence, x, y = self.image_matcher.find_template(
+            limited_screenshot,
+            template,
+            mask=mask,
+            threshold=threshold,
+            template_name="upgradeStation",
+            check_color=config.UPGRADE_STATION_COLOR_CHECK,
+        )
+        if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+            return confidence, x, y
+        return None
+
     def start(self):
         if self.running:
             return True
@@ -1250,31 +1273,18 @@ class EatventureBot:
         return State.SEARCH_UPGRADE_STATION
 
     def handle_search_upgrade_station(self, current_state):
-        base_threshold = (
-            self.vision_optimizer.upgrade_station_threshold
-            if self.vision_optimizer.enabled
-            else config.UPGRADE_STATION_THRESHOLD
-        )
+        base_threshold = self._upgrade_station_threshold()
         relaxed_threshold = max(0.0, base_threshold - 0.05)
         max_attempts = 5
 
         for attempt in range(max_attempts):
-            limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
-
             if "upgradeStation" not in self.templates:
                 break
 
-            template, mask = self.templates["upgradeStation"]
             current_threshold = base_threshold if attempt < 2 else relaxed_threshold
-            found, confidence, x, y = self.image_matcher.find_template(
-                limited_screenshot,
-                template,
-                mask=mask,
-                threshold=current_threshold,
-                template_name="upgradeStation",
-                check_color=config.UPGRADE_STATION_COLOR_CHECK,
-            )
-            if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+            match = self._find_upgrade_station_match(current_threshold)
+            if match is not None:
+                confidence, x, y = match
                 logger.info("Upgrade station found at (%s, %s) on attempt %s", x, y, attempt + 1)
                 self.upgrade_station_pos = (x, y)
                 self.upgrade_found_in_cycle = True
@@ -1306,6 +1316,46 @@ class EatventureBot:
         if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
             logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", x, y)
             return State.OPEN_BOXES
+
+        logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
+        clicked = self.mouse_controller.click(x, y, relative=True, delay=0.0)
+        self.tuner.record_click_result(clicked)
+        self._apply_tuning()
+        if not clicked:
+            logger.warning("Upgrade station verification click failed at (%s, %s)", x, y)
+            return State.OPEN_BOXES
+
+        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
+            return State.OPEN_BOXES
+
+        base_threshold = self._upgrade_station_threshold()
+        relaxed_threshold = max(0.0, base_threshold - 0.05)
+        verify_attempts = max(1, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
+        verified_match = None
+        for attempt in range(verify_attempts):
+            current_threshold = base_threshold if attempt == 0 else relaxed_threshold
+            verified_match = self._find_upgrade_station_match(current_threshold)
+            if verified_match is not None:
+                break
+            if attempt < verify_attempts - 1:
+                if not self._sleep(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL):
+                    return State.OPEN_BOXES
+
+        if verified_match is None:
+            logger.info("Upgrade station disappeared after verification click; continuing main flow")
+            self.upgrade_station_pos = None
+            self.upgrade_found_in_cycle = False
+            self.vision_optimizer.update_upgrade_station_miss()
+            self.tuner.record_search_result(False)
+            self._apply_tuning()
+            return State.OPEN_BOXES
+
+        confidence, x, y = verified_match
+        self.upgrade_station_pos = (x, y)
+        self.vision_optimizer.update_upgrade_station_confidence(confidence)
+        self.tuner.record_search_result(True)
+        self._apply_tuning()
+        logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
 
         logger.info("Spam-clicking upgrade station at (%s, %s)", x, y)
         completed = self.mouse_controller.spam_click_at(
