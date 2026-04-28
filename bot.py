@@ -1357,19 +1357,49 @@ class EatventureBot:
         self._apply_tuning()
         logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
 
-        logger.info("Spam-clicking upgrade station at (%s, %s)", x, y)
-        completed = self.mouse_controller.spam_click_at(
+        spam_click_delay = max(0.001, float(config.SPAM_CLICK_DELAY))
+        vision_check_interval = max(spam_click_delay, 0.05)
+        clicks_between_checks = max(1, min(5, int(round(vision_check_interval / spam_click_delay))))
+        click_count = 0
+        current_match = (confidence, x, y)
+        logger.info(
+            "Vision-locked spam-clicking upgrade station at (%s, %s), checking every %s clicks",
             x,
             y,
-            duration=config.SPAM_CLICK_DURATION,
-            click_delay=config.SPAM_CLICK_DELAY,
-            jitter=config.SPAM_CLICK_JITTER,
-            relative=True,
-            interrupt_check=self._stop_requested.is_set,
+            clicks_between_checks,
         )
-        if not completed:
-            logger.warning("Spam-click sequence ended early")
-            return State.OPEN_BOXES
+
+        while current_match is not None:
+            confidence, x, y = current_match
+            if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                logger.warning("Upgrade station moved into forbidden zone at (%s, %s)", x, y)
+                return State.OPEN_BOXES
+
+            self.upgrade_station_pos = (x, y)
+            self.vision_optimizer.update_upgrade_station_confidence(confidence)
+
+            for _ in range(clicks_between_checks):
+                if self._stop_requested.is_set():
+                    logger.warning("Upgrade station spam-click loop interrupted after %s clicks", click_count)
+                    return State.OPEN_BOXES
+
+                clicked = self.mouse_controller.click(x, y, relative=True, delay=0.0)
+                if not clicked:
+                    self.tuner.record_click_result(False)
+                    self._apply_tuning()
+                    logger.warning("Upgrade station spam click failed at (%s, %s)", x, y)
+                    return State.OPEN_BOXES
+
+                click_count += 1
+                if not self._sleep(spam_click_delay):
+                    return State.OPEN_BOXES
+
+            current_match = self._find_upgrade_station_match(base_threshold)
+            if current_match is None:
+                current_match = self._find_upgrade_station_match(relaxed_threshold)
+
+        logger.info("Upgrade station no longer detected after %s spam clicks", click_count)
+        self.upgrade_station_pos = None
 
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         self._sleep(config.STATE_DELAY)
