@@ -1357,48 +1357,73 @@ class EatventureBot:
         self._apply_tuning()
         logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
 
-        spam_click_delay = max(0.001, float(config.SPAM_CLICK_DELAY))
-        vision_check_interval = max(spam_click_delay, 0.05)
-        clicks_between_checks = max(1, min(5, int(round(vision_check_interval / spam_click_delay))))
-        click_count = 0
+        hold_check_interval = max(0.05, min(0.20, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)))
         current_match = (confidence, x, y)
-        logger.info(
-            "Vision-locked spam-clicking upgrade station at (%s, %s), checking every %s clicks",
-            x,
-            y,
-            clicks_between_checks,
-        )
+        screen_pos = self.mouse_controller._resolve_screen_position(x, y, relative=True)
+        if screen_pos is None:
+            logger.warning("Upgrade station hold position could not be resolved at (%s, %s)", x, y)
+            return State.OPEN_BOXES
 
-        while current_match is not None:
-            confidence, x, y = current_match
-            if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-                logger.warning("Upgrade station moved into forbidden zone at (%s, %s)", x, y)
+        screen_x, screen_y = screen_pos
+        if not self.mouse_controller._set_cursor_pos(screen_x, screen_y):
+            self.tuner.record_click_result(False)
+            self._apply_tuning()
+            logger.warning("Failed to position cursor for Upgrade Station hold at (%s, %s)", x, y)
+            return State.OPEN_BOXES
+        if self.mouse_controller.move_delay > 0:
+            time.sleep(self.mouse_controller.move_delay)
+
+        left_down = 0x0002
+        left_up = 0x0004
+        hold_started_at = time.monotonic()
+        holding = False
+        logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
+
+        try:
+            if not self.mouse_controller._mouse_event(left_down, screen_x, screen_y):
+                self.mouse_controller._best_effort_left_up(screen_x, screen_y)
+                self.tuner.record_click_result(False)
+                self._apply_tuning()
+                logger.warning("Upgrade station hold press failed at (%s, %s)", x, y)
                 return State.OPEN_BOXES
 
-            self.upgrade_station_pos = (x, y)
-            self.vision_optimizer.update_upgrade_station_confidence(confidence)
+            holding = True
+            self.tuner.record_click_result(True)
+            self._apply_tuning()
 
-            for _ in range(clicks_between_checks):
+            while current_match is not None:
                 if self._stop_requested.is_set():
-                    logger.warning("Upgrade station spam-click loop interrupted after %s clicks", click_count)
+                    logger.warning("Upgrade station hold interrupted after %.2fs", time.monotonic() - hold_started_at)
                     return State.OPEN_BOXES
 
-                clicked = self.mouse_controller.click(x, y, relative=True, delay=0.0)
-                if not clicked:
-                    self.tuner.record_click_result(False)
-                    self._apply_tuning()
-                    logger.warning("Upgrade station spam click failed at (%s, %s)", x, y)
+                if not self._sleep(hold_check_interval):
                     return State.OPEN_BOXES
 
-                click_count += 1
-                if not self._sleep(spam_click_delay):
+                current_match = self._find_upgrade_station_match(base_threshold)
+                if current_match is None:
+                    current_match = self._find_upgrade_station_match(relaxed_threshold)
+                if current_match is None:
+                    break
+
+                confidence, x, y = current_match
+                self.upgrade_station_pos = (x, y)
+                self.vision_optimizer.update_upgrade_station_confidence(confidence)
+
+                next_screen_pos = self.mouse_controller._resolve_screen_position(x, y, relative=True)
+                if next_screen_pos is None:
+                    logger.warning("Upgrade station hold target became invalid at (%s, %s)", x, y)
                     return State.OPEN_BOXES
+                if next_screen_pos != (screen_x, screen_y):
+                    screen_x, screen_y = next_screen_pos
+                    if not self.mouse_controller._set_cursor_pos(screen_x, screen_y):
+                        logger.warning("Failed to reposition held cursor to (%s, %s)", x, y)
+                        return State.OPEN_BOXES
+        finally:
+            if holding:
+                if not self.mouse_controller._mouse_event(left_up, screen_x, screen_y):
+                    self.mouse_controller._best_effort_left_up(screen_x, screen_y)
 
-            current_match = self._find_upgrade_station_match(base_threshold)
-            if current_match is None:
-                current_match = self._find_upgrade_station_match(relaxed_threshold)
-
-        logger.info("Upgrade station no longer detected after %s spam clicks", click_count)
+        logger.info("Upgrade station no longer detected after %.2fs hold", time.monotonic() - hold_started_at)
         self.upgrade_station_pos = None
 
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
