@@ -869,9 +869,14 @@ class EatventureBot:
         icons = []
         confidences = []
         for (x, y), matches in detections.items():
-            if len(matches) < min_matches:
+            by_template = {}
+            for template_name, confidence in matches:
+                existing = by_template.get(template_name)
+                if existing is None or confidence > existing:
+                    by_template[template_name] = confidence
+            if len(by_template) < min_matches:
                 continue
-            max_confidence = max(confidence for _, confidence in matches)
+            max_confidence = max(by_template.values())
             icons.append((max_confidence, x, y))
             confidences.append(max_confidence)
         return icons, confidences
@@ -889,26 +894,21 @@ class EatventureBot:
         if region.size == 0:
             return None
 
+        detections = self._collect_red_icon_detections(
+            region,
+            threshold,
+            min_distance=min_distance,
+            offset_x=offset_x,
+            offset_y=offset_y,
+        )
+        min_matches = self._red_icon_min_matches()
+        icons, _ = self._icons_from_detections(detections, min_matches)
         best_match = None
-        for template_name in self._red_icon_template_names():
-            if template_name not in self.templates:
+        for confidence, x, y in icons:
+            if not (x_min <= x <= x_max and y_min <= y <= y_max):
                 continue
-            template, mask = self.templates[template_name]
-            icons = self.image_matcher.find_all_templates(
-                region,
-                template,
-                mask=mask,
-                threshold=threshold,
-                min_distance=min_distance,
-                template_name=template_name,
-            )
-            for confidence, x, y in icons:
-                global_x = x + offset_x
-                global_y = y + offset_y
-                if not (x_min <= global_x <= x_max and y_min <= global_y <= y_max):
-                    continue
-                if best_match is None or confidence > best_match[0]:
-                    best_match = (confidence, global_x, global_y)
+            if best_match is None or confidence > best_match[0]:
+                best_match = (confidence, x, y)
         return best_match
 
     def _find_new_level_red_icon(self, screenshot=None, scan_threshold=None, min_matches=None):
@@ -978,6 +978,7 @@ class EatventureBot:
 
     def _reset_search_cycle(self):
         self.cycle_counter = 0
+        self.wait_for_unlock_attempts = 0
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
@@ -1107,7 +1108,12 @@ class EatventureBot:
                 self.stop()
                 return False
             self._apply_tuning()
-            return bool(self.state_machine.update())
+            updated = bool(self.state_machine.update())
+            if not updated:
+                logger.error("State machine update failed in state %s; stopping bot", self.state_machine.get_state_name())
+                self.stop()
+                return False
+            return True
         except (WindowNotAvailableError, WindowCaptureError) as exc:
             logger.error("Stopping bot: %s", exc)
             self.stop()
@@ -1268,7 +1274,9 @@ class EatventureBot:
             )
             if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
                 logger.info("Unlock found at (%s, %s) [%.3f]", x, y, confidence)
-                self.mouse_controller.click(x, y, relative=True)
+                if not self.mouse_controller.click(x, y, relative=True):
+                    logger.warning("Unlock click failed at (%s, %s)", x, y)
+                    return State.CHECK_UNLOCK
 
         return State.SEARCH_UPGRADE_STATION
 
@@ -1299,7 +1307,8 @@ class EatventureBot:
                 return State.HOLD_UPGRADE_STATION
 
             if attempt < max_attempts - 1:
-                self._sleep(self.tuner.search_interval)
+                if not self._sleep(self.tuner.search_interval):
+                    return State.OPEN_BOXES
 
         self.vision_optimizer.update_upgrade_station_miss()
         self.tuner.record_search_result(False)
@@ -1495,12 +1504,15 @@ class EatventureBot:
         for _ in range(config.STATS_UPGRADE_CLICK_COUNT):
             if self._stop_requested.is_set():
                 return State.OPEN_BOXES
-            self.mouse_controller.click(
+            clicked = self.mouse_controller.click(
                 config.STATS_UPGRADE_POS[0],
                 config.STATS_UPGRADE_POS[1],
                 relative=True,
                 delay=0.0,
             )
+            if not clicked:
+                logger.warning("Stats upgrade click failed at %s", config.STATS_UPGRADE_POS)
+                return State.OPEN_BOXES
             if not self._sleep(config.STATS_UPGRADE_CLICK_DELAY):
                 return State.OPEN_BOXES
 
@@ -1642,10 +1654,15 @@ class EatventureBot:
         if not advanced:
             logger.warning("Failed to click the level transition button at %s", config.LEVEL_TRANSITION_POS)
             return State.CHECK_NEW_LEVEL
-        self._sleep(0.20)
-        self._reset_search_cycle()
-        self._new_level_red_icon_verified = False
-        return State.FIND_RED_ICONS
+        if not self._sleep(0.20):
+            return State.OPEN_BOXES
+        elapsed = self._record_level_completion()
+        logger.info(
+            "Level %s completed via verified red-icon path. Time spent: %.1fs",
+            self.total_levels_completed,
+            elapsed,
+        )
+        return State.WAIT_FOR_UNLOCK
 
     def handle_transition_level(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
@@ -1720,6 +1737,10 @@ class EatventureBot:
             )
             if found:
                 logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
+                if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                    logger.warning("Unlock button found in forbidden zone at (%s, %s)", x, y)
+                    self._sleep(0.30)
+                    return State.WAIT_FOR_UNLOCK
                 if not self.mouse_controller.click(x, y, relative=True):
                     logger.warning("Unlock button click failed at (%s, %s)", x, y)
                     return State.WAIT_FOR_UNLOCK

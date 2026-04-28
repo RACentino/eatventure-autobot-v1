@@ -67,7 +67,7 @@ The bot utilizes a refactored **Forbidden Zone Handling** system. Zones are defi
 ## Requirements
 
 * **Operating System**: Windows 10/11
-* **Python**: 3.8 or higher
+* **Python**: Use a version supported by the pinned packages in `requirements.txt`; the project has been verified locally with Python 3.14.
 * **Android Device**: Connected via USB or Wireless ADB, with **Developer Options** and **USB Debugging** enabled.
 
 ## Installation Instructions
@@ -110,7 +110,7 @@ scrcpy --window-title "EatventureAuto"
 1. Start a chat with your new bot and send any message.
 2. Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in your browser.
 3. Look for the `"chat":{"id":...}` field and copy the number.
-4. Paste the **Token** and **Chat ID** into `config.py` and set `TELEGRAM_ENABLED = True`.
+4. Set `EATVENTURE_TELEGRAM_BOT_TOKEN`, `EATVENTURE_TELEGRAM_CHAT_ID`, and `EATVENTURE_TELEGRAM_ENABLED=true` in your environment before starting the bot.
 
 ## Disclaimer
 

@@ -30,8 +30,13 @@ class WindowCapture:
     def __init__(self, window_title, target_width=800, target_height=600):
         self.window_title = window_title
         self.hwnd = None
-        self.target_width = target_width
-        self.target_height = target_height
+        try:
+            self.target_width = int(target_width)
+            self.target_height = int(target_height)
+        except (TypeError, ValueError) as exc:
+            raise WindowCaptureError(f"Invalid target window size: {target_width}x{target_height}") from exc
+        if self.target_width <= 0 or self.target_height <= 0:
+            raise WindowCaptureError(f"Invalid target window size: {self.target_width}x{self.target_height}")
         self._lock = threading.RLock()
         try:
             self.ensure_window(resize=True)
@@ -145,58 +150,65 @@ class WindowCapture:
         return x, y, width, height
 
     def capture(self, max_y=None):
-        hwnd = self.ensure_window()
-        _, width, height = self._get_client_size(hwnd)
+        with self._lock:
+            hwnd = self.ensure_window()
+            _, width, height = self._get_client_size(hwnd)
 
-        if max_y is not None:
-            try:
-                height = min(height, int(max_y))
-            except (TypeError, ValueError) as exc:
-                raise WindowCaptureError(f"Invalid capture height limit: {max_y}") from exc
-        if width <= 0 or height <= 0:
-            raise WindowCaptureError(
-                f"Window '{self.window_title}' cannot be captured with size {width}x{height}"
-            )
-
-        hwnd_dc = None
-        mfc_dc = None
-        save_dc = None
-        save_bitmap = None
-        try:
-            hwnd_dc = win32gui.GetWindowDC(hwnd)
-            mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
-            save_dc = mfc_dc.CreateCompatibleDC()
-
-            save_bitmap = win32ui.CreateBitmap()
-            save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
-            save_dc.SelectObject(save_bitmap)
-
-            result = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
-            if result != 1:
-                raise WindowCaptureError(f"PrintWindow failed for '{self.window_title}'")
-
-            bitmap_bytes = save_bitmap.GetBitmapBits(True)
-            expected_size = height * width * 4
-            if len(bitmap_bytes) != expected_size:
+            if max_y is not None:
+                try:
+                    height = min(height, int(max_y))
+                except (TypeError, ValueError) as exc:
+                    raise WindowCaptureError(f"Invalid capture height limit: {max_y}") from exc
+            if width <= 0 or height <= 0:
                 raise WindowCaptureError(
-                    f"Captured bitmap size mismatch: expected {expected_size} bytes, got {len(bitmap_bytes)}"
+                    f"Window '{self.window_title}' cannot be captured with size {width}x{height}"
                 )
-            img = np.frombuffer(bitmap_bytes, dtype=np.uint8).reshape((height, width, 4))
-            img = np.ascontiguousarray(img[:, :, :3])
-            return img
-        except pywintypes.error as exc:
-            raise self._translate_win32_error(exc, "capturing the window") from exc
-        except ValueError as exc:
-            raise WindowCaptureError(f"Captured bitmap could not be decoded: {exc}") from exc
-        finally:
-            if save_bitmap is not None:
-                win32gui.DeleteObject(save_bitmap.GetHandle())
-            if save_dc is not None:
-                save_dc.DeleteDC()
-            if mfc_dc is not None:
-                mfc_dc.DeleteDC()
-            if hwnd_dc is not None and hwnd:
-                win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+            hwnd_dc = None
+            mfc_dc = None
+            save_dc = None
+            save_bitmap = None
+            old_bitmap = None
+            try:
+                hwnd_dc = win32gui.GetWindowDC(hwnd)
+                mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+                save_dc = mfc_dc.CreateCompatibleDC()
+
+                save_bitmap = win32ui.CreateBitmap()
+                save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+                old_bitmap = save_dc.SelectObject(save_bitmap)
+
+                result = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
+                if result != 1:
+                    raise WindowCaptureError(f"PrintWindow failed for '{self.window_title}'")
+
+                bitmap_bytes = save_bitmap.GetBitmapBits(True)
+                expected_size = height * width * 4
+                if len(bitmap_bytes) != expected_size:
+                    raise WindowCaptureError(
+                        f"Captured bitmap size mismatch: expected {expected_size} bytes, got {len(bitmap_bytes)}"
+                    )
+                img = np.frombuffer(bitmap_bytes, dtype=np.uint8).reshape((height, width, 4))
+                img = np.ascontiguousarray(img[:, :, :3])
+                return img
+            except pywintypes.error as exc:
+                raise self._translate_win32_error(exc, "capturing the window") from exc
+            except ValueError as exc:
+                raise WindowCaptureError(f"Captured bitmap could not be decoded: {exc}") from exc
+            finally:
+                if save_dc is not None and old_bitmap is not None:
+                    try:
+                        save_dc.SelectObject(old_bitmap)
+                    except pywintypes.error as exc:
+                        logger.debug("Could not restore capture DC bitmap: %s", exc)
+                if save_bitmap is not None:
+                    win32gui.DeleteObject(save_bitmap.GetHandle())
+                if save_dc is not None:
+                    save_dc.DeleteDC()
+                if mfc_dc is not None:
+                    mfc_dc.DeleteDC()
+                if hwnd_dc is not None and hwnd:
+                    win32gui.ReleaseDC(hwnd, hwnd_dc)
 
     def is_window_active(self):
         with self._lock:

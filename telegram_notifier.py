@@ -16,7 +16,11 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.timeout = 5
         self.enabled = bool(enabled and self.bot_token and self.chat_id)
-        self._queue = queue.Queue(maxsize=max(1, int(getattr(config, "TELEGRAM_QUEUE_MAXSIZE", 100))))
+        try:
+            queue_size = int(getattr(config, "TELEGRAM_QUEUE_MAXSIZE", 100))
+        except (TypeError, ValueError):
+            queue_size = 100
+        self._queue = queue.Queue(maxsize=max(1, queue_size))
         self._stop = threading.Event()
         self._thread = None
         self._session = requests.Session() if self.enabled else None
@@ -37,6 +41,8 @@ class TelegramNotifier:
 
             try:
                 self._send_message_now(message)
+            except Exception:
+                logger.exception("Unexpected Telegram notification failure")
             finally:
                 self._queue.task_done()
 
@@ -49,7 +55,6 @@ class TelegramNotifier:
             data = {
                 "chat_id": self.chat_id,
                 "text": message,
-                "parse_mode": "HTML",
             }
 
             response = self._session.post(url, json=data, timeout=self.timeout)
@@ -76,12 +81,14 @@ class TelegramNotifier:
             return False
 
     def send_message(self, message):
-        if not self.enabled:
+        if not self.enabled or self._stop.is_set():
             return False
 
-        message = str(message)
+        message = str(message).strip()
         if not message:
             return False
+        if len(message) > 4096:
+            message = message[:4093] + "..."
         try:
             self._queue.put_nowait(message)
             return True
@@ -100,13 +107,14 @@ class TelegramNotifier:
         if self._session is not None:
             self._session.close()
             self._session = None
+        self.enabled = False
 
     def notify_bot_started(self):
-        message = "<b>Bot Started</b>"
+        message = "Bot Started"
         self.send_message(message)
 
     def notify_bot_stopped(self):
-        message = "<b>Bot Stopped</b>"
+        message = "Bot Stopped"
         self.send_message(message)
 
     def notify_new_level(self, level_number, time_spent):
@@ -118,5 +126,5 @@ class TelegramNotifier:
         self.send_message(message)
 
     def notify_level_milestone(self, total_levels):
-        message = f"<b>Milestone Reached</b>\nTotal cities completed: {total_levels}"
+        message = f"Milestone Reached\nTotal cities completed: {total_levels}"
         self.send_message(message)

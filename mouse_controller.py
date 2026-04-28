@@ -1,4 +1,5 @@
 import logging
+import math
 import random
 import time
 
@@ -15,10 +16,26 @@ logger = logging.getLogger(__name__)
 class MouseController:
     def __init__(self, hwnd_source, click_delay=None, move_delay=None):
         self._hwnd_source = hwnd_source
-        self.click_delay = config.CLICK_DELAY if click_delay is None else click_delay
-        self.move_delay = config.MOUSE_MOVE_DELAY if move_delay is None else move_delay
+        self.click_delay = self._coerce_non_negative_float(
+            config.CLICK_DELAY if click_delay is None else click_delay,
+            float(config.CLICK_DELAY),
+        )
+        self.move_delay = self._coerce_non_negative_float(
+            config.MOUSE_MOVE_DELAY if move_delay is None else move_delay,
+            float(config.MOUSE_MOVE_DELAY),
+        )
         self.input_retry_count = 3
         self.input_retry_delay = 0.05
+
+    @staticmethod
+    def _coerce_non_negative_float(value, default=0.0):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return max(0.0, float(default))
+        if not math.isfinite(number):
+            return max(0.0, float(default))
+        return max(0.0, number)
 
     def _get_hwnd(self):
         hwnd = self._hwnd_source() if callable(self._hwnd_source) else self._hwnd_source
@@ -225,6 +242,7 @@ class MouseController:
 
             logger.debug("Clicked at (%s, %s)", screen_x, screen_y)
             wait_time = self.click_delay if delay is None else delay
+            wait_time = self._coerce_non_negative_float(wait_time, self.click_delay)
             if wait_time > 0:
                 time.sleep(wait_time)
             return True
@@ -234,13 +252,14 @@ class MouseController:
         return False
 
     def double_click(self, x, y, relative=True):
-        first = self.click(x, y, relative=relative, delay=0.05)
-        second = self.click(x, y, relative=relative)
-        return first and second
+        if not self.click(x, y, relative=relative, delay=0.05):
+            return False
+        return self.click(x, y, relative=relative)
 
     def hold_at(self, x, y, duration=None, relative=True, interrupt_check=None):
         if duration is None:
             duration = 4.0
+        duration = self._coerce_non_negative_float(duration, 4.0)
 
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
         if screen_pos is None:
@@ -257,7 +276,7 @@ class MouseController:
             return False
         logger.debug("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
 
-        end_time = time.monotonic() + max(0.0, float(duration))
+        end_time = time.monotonic() + duration
         while time.monotonic() < end_time:
             if interrupt_check and interrupt_check():
                 self._best_effort_left_up(screen_x, screen_y)
@@ -279,8 +298,8 @@ class MouseController:
         if click_delay is None:
             click_delay = config.SPAM_CLICK_DELAY
 
-        duration = max(0.0, float(duration))
-        click_delay = max(0.001, float(click_delay))
+        duration = self._coerce_non_negative_float(duration, config.SPAM_CLICK_DURATION)
+        click_delay = max(0.001, self._coerce_non_negative_float(click_delay, config.SPAM_CLICK_DELAY))
         jitter = max(0, int(jitter))
 
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
@@ -356,6 +375,7 @@ class MouseController:
     def drag(self, from_x, from_y, to_x, to_y, duration=None, relative=True):
         if duration is None:
             duration = config.SCROLL_DURATION
+        duration = max(0.01, self._coerce_non_negative_float(duration, config.SCROLL_DURATION))
 
         from_pos = self._resolve_screen_position(from_x, from_y, relative=relative)
         to_pos = self._resolve_screen_position(to_x, to_y, relative=relative)
@@ -375,7 +395,6 @@ class MouseController:
         time.sleep(0.02)
 
         steps = 20
-        duration = max(0.01, float(duration))
         for index in range(steps + 1):
             position = index / steps
             current_x = int(screen_from_x + (screen_to_x - screen_from_x) * position)

@@ -20,20 +20,30 @@ class State(Enum):
 
 class StateMachine:
     def __init__(self, initial_state=State.FIND_RED_ICONS):
+        if not isinstance(initial_state, State):
+            raise TypeError(f"initial_state must be a State, got {type(initial_state).__name__}")
         self.current_state = initial_state
         self.previous_state = None
         self.state_handlers = {}
         logger.info("State machine initialized in state: %s", initial_state.name)
     
     def register_handler(self, state, handler):
+        if not isinstance(state, State):
+            raise TypeError(f"state must be a State, got {type(state).__name__}")
+        if not callable(handler):
+            raise TypeError(f"handler for {state.name} must be callable")
         self.state_handlers[state] = handler
         logger.debug("Registered handler for state: %s", state.name)
     
     def transition(self, new_state):
+        if not isinstance(new_state, State):
+            logger.error("Invalid transition target: %r", new_state)
+            return False
         if new_state != self.current_state:
             logger.debug("State transition: %s -> %s", self.current_state.name, new_state.name)
             self.previous_state = self.current_state
             self.current_state = new_state
+        return True
     
     def update(self):
         if self.current_state in self.state_handlers:
@@ -42,7 +52,8 @@ class StateMachine:
             
             if next_state is not None:
                 if isinstance(next_state, State):
-                    self.transition(next_state)
+                    if not self.transition(next_state):
+                        return False
                 else:
                     logger.error(
                         "Handler for %s returned invalid state: %r",

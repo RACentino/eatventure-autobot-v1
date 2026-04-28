@@ -35,8 +35,18 @@ class ImageMatcher:
     def _normalize_mask(mask, template_shape, template_name):
         if mask is None:
             return None
+        if not hasattr(mask, "shape") or mask.size == 0:
+            logger.warning("[%s] Ignoring empty mask", template_name)
+            return None
         if mask.ndim == 3:
-            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            try:
+                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            except cv2.error as exc:
+                logger.warning("[%s] Ignoring unsupported mask: %s", template_name, exc)
+                return None
+        elif mask.ndim != 2:
+            logger.warning("[%s] Ignoring mask with unsupported shape %s", template_name, mask.shape)
+            return None
         if mask.shape[:2] != template_shape[:2]:
             logger.warning(
                 "[%s] Ignoring mask with shape %s for template shape %s",
@@ -47,6 +57,9 @@ class ImageMatcher:
             return None
         normalized = np.zeros(mask.shape[:2], dtype=np.uint8)
         normalized[mask > 0] = 255
+        if not np.any(normalized):
+            logger.warning("[%s] Ignoring mask without active pixels", template_name)
+            return None
         return normalized
 
     @staticmethod
@@ -58,7 +71,8 @@ class ImageMatcher:
             return None
         if result.size == 0:
             return None
-        return np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
+        result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
+        return np.clip(result, 0.0, 1.0)
     
     def load_template(self, template_path):
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
@@ -68,6 +82,8 @@ class ImageMatcher:
         mask = None
         if template.ndim == 3 and template.shape[2] == 4:
             alpha = template[:, :, 3]
+            if not np.any(alpha > 0):
+                raise ValueError(f"Template has no visible pixels: {template_path}")
             mask = np.zeros_like(alpha)
             mask[alpha > 0] = 255
         template = self._normalize_image(template, str(template_path))
@@ -135,32 +151,39 @@ class ImageMatcher:
         
         if roi.shape[:2] != template.shape[:2]:
             return False
-        
-        if mask is not None:
-            template_masked = cv2.bitwise_and(template, template, mask=mask)
-            roi_masked = cv2.bitwise_and(roi, roi, mask=mask)
-        else:
-            template_masked = template
-            roi_masked = roi
-        
-        hist_template_b = cv2.calcHist([template_masked], [0], mask, [32], [0, 256])
-        hist_template_g = cv2.calcHist([template_masked], [1], mask, [32], [0, 256])
-        hist_template_r = cv2.calcHist([template_masked], [2], mask, [32], [0, 256])
-        
-        hist_roi_b = cv2.calcHist([roi_masked], [0], mask, [32], [0, 256])
-        hist_roi_g = cv2.calcHist([roi_masked], [1], mask, [32], [0, 256])
-        hist_roi_r = cv2.calcHist([roi_masked], [2], mask, [32], [0, 256])
-        
-        cv2.normalize(hist_template_b, hist_template_b, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_template_g, hist_template_g, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_template_r, hist_template_r, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_roi_b, hist_roi_b, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_roi_g, hist_roi_g, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_roi_r, hist_roi_r, 0, 1, cv2.NORM_MINMAX)
-        
-        corr_b = cv2.compareHist(hist_template_b, hist_roi_b, cv2.HISTCMP_CORREL)
-        corr_g = cv2.compareHist(hist_template_g, hist_roi_g, cv2.HISTCMP_CORREL)
-        corr_r = cv2.compareHist(hist_template_r, hist_roi_r, cv2.HISTCMP_CORREL)
+
+        if mask is not None and not np.any(mask):
+            return False
+
+        try:
+            hist_template_b = cv2.calcHist([template], [0], mask, [32], [0, 256])
+            hist_template_g = cv2.calcHist([template], [1], mask, [32], [0, 256])
+            hist_template_r = cv2.calcHist([template], [2], mask, [32], [0, 256])
+
+            hist_roi_b = cv2.calcHist([roi], [0], mask, [32], [0, 256])
+            hist_roi_g = cv2.calcHist([roi], [1], mask, [32], [0, 256])
+            hist_roi_r = cv2.calcHist([roi], [2], mask, [32], [0, 256])
+
+            histograms = (
+                hist_template_b,
+                hist_template_g,
+                hist_template_r,
+                hist_roi_b,
+                hist_roi_g,
+                hist_roi_r,
+            )
+            if any(not np.any(hist) for hist in histograms):
+                return False
+
+            for hist in histograms:
+                cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+
+            corr_b = cv2.compareHist(hist_template_b, hist_roi_b, cv2.HISTCMP_CORREL)
+            corr_g = cv2.compareHist(hist_template_g, hist_roi_g, cv2.HISTCMP_CORREL)
+            corr_r = cv2.compareHist(hist_template_r, hist_roi_r, cv2.HISTCMP_CORREL)
+        except cv2.error as exc:
+            logger.debug("Color similarity check failed: %s", exc)
+            return False
         
         correlations = (corr_b, corr_g, corr_r)
         if not all(np.isfinite(value) for value in correlations):
@@ -182,10 +205,6 @@ class ImageMatcher:
 
         if scales is None:
             scales = [1.0]
-        
-        if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
-            logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
-            return []
         
         for scale in scales:
             try:

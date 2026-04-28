@@ -18,6 +18,13 @@ import config
 REQUEST_TIMEOUT = 10
 
 
+def _redact_token(text, token):
+    text = str(text)
+    if token:
+        return text.replace(token, "<redacted-token>")
+    return text
+
+
 def main():
     bot_token = str(config.TELEGRAM_BOT_TOKEN or "").strip()
     if not bot_token:
@@ -39,10 +46,13 @@ def main():
         return 1
 
     if not data.get("ok"):
-        print(f"Telegram API error: {data.get('description', data)}")
+        print(f"Telegram API error: {_redact_token(data.get('description', data), bot_token)}")
         return 1
 
     updates = data.get("result", [])
+    if not isinstance(updates, list):
+        print("Telegram API error: updates response was not a list")
+        return 1
     if not updates:
         print("No messages found!")
         print("\nPlease:")
