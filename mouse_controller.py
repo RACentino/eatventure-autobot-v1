@@ -37,6 +37,17 @@ class MouseController:
             return max(0.0, float(default))
         return max(0.0, number)
 
+    @staticmethod
+    def _coerce_non_negative_int(value, default=0):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            try:
+                number = int(default)
+            except (TypeError, ValueError):
+                number = 0
+        return max(0, number)
+
     def _get_hwnd(self):
         hwnd = self._hwnd_source() if callable(self._hwnd_source) else self._hwnd_source
         if not hwnd or not win32gui.IsWindow(hwnd):
@@ -229,7 +240,13 @@ class MouseController:
                 time.sleep(self.move_delay)
 
             down_up_delay = min(
-                max(float(getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.02)), 0.001),
+                max(
+                    self._coerce_non_negative_float(
+                        getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.02),
+                        0.02,
+                    ),
+                    0.001,
+                ),
                 0.02,
             )
             if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
@@ -300,7 +317,7 @@ class MouseController:
 
         duration = self._coerce_non_negative_float(duration, config.SPAM_CLICK_DURATION)
         click_delay = max(0.001, self._coerce_non_negative_float(click_delay, config.SPAM_CLICK_DELAY))
-        jitter = max(0, int(jitter))
+        jitter = self._coerce_non_negative_int(jitter)
 
         screen_pos = self._resolve_screen_position(x, y, relative=relative)
         if screen_pos is None:
@@ -313,7 +330,13 @@ class MouseController:
             time.sleep(self.move_delay)
 
         click_down_up_delay = min(
-            max(float(getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.008)), 0.001),
+            max(
+                self._coerce_non_negative_float(
+                    getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.008),
+                    0.008,
+                ),
+                0.001,
+            ),
             click_delay / 2.0,
         )
 

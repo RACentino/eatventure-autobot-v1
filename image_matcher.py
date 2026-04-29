@@ -10,13 +10,21 @@ class ImageMatcher:
         self.threshold = self._normalize_threshold(threshold)
 
     @staticmethod
-    def _normalize_threshold(value):
+    def _normalize_threshold(value, default=0.85):
+        try:
+            fallback = float(default)
+        except (TypeError, ValueError):
+            fallback = 0.85
+        if not np.isfinite(fallback):
+            fallback = 0.85
+        fallback = max(0.0, min(1.0, fallback))
+
         try:
             threshold = float(value)
         except (TypeError, ValueError):
-            return 0.85
+            return fallback
         if not np.isfinite(threshold):
-            return 0.85
+            return fallback
         return max(0.0, min(1.0, threshold))
 
     @staticmethod
@@ -102,7 +110,7 @@ class ImageMatcher:
         hsv_ranges=None,
         hsv_match_threshold=0.9,
     ):
-        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
+        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         try:
             screenshot = self._normalize_image(screenshot, "screenshot")
             template = self._normalize_image(template, template_name)
@@ -211,7 +219,7 @@ class ImageMatcher:
             return False
 
         avg_corr = sum(correlations) / 3
-        return avg_corr >= self._normalize_threshold(color_threshold)
+        return avg_corr >= self._normalize_threshold(color_threshold, 0.7)
 
     @staticmethod
     def _normalize_hsv_ranges(hsv_ranges):
@@ -285,10 +293,10 @@ class ImageMatcher:
 
         matched_count = int(np.count_nonzero((combined > 0) & active_mask))
         match_ratio = matched_count / active_count
-        return match_ratio >= self._normalize_threshold(hsv_match_threshold)
+        return match_ratio >= self._normalize_threshold(hsv_match_threshold, 0.9)
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
-        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
+        thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         all_matches = []
         try:
             screenshot = self._normalize_image(screenshot, "screenshot")

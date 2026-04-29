@@ -613,6 +613,7 @@ class EatventureBot:
     def __init__(self):
         logger.info("Initializing Eatventure Bot")
         self._stop_requested = threading.Event()
+        self._step_active = threading.Event()
 
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
@@ -1051,7 +1052,7 @@ class EatventureBot:
         if "upgradeStation" not in self.templates:
             return None
 
-        limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
+        limited_screenshot = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
         template, mask = self.templates["upgradeStation"]
         found, confidence, x, y = self.image_matcher.find_template(
             limited_screenshot,
@@ -1074,12 +1075,15 @@ class EatventureBot:
     def start(self):
         if self.running:
             return True
+        if self._step_active.is_set():
+            logger.warning("Cannot start bot while a previous state step is still stopping")
+            return False
         if not self.ready:
             logger.error("Cannot start bot because required templates are missing")
             return False
         try:
             self.window_capture.ensure_window(resize=True)
-        except WindowNotAvailableError as exc:
+        except WindowCaptureError as exc:
             logger.error("Cannot start bot: %s", exc)
             self.running = False
             return False
@@ -1105,6 +1109,10 @@ class EatventureBot:
             self.overlay = None
 
     def step(self):
+        if self._step_active.is_set():
+            logger.warning("Ignoring reentrant bot step")
+            return False
+        self._step_active.set()
         try:
             if self._stop_requested.is_set():
                 self.stop()
@@ -1132,6 +1140,8 @@ class EatventureBot:
             logger.exception("Stopping bot due to unexpected state-handler failure")
             self.stop()
             return False
+        finally:
+            self._step_active.clear()
 
     def run(self):
         if not self.start():
