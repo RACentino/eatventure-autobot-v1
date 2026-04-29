@@ -1060,6 +1060,12 @@ class EatventureBot:
             threshold=threshold,
             template_name="upgradeStation",
             check_color=config.UPGRADE_STATION_COLOR_CHECK,
+            hsv_ranges=(
+                config.UPGRADE_STATION_HSV_RANGES
+                if config.UPGRADE_STATION_HSV_COLOR_GATE_ENABLED
+                else None
+            ),
+            hsv_match_threshold=config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
         )
         if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
             return confidence, x, y
@@ -1561,6 +1567,12 @@ class EatventureBot:
                 template_name=box_name,
                 check_color=config.BOX_COLOR_CHECK,
                 color_threshold=config.BOX_COLOR_THRESHOLD,
+                hsv_ranges=(
+                    config.BOX_HSV_RANGES
+                    if config.BOX_HSV_COLOR_GATE_ENABLED
+                    else None
+                ),
+                hsv_match_threshold=config.BOX_HSV_MIN_MATCH_RATIO,
             )
             if found:
                 if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):

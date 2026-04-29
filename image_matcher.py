@@ -99,6 +99,8 @@ class ImageMatcher:
         template_name="Unknown",
         check_color=False,
         color_threshold=0.7,
+        hsv_ranges=None,
+        hsv_match_threshold=0.9,
     ):
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
         try:
@@ -137,6 +139,25 @@ class ImageMatcher:
                 )
                 if not color_match:
                     logger.debug(f"[{template_name}] Color check failed at ({center_x}, {center_y}), confidence: {confidence:.2%}")
+                    return False, confidence, 0, 0
+
+            if hsv_ranges:
+                hsv_match = self._check_hsv_gate(
+                    screenshot,
+                    template,
+                    min_loc,
+                    mask,
+                    hsv_ranges,
+                    hsv_match_threshold,
+                )
+                if not hsv_match:
+                    logger.debug(
+                        "[%s] HSV gate failed at (%s, %s), confidence: %.2f%%",
+                        template_name,
+                        center_x,
+                        center_y,
+                        confidence * 100,
+                    )
                     return False, confidence, 0, 0
             
             return True, confidence, center_x, center_y
@@ -191,6 +212,80 @@ class ImageMatcher:
 
         avg_corr = sum(correlations) / 3
         return avg_corr >= self._normalize_threshold(color_threshold)
+
+    @staticmethod
+    def _normalize_hsv_ranges(hsv_ranges):
+        normalized = []
+        for hsv_range in hsv_ranges:
+            try:
+                lower, upper = hsv_range
+                lower = np.array(lower, dtype=np.int16)
+                upper = np.array(upper, dtype=np.int16)
+            except (TypeError, ValueError):
+                continue
+            if lower.shape != (3,) or upper.shape != (3,):
+                continue
+            lower = np.array(
+                [
+                    max(0, min(179, int(lower[0]))),
+                    max(0, min(255, int(lower[1]))),
+                    max(0, min(255, int(lower[2]))),
+                ],
+                dtype=np.uint8,
+            )
+            upper = np.array(
+                [
+                    max(0, min(179, int(upper[0]))),
+                    max(0, min(255, int(upper[1]))),
+                    max(0, min(255, int(upper[2]))),
+                ],
+                dtype=np.uint8,
+            )
+            normalized.append((lower, upper))
+        return normalized
+
+    def _check_hsv_gate(self, screenshot, template, location, mask, hsv_ranges, hsv_match_threshold):
+        x, y = location
+        h, w = template.shape[:2]
+        roi = screenshot[y:y+h, x:x+w]
+
+        if roi.shape[:2] != template.shape[:2]:
+            return False
+
+        if mask is None:
+            active_mask = np.ones((h, w), dtype=bool)
+        else:
+            active_mask = mask > 0
+
+        active_count = int(np.count_nonzero(active_mask))
+        if active_count <= 0:
+            return False
+
+        ranges = self._normalize_hsv_ranges(hsv_ranges)
+        if not ranges:
+            return False
+
+        try:
+            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        except cv2.error as exc:
+            logger.debug("HSV gate conversion failed: %s", exc)
+            return False
+
+        combined = np.zeros((h, w), dtype=np.uint8)
+        for lower, upper in ranges:
+            if int(lower[0]) <= int(upper[0]):
+                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower, upper))
+            else:
+                lower_wrap = lower.copy()
+                upper_wrap = upper.copy()
+                lower_wrap[0] = 0
+                upper_wrap[0] = 179
+                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower, upper_wrap))
+                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower_wrap, upper))
+
+        matched_count = int(np.count_nonzero((combined > 0) & active_mask))
+        match_ratio = matched_count / active_count
+        return match_ratio >= self._normalize_threshold(hsv_match_threshold)
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold)
