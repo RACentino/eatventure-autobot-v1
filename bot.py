@@ -1054,22 +1054,44 @@ class EatventureBot:
 
         limited_screenshot = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
         template, mask = self.templates["upgradeStation"]
-        found, confidence, x, y = self.image_matcher.find_template(
+        candidates = self.image_matcher.find_all_templates(
             limited_screenshot,
             template,
             mask=mask,
             threshold=threshold,
+            min_distance=15,
             template_name="upgradeStation",
-            check_color=config.UPGRADE_STATION_COLOR_CHECK,
-            hsv_ranges=(
-                config.UPGRADE_STATION_HSV_RANGES
-                if config.UPGRADE_STATION_HSV_COLOR_GATE_ENABLED
-                else None
-            ),
-            hsv_match_threshold=config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
         )
-        if found and not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-            return confidence, x, y
+        if not candidates:
+            return None
+
+        template_height, template_width = template.shape[:2]
+        for confidence, x, y in candidates:
+            x = int(x)
+            y = int(y)
+            location = (x - template_width // 2, y - template_height // 2)
+
+            if config.UPGRADE_STATION_COLOR_CHECK and not self.image_matcher._check_color_similarity(
+                limited_screenshot,
+                template,
+                location,
+                mask,
+            ):
+                continue
+
+            if config.UPGRADE_STATION_HSV_COLOR_GATE_ENABLED and not self.image_matcher._check_hsv_gate(
+                limited_screenshot,
+                template,
+                location,
+                mask,
+                config.UPGRADE_STATION_HSV_RANGES,
+                config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
+            ):
+                continue
+
+            if not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                return float(confidence), x, y
+
         return None
 
     def start(self):
@@ -1343,7 +1365,7 @@ class EatventureBot:
             return State.OPEN_BOXES
 
         logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
-        clicked = self.mouse_controller.click(x, y, relative=True, delay=0.0)
+        clicked = self.mouse_controller.click(x, y, relative=True)
         self.tuner.record_click_result(clicked)
         self._apply_tuning()
         if not clicked:
