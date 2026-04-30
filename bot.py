@@ -1559,7 +1559,7 @@ class EatventureBot:
                 logger.info("New level found while opening boxes")
                 return State.TRANSITION_LEVEL
 
-        box_names = ["box1", "box2", "box3", "box4", "box5"]
+        box_names = ["box1", "box2", "box3", "box4"]
         box_threshold = self.vision_optimizer.box_threshold if self.vision_optimizer.enabled else config.BOX_THRESHOLD
         boxes_found = 0
         best_box_confidence = 0.0
