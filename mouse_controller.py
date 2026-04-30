@@ -14,7 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class MouseController:
-    def __init__(self, hwnd_source, click_delay=None, move_delay=None):
+    def __init__(
+        self,
+        hwnd_source,
+        click_delay=None,
+        move_delay=None,
+        hover_enabled=None,
+        hover_duration=None,
+    ):
         self._hwnd_source = hwnd_source
         self.click_delay = self._coerce_non_negative_float(
             config.CLICK_DELAY if click_delay is None else click_delay,
@@ -23,6 +30,11 @@ class MouseController:
         self.move_delay = self._coerce_non_negative_float(
             config.MOUSE_MOVE_DELAY if move_delay is None else move_delay,
             float(config.MOUSE_MOVE_DELAY),
+        )
+        self.hover_enabled = bool(config.HOVER_ENABLED if hover_enabled is None else hover_enabled)
+        self.hover_duration = self._coerce_non_negative_float(
+            config.HOVER_DURATION if hover_duration is None else hover_duration,
+            0.0,
         )
         self.input_retry_count = 3
         self.input_retry_delay = 0.05
@@ -225,6 +237,13 @@ class MouseController:
         logger.debug("Cursor moved to (%s, %s)", screen_x, screen_y)
         return True
 
+    def _hover_before_click(self):
+        if not self.hover_enabled:
+            return
+        duration = self._coerce_non_negative_float(self.hover_duration, 0.0)
+        if duration > 0:
+            time.sleep(duration)
+
     def click(self, x, y, relative=True, delay=None):
         last_screen_pos = None
         for _ in range(self.input_retry_count):
@@ -238,6 +257,7 @@ class MouseController:
                 continue
             if self.move_delay > 0:
                 time.sleep(self.move_delay)
+            self._hover_before_click()
 
             down_up_delay = min(
                 max(
