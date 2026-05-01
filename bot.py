@@ -12,7 +12,7 @@ from pathlib import Path
 import config
 import pywintypes
 from image_matcher import ImageMatcher
-from mouse_controller import MouseController
+from mouse_controller import MouseController, precise_sleep, wait_event
 from state_machine import State, StateMachine
 from telegram_notifier import TelegramNotifier
 from window_capture import (
@@ -757,9 +757,7 @@ class EatventureBot:
         self.state_machine.register_handler(State.WAIT_FOR_UNLOCK, self.handle_wait_for_unlock)
 
     def _sleep(self, duration):
-        if duration > 0:
-            return not self._stop_requested.wait(duration)
-        return not self._stop_requested.is_set()
+        return wait_event(self._stop_requested, duration)
 
     def _apply_tuning(self):
         self.mouse_controller.click_delay = float(self.tuner.click_delay)
@@ -1174,7 +1172,7 @@ class EatventureBot:
                     logger.error("Window '%s' is no longer active", config.WINDOW_TITLE)
                     break
                 self.step()
-                time.sleep(0.1)
+                precise_sleep(0.1)
         finally:
             self.stop()
 
@@ -1418,7 +1416,7 @@ class EatventureBot:
             logger.warning("Failed to position cursor for Upgrade Station hold at (%s, %s)", x, y)
             return State.OPEN_BOXES
         if self.mouse_controller.move_delay > 0:
-            time.sleep(self.mouse_controller.move_delay)
+            precise_sleep(self.mouse_controller.move_delay)
 
         left_down = 0x0002
         left_up = 0x0004
@@ -1539,20 +1537,17 @@ class EatventureBot:
             return State.OPEN_BOXES
 
         self._sleep(config.STATE_DELAY)
-        for _ in range(config.STATS_UPGRADE_CLICK_COUNT):
-            if self._stop_requested.is_set():
-                return State.OPEN_BOXES
-            clicked = self.mouse_controller.click(
-                config.STATS_UPGRADE_POS[0],
-                config.STATS_UPGRADE_POS[1],
-                relative=True,
-                delay=0.0,
-            )
-            if not clicked:
-                logger.warning("Stats upgrade click failed at %s", config.STATS_UPGRADE_POS)
-                return State.OPEN_BOXES
-            if not self._sleep(config.STATS_UPGRADE_CLICK_DELAY):
-                return State.OPEN_BOXES
+        clicked = self.mouse_controller.spam_click_at(
+            config.STATS_UPGRADE_POS[0],
+            config.STATS_UPGRADE_POS[1],
+            duration=config.STATS_UPGRADE_CLICK_DURATION,
+            click_delay=config.STATS_UPGRADE_CLICK_DELAY,
+            relative=True,
+            interrupt_check=self._stop_requested.is_set,
+        )
+        if not clicked:
+            logger.warning("Stats upgrade spam-click failed at %s", config.STATS_UPGRADE_POS)
+            return State.OPEN_BOXES
 
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
         logger.info("Stats upgrade completed")

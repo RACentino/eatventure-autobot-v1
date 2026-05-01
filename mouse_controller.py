@@ -1,6 +1,9 @@
+import atexit
+import ctypes
 import logging
 import math
 import random
+import threading
 import time
 
 import pywintypes
@@ -11,6 +14,81 @@ import win32gui
 import config
 
 logger = logging.getLogger(__name__)
+
+_timer_resolution_enabled = False
+
+
+def _disable_timer_resolution():
+    global _timer_resolution_enabled
+    if not _timer_resolution_enabled:
+        return
+    try:
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        return
+    _timer_resolution_enabled = False
+
+
+def _enable_timer_resolution():
+    global _timer_resolution_enabled
+    if _timer_resolution_enabled:
+        return
+    try:
+        result = ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        return
+    if result == 0:
+        _timer_resolution_enabled = True
+        atexit.register(_disable_timer_resolution)
+
+
+def _coerce_duration(duration, default=0.0):
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        value = float(default)
+    return max(0.0, value)
+
+
+def precise_sleep(duration):
+    duration = _coerce_duration(duration)
+    if duration <= 0:
+        return
+    sleep_until(time.perf_counter() + duration)
+
+
+def sleep_until(deadline, stop_event=None):
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        remaining = float(deadline) - time.perf_counter()
+        if remaining <= 0:
+            return stop_event is None or not stop_event.is_set()
+        if remaining > 0.004:
+            wait_time = min(remaining - 0.002, 0.05)
+            if stop_event is not None:
+                if stop_event.wait(wait_time):
+                    return False
+            else:
+                time.sleep(wait_time)
+            continue
+        if remaining > 0.001:
+            time.sleep(0)
+
+
+def wait_event(stop_event, duration):
+    duration = _coerce_duration(duration)
+    if stop_event is None:
+        precise_sleep(duration)
+        return True
+    if duration <= 0:
+        return not stop_event.is_set()
+    return sleep_until(time.perf_counter() + duration, stop_event)
+
+
+_enable_timer_resolution()
 
 
 class MouseController:
@@ -38,6 +116,7 @@ class MouseController:
         )
         self.input_retry_count = 3
         self.input_retry_delay = 0.05
+        self._input_lock = threading.RLock()
 
     @staticmethod
     def _coerce_non_negative_float(value, default=0.0):
@@ -98,7 +177,11 @@ class MouseController:
         for attempt in range(1, self.input_retry_count + 1):
             try:
                 win32api.SetCursorPos((screen_x, screen_y))
-                return True
+                precise_sleep(0.001)
+                current_x, current_y = win32api.GetCursorPos()
+                if abs(int(current_x) - screen_x) <= 1 and abs(int(current_y) - screen_y) <= 1:
+                    return True
+                last_exc = RuntimeError(f"cursor settled at ({current_x}, {current_y})")
             except pywintypes.error as exc:
                 last_exc = exc
                 logger.warning(
@@ -109,8 +192,8 @@ class MouseController:
                     self.input_retry_count,
                     exc,
                 )
-                if attempt < self.input_retry_count:
-                    time.sleep(self.input_retry_delay)
+            if attempt < self.input_retry_count:
+                precise_sleep(self.input_retry_delay)
         logger.error("SetCursorPos failed at (%s, %s): %s", screen_x, screen_y, last_exc)
         return False
 
@@ -134,7 +217,7 @@ class MouseController:
                     exc,
                 )
                 if attempt < self.input_retry_count:
-                    time.sleep(self.input_retry_delay)
+                    precise_sleep(self.input_retry_delay)
         logger.error("mouse_event %s failed at (%s, %s): %s", event, screen_x, screen_y, last_exc)
         return False
 
@@ -225,68 +308,96 @@ class MouseController:
             return None
 
     def move_to(self, x, y, relative=True):
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
-            return False
+        with self._input_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
 
-        screen_x, screen_y = screen_pos
-        if not self._set_cursor_pos(screen_x, screen_y):
-            return False
-        if self.move_delay > 0:
-            time.sleep(self.move_delay)
-        logger.debug("Cursor moved to (%s, %s)", screen_x, screen_y)
-        return True
+            screen_x, screen_y = screen_pos
+            if not self._set_cursor_pos(screen_x, screen_y):
+                return False
+            if self.move_delay > 0:
+                precise_sleep(self.move_delay)
+            logger.debug("Cursor moved to (%s, %s)", screen_x, screen_y)
+            return True
 
     def _hover_before_click(self):
         if not self.hover_enabled:
             return
         duration = self._coerce_non_negative_float(self.hover_duration, 0.0)
         if duration > 0:
-            time.sleep(duration)
+            precise_sleep(duration)
+
+    def _click_down_up_delay(self, default=0.02):
+        return max(
+            self._coerce_non_negative_float(
+                getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", default),
+                default,
+            ),
+            0.001,
+        )
+
+    @staticmethod
+    def _interruptible_delay(duration, interrupt_check=None):
+        deadline = time.perf_counter() + max(0.0, float(duration))
+        while True:
+            if interrupt_check and interrupt_check():
+                return False
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return True
+            precise_sleep(min(remaining, 0.005))
+
+    @staticmethod
+    def _interruptible_sleep_until(deadline, interrupt_check=None):
+        while True:
+            if interrupt_check and interrupt_check():
+                return False
+            remaining = float(deadline) - time.perf_counter()
+            if remaining <= 0:
+                return True
+            precise_sleep(min(remaining, 0.005))
+
+    def _left_click_at_screen(self, screen_x, screen_y, down_up_delay):
+        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
+            self._best_effort_left_up(screen_x, screen_y)
+            return False
+        precise_sleep(down_up_delay)
+        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y):
+            self._best_effort_left_up(screen_x, screen_y)
+            return False
+        return True
 
     def click(self, x, y, relative=True, delay=None):
-        last_screen_pos = None
-        for _ in range(self.input_retry_count):
-            screen_pos = self._resolve_screen_position(x, y, relative=relative)
-            if screen_pos is None:
-                return False
+        with self._input_lock:
+            last_screen_pos = None
+            down_up_delay = self._click_down_up_delay(0.02)
+            for _ in range(self.input_retry_count):
+                screen_pos = self._resolve_screen_position(x, y, relative=relative)
+                if screen_pos is None:
+                    return False
 
-            screen_x, screen_y = screen_pos
-            last_screen_pos = (screen_x, screen_y)
-            if not self._set_cursor_pos(screen_x, screen_y):
-                continue
-            if self.move_delay > 0:
-                time.sleep(self.move_delay)
-            self._hover_before_click()
+                screen_x, screen_y = screen_pos
+                last_screen_pos = (screen_x, screen_y)
+                if not self._set_cursor_pos(screen_x, screen_y):
+                    continue
+                if self.move_delay > 0:
+                    precise_sleep(self.move_delay)
+                self._hover_before_click()
 
-            down_up_delay = min(
-                max(
-                    self._coerce_non_negative_float(
-                        getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.02),
-                        0.02,
-                    ),
-                    0.001,
-                ),
-                0.02,
-            )
-            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
-                self._best_effort_left_up(screen_x, screen_y)
-                continue
-            time.sleep(down_up_delay)
-            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y):
-                self._best_effort_left_up(screen_x, screen_y)
-                continue
+                if not self._left_click_at_screen(screen_x, screen_y, down_up_delay):
+                    continue
 
-            logger.debug("Clicked at (%s, %s)", screen_x, screen_y)
-            wait_time = self.click_delay if delay is None else delay
-            wait_time = self._coerce_non_negative_float(wait_time, self.click_delay)
-            if wait_time > 0:
-                time.sleep(wait_time)
-            return True
+                logger.debug("Clicked at (%s, %s)", screen_x, screen_y)
+                wait_time = self.click_delay if delay is None else delay
+                wait_time = self._coerce_non_negative_float(wait_time, self.click_delay)
+                if wait_time > 0:
+                    precise_sleep(wait_time)
+                return True
 
-        if last_screen_pos is not None:
-            logger.error("Click failed at (%s, %s)", last_screen_pos[0], last_screen_pos[1])
-        return False
+            if last_screen_pos is not None:
+                logger.error("Click failed at (%s, %s)", last_screen_pos[0], last_screen_pos[1])
+            return False
 
     def double_click(self, x, y, relative=True):
         if not self.click(x, y, relative=relative, delay=0.05):
@@ -294,163 +405,178 @@ class MouseController:
         return self.click(x, y, relative=relative)
 
     def hold_at(self, x, y, duration=None, relative=True, interrupt_check=None):
-        if duration is None:
-            duration = 4.0
-        duration = self._coerce_non_negative_float(duration, 4.0)
+        with self._input_lock:
+            if duration is None:
+                duration = 4.0
+            duration = self._coerce_non_negative_float(duration, 4.0)
 
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
-            return False
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
 
-        screen_x, screen_y = screen_pos
-        if not self._set_cursor_pos(screen_x, screen_y):
-            return False
-        if self.move_delay > 0:
-            time.sleep(self.move_delay)
+            screen_x, screen_y = screen_pos
+            if not self._set_cursor_pos(screen_x, screen_y):
+                return False
+            if self.move_delay > 0:
+                precise_sleep(self.move_delay)
 
-        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
-            self._best_effort_left_up(screen_x, screen_y)
-            return False
-        logger.debug("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
-
-        end_time = time.monotonic() + duration
-        while time.monotonic() < end_time:
-            if interrupt_check and interrupt_check():
+            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
                 self._best_effort_left_up(screen_x, screen_y)
                 return False
-            remaining = end_time - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(0.05, remaining))
+            logger.debug("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
 
-        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y):
-            self._best_effort_left_up(screen_x, screen_y)
-            return False
-        if self.click_delay > 0:
-            time.sleep(self.click_delay)
-        return True
+            if not self._interruptible_delay(duration, interrupt_check):
+                self._best_effort_left_up(screen_x, screen_y)
+                return False
+
+            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_x, screen_y):
+                self._best_effort_left_up(screen_x, screen_y)
+                return False
+            if self.click_delay > 0:
+                precise_sleep(self.click_delay)
+            return True
+
+    def click_sequence(self, x, y, count, interval, relative=True, interrupt_check=None):
+        with self._input_lock:
+            count = self._coerce_non_negative_int(count)
+            interval = max(0.0, self._coerce_non_negative_float(interval, 0.0))
+            if count <= 0:
+                return True
+
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
+
+            screen_x, screen_y = screen_pos
+            if not self._set_cursor_pos(screen_x, screen_y):
+                return False
+            if self.move_delay > 0:
+                precise_sleep(self.move_delay)
+            self._hover_before_click()
+
+            down_up_delay = self._click_down_up_delay(0.008)
+            first_click_at = time.perf_counter()
+            for index in range(count):
+                if not self._interruptible_sleep_until(first_click_at + (index * interval), interrupt_check):
+                    return False
+                if not self._left_click_at_screen(screen_x, screen_y, down_up_delay):
+                    return False
+
+            logger.debug("Click sequence complete at (%s, %s): %s clicks", screen_x, screen_y, count)
+            return True
 
     def spam_click_at(self, x, y, duration=None, click_delay=None, jitter=0, relative=True, interrupt_check=None):
-        if duration is None:
-            duration = config.SPAM_CLICK_DURATION
-        if click_delay is None:
-            click_delay = config.SPAM_CLICK_DELAY
+        with self._input_lock:
+            if duration is None:
+                duration = config.SPAM_CLICK_DURATION
+            if click_delay is None:
+                click_delay = config.SPAM_CLICK_DELAY
 
-        duration = self._coerce_non_negative_float(duration, config.SPAM_CLICK_DURATION)
-        click_delay = max(0.001, self._coerce_non_negative_float(click_delay, config.SPAM_CLICK_DELAY))
-        jitter = self._coerce_non_negative_int(jitter)
+            duration = self._coerce_non_negative_float(duration, config.SPAM_CLICK_DURATION)
+            click_delay = max(0.001, self._coerce_non_negative_float(click_delay, config.SPAM_CLICK_DELAY))
+            jitter = self._coerce_non_negative_int(jitter)
 
-        screen_pos = self._resolve_screen_position(x, y, relative=relative)
-        if screen_pos is None:
-            return False
-
-        base_x, base_y = screen_pos
-        if not self._set_cursor_pos(base_x, base_y):
-            return False
-        if self.move_delay > 0:
-            time.sleep(self.move_delay)
-
-        click_down_up_delay = min(
-            max(
-                self._coerce_non_negative_float(
-                    getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.008),
-                    0.008,
-                ),
-                0.001,
-            ),
-            click_delay / 2.0,
-        )
-
-        start_time = time.perf_counter()
-        end_time = start_time + duration
-        next_click_at = start_time
-        click_count = 0
-
-        logger.debug(
-            "Spam-clicking at (%s, %s) for %.2fs (interval=%.3fs, jitter=%s)",
-            base_x,
-            base_y,
-            duration,
-            click_delay,
-            jitter,
-        )
-
-        while True:
-            if interrupt_check and interrupt_check():
-                logger.debug("Spam-click interrupted after %s clicks", click_count)
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
                 return False
 
-            now = time.perf_counter()
-            if now >= end_time:
-                break
+            base_x, base_y = screen_pos
+            if not self._set_cursor_pos(base_x, base_y):
+                return False
+            if self.move_delay > 0:
+                precise_sleep(self.move_delay)
+            self._hover_before_click()
 
-            if now < next_click_at:
-                time.sleep(min(next_click_at - now, 0.001))
-                continue
+            click_down_up_delay = self._click_down_up_delay(0.008)
+            start_time = time.perf_counter()
+            end_time = start_time + duration
+            next_click_at = start_time
+            click_count = 0
 
-            target_x = base_x
-            target_y = base_y
-            if jitter > 0:
-                target_x += random.randint(-jitter, jitter)
-                target_y += random.randint(-jitter, jitter)
-                jittered_pos = self._resolve_screen_position(target_x, target_y, relative=False)
-                if jittered_pos is None:
-                    return False
-                target_x, target_y = jittered_pos
-                if not self._set_cursor_pos(target_x, target_y):
+            logger.debug(
+                "Spam-clicking at (%s, %s) for %.2fs (interval=%.3fs, jitter=%s)",
+                base_x,
+                base_y,
+                duration,
+                click_delay,
+                jitter,
+            )
+
+            while True:
+                if interrupt_check and interrupt_check():
+                    logger.debug("Spam-click interrupted after %s clicks", click_count)
                     return False
 
-            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, target_x, target_y):
-                self._best_effort_left_up(target_x, target_y)
-                return False
-            time.sleep(click_down_up_delay)
-            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, target_x, target_y):
-                self._best_effort_left_up(target_x, target_y)
-                return False
+                now = time.perf_counter()
+                if now >= end_time:
+                    break
 
-            click_count += 1
-            next_click_at += click_delay
+                if now < next_click_at:
+                    if not self._interruptible_sleep_until(next_click_at, interrupt_check):
+                        return False
+                    continue
 
-        logger.debug("Spam-click complete: %s clicks", click_count)
-        if self.click_delay > 0:
-            time.sleep(self.click_delay)
-        return True
+                target_x = base_x
+                target_y = base_y
+                if jitter > 0:
+                    target_x += random.randint(-jitter, jitter)
+                    target_y += random.randint(-jitter, jitter)
+                    jittered_pos = self._resolve_screen_position(target_x, target_y, relative=False)
+                    if jittered_pos is None:
+                        return False
+                    target_x, target_y = jittered_pos
+                    if not self._set_cursor_pos(target_x, target_y):
+                        return False
+
+                if not self._left_click_at_screen(target_x, target_y, click_down_up_delay):
+                    return False
+
+                click_count += 1
+                next_click_at += click_delay
+
+            logger.debug("Spam-click complete: %s clicks", click_count)
+            if self.click_delay > 0:
+                precise_sleep(self.click_delay)
+            return True
 
     def drag(self, from_x, from_y, to_x, to_y, duration=None, relative=True):
-        if duration is None:
-            duration = config.SCROLL_DURATION
-        duration = max(0.01, self._coerce_non_negative_float(duration, config.SCROLL_DURATION))
+        with self._input_lock:
+            if duration is None:
+                duration = config.SCROLL_DURATION
+            duration = max(0.01, self._coerce_non_negative_float(duration, config.SCROLL_DURATION))
 
-        from_pos = self._resolve_screen_position(from_x, from_y, relative=relative)
-        to_pos = self._resolve_screen_position(to_x, to_y, relative=relative)
-        if from_pos is None or to_pos is None:
-            return False
-        screen_from_x, screen_from_y = from_pos
-        screen_to_x, screen_to_y = to_pos
-
-        if not self._set_cursor_pos(screen_from_x, screen_from_y):
-            return False
-        if self.move_delay > 0:
-            time.sleep(self.move_delay)
-
-        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_from_x, screen_from_y):
-            self._best_effort_left_up(screen_from_x, screen_from_y)
-            return False
-        time.sleep(0.02)
-
-        steps = 20
-        for index in range(steps + 1):
-            position = index / steps
-            current_x = int(screen_from_x + (screen_to_x - screen_from_x) * position)
-            current_y = int(screen_from_y + (screen_to_y - screen_from_y) * position)
-            if not self._set_cursor_pos(current_x, current_y):
-                self._best_effort_left_up(current_x, current_y)
+            from_pos = self._resolve_screen_position(from_x, from_y, relative=relative)
+            to_pos = self._resolve_screen_position(to_x, to_y, relative=relative)
+            if from_pos is None or to_pos is None:
                 return False
-            time.sleep(duration / steps)
+            screen_from_x, screen_from_y = from_pos
+            screen_to_x, screen_to_y = to_pos
 
-        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_to_x, screen_to_y):
-            self._best_effort_left_up(screen_to_x, screen_to_y)
-            return False
-        logger.debug("Dragged from (%s, %s) to (%s, %s)", from_x, from_y, to_x, to_y)
-        if self.click_delay > 0:
-            time.sleep(self.click_delay)
-        return True
+            if not self._set_cursor_pos(screen_from_x, screen_from_y):
+                return False
+            if self.move_delay > 0:
+                precise_sleep(self.move_delay)
+
+            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_from_x, screen_from_y):
+                self._best_effort_left_up(screen_from_x, screen_from_y)
+                return False
+            precise_sleep(0.02)
+
+            steps = 20
+            start_time = time.perf_counter()
+            for index in range(steps + 1):
+                position = index / steps
+                current_x = int(screen_from_x + (screen_to_x - screen_from_x) * position)
+                current_y = int(screen_from_y + (screen_to_y - screen_from_y) * position)
+                if not self._set_cursor_pos(current_x, current_y):
+                    self._best_effort_left_up(current_x, current_y)
+                    return False
+                sleep_until(start_time + ((index + 1) * (duration / steps)))
+
+            if not self._mouse_event(win32con.MOUSEEVENTF_LEFTUP, screen_to_x, screen_to_y):
+                self._best_effort_left_up(screen_to_x, screen_to_y)
+                return False
+            logger.debug("Dragged from (%s, %s) to (%s, %s)", from_x, from_y, to_x, to_y)
+            if self.click_delay > 0:
+                precise_sleep(self.click_delay)
+            return True

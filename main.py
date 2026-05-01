@@ -2,7 +2,6 @@ import logging
 import queue
 from pathlib import Path
 import sys
-import time
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 import win32api
@@ -11,6 +10,7 @@ from pynput import keyboard
 
 import config
 from bot import EatventureBot
+from mouse_controller import precise_sleep
 
 bot_instance = None
 should_exit = False
@@ -132,7 +132,7 @@ def main():
         while not should_exit:
             if bot_instance.running:
                 bot_instance.step()
-            time.sleep(0.1)
+            precise_sleep(0.1)
 
         logger.info("Program exiting")
     except KeyboardInterrupt:
