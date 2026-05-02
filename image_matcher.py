@@ -296,6 +296,20 @@ class ImageMatcher:
         return match_ratio >= self._normalize_threshold(hsv_match_threshold, 0.9)
     
     def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+        all_matches = self.find_template_candidates(
+            screenshot,
+            template,
+            mask=mask,
+            threshold=threshold,
+            min_distance=min_distance,
+            scales=scales,
+            template_name=template_name,
+        )
+        if all_matches:
+            all_matches = self._non_max_suppression(all_matches, min_distance)
+        return [(conf, x, y) for conf, x, y, _, _ in all_matches]
+
+    def find_template_candidates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         all_matches = []
         try:
@@ -333,21 +347,42 @@ class ImageMatcher:
             if result is None:
                 continue
             
-            locations = np.where(result <= (1 - thresh))
-            
             h, w = scaled_template.shape[:2]
-            for pt in zip(*locations[::-1]):
-                confidence = float(1.0 - result[pt[1], pt[0]])
+            candidates = self._local_minima_candidates(result, 1.0 - thresh, min_distance)
+            for px, py in candidates:
+                confidence = float(1.0 - result[py, px])
                 if not np.isfinite(confidence):
                     continue
-                center_x = pt[0] + w // 2
-                center_y = pt[1] + h // 2
+                center_x = px + w // 2
+                center_y = py + h // 2
                 all_matches.append((confidence, center_x, center_y, w, h))
         
-        if all_matches:
-            all_matches = self._non_max_suppression(all_matches, min_distance)
-        
-        return [(conf, x, y) for conf, x, y, _, _ in all_matches]
+        return sorted(all_matches, key=lambda x: x[0], reverse=True)
+
+    @staticmethod
+    def _local_minima_candidates(result, max_score, min_distance):
+        if result is None or result.size == 0:
+            return []
+        window = max(3, int(min_distance))
+        if window % 2 == 0:
+            window += 1
+        kernel = np.ones((window, window), dtype=np.float32)
+        local_min = cv2.erode(result, kernel)
+        candidate_mask = (result <= max_score) & (result <= local_min + 1e-6)
+        if not np.any(candidate_mask):
+            return []
+        mask = candidate_mask.astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        candidates = []
+        for index in range(1, count):
+            x, y, w, h, area = stats[index]
+            if area <= 0:
+                continue
+            roi = result[y : y + h, x : x + w]
+            min_val, _, min_loc, _ = cv2.minMaxLoc(roi)
+            if min_val <= max_score:
+                candidates.append((int(x + min_loc[0]), int(y + min_loc[1])))
+        return candidates
     
     def _non_max_suppression(self, matches, min_distance):
         if not matches:
@@ -373,7 +408,7 @@ class ImageMatcher:
                         union = area1 + area2 - intersection
                         iou = intersection / union if union > 0 else 0
                         
-                        if iou > 0.1:
+                        if iou > 0.2:
                             is_unique = False
                             break
             

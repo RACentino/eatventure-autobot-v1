@@ -721,6 +721,8 @@ class EatventureBot:
         return sum(1 for name in self.templates if name.startswith("RedIcon"))
 
     def _red_icon_min_matches(self):
+        if bool(getattr(config, "RED_ICON_FAST_MODE_ENABLED", False)):
+            return 1
         available = self._available_red_icon_template_count()
         if available <= 0:
             return 1
@@ -830,6 +832,34 @@ class EatventureBot:
         return screenshot[top:bottom, left:right], left, top
 
     @staticmethod
+    def _box_iou(first, second):
+        _, x1, y1, w1, h1 = first[:5]
+        _, x2, y2, w2, h2 = second[:5]
+        left = max(x1 - w1 / 2, x2 - w2 / 2)
+        top = max(y1 - h1 / 2, y2 - h2 / 2)
+        right = min(x1 + w1 / 2, x2 + w2 / 2)
+        bottom = min(y1 + h1 / 2, y2 + h2 / 2)
+        intersection = max(0, right - left) * max(0, bottom - top)
+        union = (w1 * h1) + (w2 * h2) - intersection
+        return intersection / union if union > 0 else 0
+
+    @classmethod
+    def _dedupe_box_candidates(cls, candidates, iou_threshold):
+        merged = []
+        for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if all(cls._box_iou(candidate, existing) <= iou_threshold for existing in merged):
+                merged.append(candidate)
+        return merged
+
+    @classmethod
+    def _merge_box_candidates(cls, candidates):
+        strict = cls._dedupe_box_candidates(candidates, 0.20)
+        relaxed = cls._dedupe_box_candidates(candidates, 0.25)
+        if len(relaxed) - len(strict) == 1:
+            return relaxed
+        return strict
+
+    @staticmethod
     def _merge_icon_detection(detections, x, y, template_name, confidence):
         for existing_x, existing_y in list(detections.keys()):
             if abs(x - existing_x) < 10 and abs(y - existing_y) < 10:
@@ -841,7 +871,14 @@ class EatventureBot:
         detections = {}
         if screenshot.size == 0:
             return detections
-        for template_name in self._red_icon_template_names():
+        template_names = self._red_icon_template_names()
+        if bool(getattr(config, "RED_ICON_FAST_MODE_ENABLED", False)):
+            configured_names = getattr(config, "RED_ICON_FAST_TEMPLATE_NAMES", ())
+            fast_names = [name for name in configured_names if name in self.templates]
+            if fast_names:
+                template_names = fast_names
+                min_distance = int(getattr(config, "RED_ICON_FAST_MIN_DISTANCE", min_distance))
+        for template_name in template_names:
             if template_name not in self.templates:
                 continue
             template, mask = self.templates[template_name]
@@ -1556,7 +1593,9 @@ class EatventureBot:
     def handle_open_boxes(self, current_state):
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
 
-        limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
+        limited_screenshot = self.window_capture.capture(
+            max_y=getattr(config, "BOX_SEARCH_Y", config.MAX_SEARCH_Y)
+        )
 
         if "newLevel" in self.templates:
             template, mask = self.templates["newLevel"]
@@ -1578,37 +1617,57 @@ class EatventureBot:
 
         box_names = ["box1", "box2", "box3", "box4"]
         box_threshold = self.vision_optimizer.box_threshold if self.vision_optimizer.enabled else config.BOX_THRESHOLD
-        boxes_found = 0
-        best_box_confidence = 0.0
+        box_candidates = []
 
         for box_name in box_names:
             if box_name not in self.templates:
                 continue
 
             template, mask = self.templates[box_name]
-            found, confidence, x, y = self.image_matcher.find_template(
+            candidates = self.image_matcher.find_template_candidates(
                 limited_screenshot,
                 template,
                 mask=mask,
                 threshold=box_threshold,
+                min_distance=12,
                 template_name=box_name,
-                check_color=config.BOX_COLOR_CHECK,
-                color_threshold=config.BOX_COLOR_THRESHOLD,
-                hsv_ranges=(
-                    config.BOX_HSV_RANGES
-                    if config.BOX_HSV_COLOR_GATE_ENABLED
-                    else None
-                ),
-                hsv_match_threshold=config.BOX_HSV_MIN_MATCH_RATIO,
             )
-            if found:
-                if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-                    logger.debug("%s is in a forbidden zone", box_name)
+            for confidence, x, y, candidate_width, candidate_height in candidates:
+                candidate_width = int(candidate_width)
+                candidate_height = int(candidate_height)
+                location = (int(x) - candidate_width // 2, int(y) - candidate_height // 2)
+                if config.BOX_COLOR_CHECK and not self.image_matcher._check_color_similarity(
+                    limited_screenshot,
+                    template,
+                    location,
+                    mask,
+                    color_threshold=config.BOX_COLOR_THRESHOLD,
+                ):
                     continue
-                clicked = self.mouse_controller.click(x, y, relative=True)
-                if clicked:
-                    boxes_found += 1
-                    best_box_confidence = max(best_box_confidence, confidence)
+                if config.BOX_HSV_COLOR_GATE_ENABLED and not self.image_matcher._check_hsv_gate(
+                    limited_screenshot,
+                    template,
+                    location,
+                    mask,
+                    config.BOX_HSV_RANGES,
+                    config.BOX_HSV_MIN_MATCH_RATIO,
+                ):
+                    continue
+                box_candidates.append(
+                    (confidence, int(x), int(y), candidate_width, candidate_height, box_name)
+                )
+
+        merged_boxes = self._merge_box_candidates(box_candidates)
+        boxes_found = 0
+        best_box_confidence = 0.0
+        for confidence, x, y, _, _, _ in merged_boxes:
+            if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+                logger.debug("Box candidate is in a forbidden zone")
+                continue
+            clicked = self.mouse_controller.click(x, y, relative=True)
+            if clicked:
+                boxes_found += 1
+                best_box_confidence = max(best_box_confidence, confidence)
 
         if boxes_found > 0:
             self.work_done = True
