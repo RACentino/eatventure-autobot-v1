@@ -1455,15 +1455,16 @@ class EatventureBot:
         if self.mouse_controller.move_delay > 0:
             precise_sleep(self.mouse_controller.move_delay)
 
-        left_down = 0x0002
-        left_up = 0x0004
         hold_started_at = time.monotonic()
         holding = False
         logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
 
         try:
-            if not self.mouse_controller._mouse_event(left_down, screen_x, screen_y):
-                self.mouse_controller._best_effort_left_up(screen_x, screen_y)
+            if not self.mouse_controller._left_down_at_screen(
+                screen_x,
+                screen_y,
+                interrupt_check=self._stop_requested.is_set,
+            ):
                 self.tuner.record_click_result(False)
                 self._apply_tuning()
                 logger.warning("Upgrade station hold press failed at (%s, %s)", x, y)
@@ -1502,8 +1503,7 @@ class EatventureBot:
                         return State.OPEN_BOXES
         finally:
             if holding:
-                if not self.mouse_controller._mouse_event(left_up, screen_x, screen_y):
-                    self.mouse_controller._best_effort_left_up(screen_x, screen_y)
+                self.mouse_controller._left_up_at_screen(screen_x, screen_y)
 
         logger.info("Upgrade station no longer detected after %.2fs hold", time.monotonic() - hold_started_at)
         self.upgrade_station_pos = None
@@ -1579,6 +1579,8 @@ class EatventureBot:
             config.STATS_UPGRADE_POS[1],
             duration=config.STATS_UPGRADE_CLICK_DURATION,
             click_delay=config.STATS_UPGRADE_CLICK_DELAY,
+            mouse_down_duration=config.STATS_UPGRADE_CLICK_DELAY,
+            mouse_up_duration=0.0,
             relative=True,
             interrupt_check=self._stop_requested.is_set,
         )
