@@ -1440,6 +1440,10 @@ class EatventureBot:
         logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
 
         hold_check_interval = max(0.05, min(0.20, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)))
+        hold_max_duration = float(config.CLICK_HOLD_MAX_DURATION)
+        if not math.isfinite(hold_max_duration):
+            hold_max_duration = 0.0
+        hold_max_duration = max(0.0, hold_max_duration)
         current_match = (confidence, x, y)
         screen_pos = self.mouse_controller._resolve_screen_position(x, y, relative=True)
         if screen_pos is None:
@@ -1456,6 +1460,7 @@ class EatventureBot:
             precise_sleep(self.mouse_controller.move_delay)
 
         hold_started_at = time.monotonic()
+        hold_stopped_by_max_duration = False
         holding = False
         logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
 
@@ -1478,6 +1483,16 @@ class EatventureBot:
                 if self._stop_requested.is_set():
                     logger.warning("Upgrade station hold interrupted after %.2fs", time.monotonic() - hold_started_at)
                     return State.OPEN_BOXES
+
+                hold_elapsed = time.monotonic() - hold_started_at
+                if hold_max_duration > 0.0 and hold_elapsed >= hold_max_duration:
+                    logger.warning(
+                        "Upgrade station hold max duration %.2fs reached after %.2fs; releasing hold",
+                        hold_max_duration,
+                        hold_elapsed,
+                    )
+                    hold_stopped_by_max_duration = True
+                    break
 
                 if not self._sleep(hold_check_interval):
                     return State.OPEN_BOXES
@@ -1505,7 +1520,11 @@ class EatventureBot:
             if holding:
                 self.mouse_controller._left_up_at_screen(screen_x, screen_y)
 
-        logger.info("Upgrade station no longer detected after %.2fs hold", time.monotonic() - hold_started_at)
+        hold_elapsed = time.monotonic() - hold_started_at
+        if hold_stopped_by_max_duration:
+            logger.info("Upgrade station hold released by max duration fallback after %.2fs", hold_elapsed)
+        else:
+            logger.info("Upgrade station no longer detected after %.2fs hold", hold_elapsed)
         self.upgrade_station_pos = None
 
         self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
