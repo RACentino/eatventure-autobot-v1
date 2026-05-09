@@ -1374,9 +1374,6 @@ class EatventureBot:
                 self.vision_optimizer.update_upgrade_station_confidence(confidence)
                 self.tuner.record_search_result(True)
                 self._apply_tuning()
-                if self.current_red_icon_index < len(self.red_icons):
-                    _, _, red_y = self.red_icons[self.current_red_icon_index]
-                    self._remember_successful_red_icon_position(red_y)
                 return State.HOLD_UPGRADE_STATION
 
             if attempt < max_attempts - 1:
@@ -1400,7 +1397,7 @@ class EatventureBot:
             return State.OPEN_BOXES
 
         logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
-        clicked = self.mouse_controller.click(x, y, relative=True)
+        clicked = self.mouse_controller.precise_click(x, y, relative=True)
         self.tuner.record_click_result(clicked)
         self._apply_tuning()
         if not clicked:
@@ -1438,6 +1435,9 @@ class EatventureBot:
         self.tuner.record_search_result(True)
         self._apply_tuning()
         logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
+        if self.current_red_icon_index < len(self.red_icons):
+            _, _, red_y = self.red_icons[self.current_red_icon_index]
+            self._remember_successful_red_icon_position(red_y)
 
         hold_check_interval = max(0.05, min(0.20, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)))
         hold_max_duration = float(config.CLICK_HOLD_MAX_DURATION)

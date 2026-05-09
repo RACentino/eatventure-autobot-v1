@@ -442,6 +442,45 @@ class MouseController:
                 logger.error("Click failed at (%s, %s)", last_screen_pos[0], last_screen_pos[1])
             return False
 
+    def precise_click(self, x, y, relative=True, delay=None):
+        with self._input_lock:
+            last_screen_pos = None
+            down_duration = self._click_down_up_delay(0.02)
+            up_duration = self._get_mouse_up_duration(0.0)
+            for _ in range(self.input_retry_count):
+                screen_pos = self._resolve_screen_position(x, y, relative=relative)
+                if screen_pos is None:
+                    return False
+
+                screen_x, screen_y = screen_pos
+                last_screen_pos = (screen_x, screen_y)
+                if not self._set_cursor_pos(screen_x, screen_y):
+                    continue
+                if self.move_delay > 0:
+                    precise_sleep(self.move_delay)
+                self._hover_before_click()
+
+                if not self._set_cursor_pos(screen_x, screen_y):
+                    continue
+                if not self._left_down_at_screen(screen_x, screen_y, down_duration):
+                    continue
+                if not self._set_cursor_pos(screen_x, screen_y):
+                    self._best_effort_left_up(screen_x, screen_y)
+                    continue
+                if not self._left_up_at_screen(screen_x, screen_y, up_duration):
+                    continue
+
+                logger.debug("Precise-clicked at (%s, %s)", screen_x, screen_y)
+                wait_time = self.click_delay if delay is None else delay
+                wait_time = self._coerce_non_negative_float(wait_time, self.click_delay)
+                if wait_time > 0:
+                    precise_sleep(wait_time)
+                return True
+
+            if last_screen_pos is not None:
+                logger.error("Precise click failed at (%s, %s)", last_screen_pos[0], last_screen_pos[1])
+            return False
+
     def double_click(self, x, y, relative=True):
         if not self.click(x, y, relative=relative, delay=0.05):
             return False
