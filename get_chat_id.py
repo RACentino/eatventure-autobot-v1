@@ -10,6 +10,7 @@ Steps:
 """
 
 import sys
+from typing import Any
 
 import requests
 
@@ -18,14 +19,45 @@ import config
 REQUEST_TIMEOUT = 10
 
 
-def _redact_token(text, token):
+def _redact_token(text: Any, token: str) -> str:
     text = str(text)
     if token:
         return text.replace(token, "<redacted-token>")
     return text
 
 
-def main():
+def _extract_chat(update: Any) -> dict[str, Any] | None:
+    if not isinstance(update, dict):
+        return None
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, dict):
+        return None
+    chat = message.get("chat")
+    if not isinstance(chat, dict) or "id" not in chat:
+        return None
+    return chat
+
+
+def _print_no_messages_instructions() -> None:
+    print("No messages found!")
+    print("\nPlease:")
+    print("1. Open Telegram and find your bot")
+    print("2. Send any message to your bot (e.g., 'Hello')")
+    print("3. Run this script again")
+
+
+def _print_chat(chat: dict[str, Any]) -> None:
+    chat_id = str(chat["id"])
+    print(f"Chat ID: {chat_id}")
+    print(f"Chat Type: {chat.get('type', 'unknown')}")
+    if "username" in chat:
+        print(f"Username: @{chat['username']}")
+    if "first_name" in chat:
+        print(f"Name: {chat['first_name']}")
+    print("-" * 40)
+
+
+def main() -> int:
     bot_token = str(config.TELEGRAM_BOT_TOKEN or "").strip()
     if not bot_token:
         print("ERROR: No bot token found in config.py or environment")
@@ -54,21 +86,14 @@ def main():
         print("Telegram API error: updates response was not a list")
         return 1
     if not updates:
-        print("No messages found!")
-        print("\nPlease:")
-        print("1. Open Telegram and find your bot")
-        print("2. Send any message to your bot (e.g., 'Hello')")
-        print("3. Run this script again")
+        _print_no_messages_instructions()
         return 0
 
     print("Found messages!\n")
     chat_ids = set()
     for update in updates:
-        message = update.get("message") or update.get("edited_message")
-        if not isinstance(message, dict):
-            continue
-        chat = message.get("chat")
-        if not isinstance(chat, dict) or "id" not in chat:
+        chat = _extract_chat(update)
+        if chat is None:
             continue
 
         chat_id = str(chat["id"])
@@ -76,13 +101,7 @@ def main():
             continue
 
         chat_ids.add(chat_id)
-        print(f"Chat ID: {chat_id}")
-        print(f"Chat Type: {chat.get('type', 'unknown')}")
-        if "username" in chat:
-            print(f"Username: @{chat['username']}")
-        if "first_name" in chat:
-            print(f"Name: {chat['first_name']}")
-        print("-" * 40)
+        _print_chat(chat)
 
     if chat_ids:
         example_chat_id = sorted(chat_ids)[0]

@@ -3,6 +3,7 @@ import queue
 from pathlib import Path
 import sys
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
+from typing import Any
 
 import win32api
 import win32gui
@@ -12,55 +13,81 @@ import config
 from bot import EatventureBot
 from mouse_controller import precise_sleep
 
-bot_instance = None
-should_exit = False
-log_listener = None
+bot_instance: EatventureBot | None = None
+should_exit: bool = False
+log_listener: QueueListener | None = None
 
 
-def on_press(key):
+def _get_key_character(key: Any) -> str | None:
+    character = getattr(key, "char", None)
+    if character is None:
+        return None
+    return str(character).lower()
+
+
+def _log_window_relative_cursor_position(logger: logging.Logger) -> None:
+    if bot_instance is None or not bot_instance.window_capture.is_window_active():
+        logger.info("[X pressed] Bot window is not available")
+        return
+
+    hwnd = bot_instance.window_capture.get_hwnd()
+    screen_x, screen_y = win32api.GetCursorPos()
+    window_x, window_y = win32gui.ClientToScreen(hwnd, (0, 0))
+    logger.info("[X pressed] Window position: (%s, %s)", screen_x - window_x, screen_y - window_y)
+
+
+def _toggle_bot_running(logger: logging.Logger) -> None:
+    if bot_instance is None:
+        return
+    if bot_instance.running:
+        bot_instance.stop()
+        bot_instance.telegram.notify_bot_stopped()
+        logger.info("[Z pressed] Bot STOPPED")
+        return
+
+    started = bot_instance.start()
+    if started:
+        bot_instance.telegram.notify_bot_started()
+        logger.info("[Z pressed] Bot STARTED")
+        return
+    logger.warning("[Z pressed] Bot START failed")
+
+
+def _wipe_bot_memory(logger: logging.Logger) -> None:
+    if bot_instance is None:
+        return
+    bot_instance.wipe_memory()
+    logger.info("[C pressed] AI memory wiped")
+
+
+def _request_program_exit(logger: logging.Logger) -> None:
+    global should_exit
+    logger.info("[P pressed] Exiting program")
+    should_exit = True
+
+
+def on_press(key: Any) -> None:
     global should_exit
     try:
-        char = getattr(key, "char", None)
-        if char is None:
+        character = _get_key_character(key)
+        if character is None:
             return
-        char = char.lower()
 
         logger = logging.getLogger(__name__)
-        if char == "x":
-            if bot_instance and bot_instance.window_capture.is_window_active():
-                hwnd = bot_instance.window_capture.get_hwnd()
-                screen_x, screen_y = win32api.GetCursorPos()
-                win_x, win_y = win32gui.ClientToScreen(hwnd, (0, 0))
-                rel_x = screen_x - win_x
-                rel_y = screen_y - win_y
-                logger.info("[X pressed] Window position: (%s, %s)", rel_x, rel_y)
-            else:
-                logger.info("[X pressed] Bot window is not available")
-        elif char == "z":
-            if bot_instance:
-                if bot_instance.running:
-                    bot_instance.stop()
-                    bot_instance.telegram.notify_bot_stopped()
-                    logger.info("[Z pressed] Bot STOPPED")
-                else:
-                    started = bot_instance.start()
-                    if started:
-                        bot_instance.telegram.notify_bot_started()
-                        logger.info("[Z pressed] Bot STARTED")
-                    else:
-                        logger.warning("[Z pressed] Bot START failed")
-        elif char == "c":
-            if bot_instance:
-                bot_instance.wipe_memory()
-                logger.info("[C pressed] AI memory wiped")
-        elif char == "p":
-            logger.info("[P pressed] Exiting program")
-            should_exit = True
+        key_handlers = {
+            "x": _log_window_relative_cursor_position,
+            "z": _toggle_bot_running,
+            "c": _wipe_bot_memory,
+            "p": _request_program_exit,
+        }
+        handler = key_handlers.get(character)
+        if handler is not None:
+            handler(logger)
     except Exception as exc:
         logging.getLogger(__name__).error("Keyboard listener error: %s", exc)
 
 
-def setup_logging():
+def setup_logging() -> None:
     global log_listener
     logs_dir = Path(config.LOGS_DIR)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -101,10 +128,7 @@ def setup_logging():
     log_listener.start()
 
 
-def main():
-    global bot_instance, should_exit, log_listener
-    listener = None
-
+def _print_startup_banner() -> None:
     print("=" * 60)
     print("Eatventure Bot - Screen Automation Tool")
     print("=" * 60)
@@ -112,6 +136,34 @@ def main():
     print(f"Match Threshold: {config.MATCH_THRESHOLD * 100}%")
     print(f"Assets Directory: {config.ASSETS_DIR}")
     print("=" * 60)
+
+
+def _run_bot_event_loop() -> None:
+    while not should_exit:
+        if bot_instance is not None and bot_instance.running:
+            bot_instance.step()
+        precise_sleep(0.1)
+
+
+def _cleanup_runtime(listener: keyboard.Listener | None) -> None:
+    global log_listener
+    if bot_instance is not None and bot_instance.running:
+        bot_instance.stop()
+    if bot_instance is not None:
+        bot_instance.telegram.close()
+    if listener is not None:
+        listener.stop()
+        listener.join(timeout=1.0)
+    if log_listener is not None:
+        log_listener.stop()
+        log_listener = None
+
+
+def main() -> int:
+    global bot_instance, should_exit, log_listener
+    listener = None
+
+    _print_startup_banner()
 
     try:
         setup_logging()
@@ -129,10 +181,7 @@ def main():
         logger.info("Press C to wipe AI memory")
         logger.info("Press P to EXIT the program")
 
-        while not should_exit:
-            if bot_instance.running:
-                bot_instance.step()
-            precise_sleep(0.1)
+        _run_bot_event_loop()
 
         logger.info("Program exiting")
     except KeyboardInterrupt:
@@ -142,16 +191,7 @@ def main():
         logging.getLogger(__name__).error("Fatal error: %s", exc, exc_info=True)
         return 1
     finally:
-        if bot_instance is not None and bot_instance.running:
-            bot_instance.stop()
-        if bot_instance is not None:
-            bot_instance.telegram.close()
-        if listener is not None:
-            listener.stop()
-            listener.join(timeout=1.0)
-        if log_listener is not None:
-            log_listener.stop()
-            log_listener = None
+        _cleanup_runtime(listener)
 
     return 0
 

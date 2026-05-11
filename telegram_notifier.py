@@ -1,6 +1,7 @@
 import logging
 import queue
 import threading
+from typing import Any
 
 import requests
 
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramNotifier:
-    def __init__(self, bot_token, chat_id, enabled=True):
+    def __init__(self, bot_token: Any, chat_id: Any, enabled: bool = True) -> None:
         self.bot_token = str(bot_token or "").strip()
         self.chat_id = str(chat_id or "").strip()
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
@@ -32,7 +33,7 @@ class TelegramNotifier:
         else:
             logger.info("Telegram notifier disabled")
 
-    def _worker_loop(self):
+    def _worker_loop(self) -> None:
         while not self._stop.is_set() or not self._queue.empty():
             try:
                 message = self._queue.get(timeout=0.2)
@@ -46,7 +47,7 @@ class TelegramNotifier:
             finally:
                 self._queue.task_done()
 
-    def _send_message_now(self, message):
+    def _send_message_now(self, message: str) -> bool:
         if not self.enabled or self._session is None:
             return False
 
@@ -80,7 +81,7 @@ class TelegramNotifier:
             logger.error("Error sending Telegram message: %s", exc.__class__.__name__)
             return False
 
-    def send_message(self, message):
+    def send_message(self, message: Any) -> bool:
         if not self.enabled or self._stop.is_set():
             return False
 
@@ -96,7 +97,7 @@ class TelegramNotifier:
             logger.warning("Telegram queue is full; dropping notification")
             return False
 
-    def _discard_pending_messages(self):
+    def _discard_pending_messages(self) -> None:
         while True:
             try:
                 self._queue.get_nowait()
@@ -104,7 +105,7 @@ class TelegramNotifier:
                 return
             self._queue.task_done()
 
-    def close(self):
+    def close(self) -> None:
         if not self.enabled and self._session is None:
             return
         self._stop.set()
@@ -124,15 +125,15 @@ class TelegramNotifier:
             self._session.close()
             self._session = None
 
-    def notify_bot_started(self):
+    def notify_bot_started(self) -> None:
         message = "Bot Started"
         self.send_message(message)
 
-    def notify_bot_stopped(self):
+    def notify_bot_stopped(self) -> None:
         message = "Bot Stopped"
         self.send_message(message)
 
-    def notify_new_level(self, level_number, time_spent):
+    def notify_new_level(self, level_number: int, time_spent: float) -> None:
         minutes = int(time_spent // 60)
         seconds = int(time_spent % 60)
         time_str = f"{minutes:02d}:{seconds:02d}"
@@ -140,6 +141,6 @@ class TelegramNotifier:
         message = f"{level_number}. restaurant completed! Time spent: {time_str}"
         self.send_message(message)
 
-    def notify_level_milestone(self, total_levels):
+    def notify_level_milestone(self, total_levels: int) -> None:
         message = f"Milestone Reached\nTotal cities completed: {total_levels}"
         self.send_message(message)

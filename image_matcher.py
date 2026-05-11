@@ -1,16 +1,23 @@
+import logging
+from typing import Any
+
 import cv2
 import numpy as np
-import logging
 
 logger = logging.getLogger(__name__)
 
+MatchResult = tuple[bool, float, int, int]
+MatchCandidate = tuple[float, int, int, int, int]
+Point = tuple[int, int]
+HsvRange = tuple[np.ndarray, np.ndarray]
+
 
 class ImageMatcher:
-    def __init__(self, threshold=0.85):
+    def __init__(self, threshold: float = 0.85) -> None:
         self.threshold = self._normalize_threshold(threshold)
 
     @staticmethod
-    def _normalize_threshold(value, default=0.85):
+    def _normalize_threshold(value: Any, default: float = 0.85) -> float:
         try:
             fallback = float(default)
         except (TypeError, ValueError):
@@ -28,7 +35,7 @@ class ImageMatcher:
         return max(0.0, min(1.0, threshold))
 
     @staticmethod
-    def _normalize_image(image, label):
+    def _normalize_image(image: np.ndarray, label: str) -> np.ndarray:
         if image is None or not hasattr(image, "shape") or image.size == 0:
             raise ValueError(f"{label} is empty")
         if image.ndim == 2:
@@ -40,7 +47,7 @@ class ImageMatcher:
         raise ValueError(f"{label} has unsupported shape {image.shape}")
 
     @staticmethod
-    def _normalize_mask(mask, template_shape, template_name):
+    def _normalize_mask(mask: np.ndarray | None, template_shape: tuple[int, ...], template_name: str) -> np.ndarray | None:
         if mask is None:
             return None
         if not hasattr(mask, "shape") or mask.size == 0:
@@ -71,7 +78,12 @@ class ImageMatcher:
         return normalized
 
     @staticmethod
-    def _safe_match_template(screenshot, template, mask, template_name):
+    def _safe_match_template(
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None,
+        template_name: str,
+    ) -> np.ndarray | None:
         try:
             result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=mask)
         except cv2.error as exc:
@@ -81,8 +93,29 @@ class ImageMatcher:
             return None
         result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
         return np.clip(result, 0.0, 1.0)
+
+    @staticmethod
+    def _failed_match(confidence: float = 0.0) -> MatchResult:
+        return False, float(confidence), 0, 0
+
+    @staticmethod
+    def _template_fits_screenshot(screenshot: np.ndarray, template: np.ndarray, template_name: str) -> bool:
+        if template.shape[0] <= screenshot.shape[0] and template.shape[1] <= screenshot.shape[1]:
+            return True
+        logger.debug(
+            "Template is larger than screenshot. Template %s: %s, Screenshot: %s",
+            template_name,
+            template.shape,
+            screenshot.shape,
+        )
+        return False
+
+    @staticmethod
+    def _center_from_location(location: Point, template: np.ndarray) -> Point:
+        template_height, template_width = template.shape[:2]
+        return location[0] + template_width // 2, location[1] + template_height // 2
     
-    def load_template(self, template_path):
+    def load_template(self, template_path: Any) -> tuple[np.ndarray, np.ndarray | None]:
         template = cv2.imread(str(template_path), cv2.IMREAD_UNCHANGED)
         if template is None:
             raise FileNotFoundError(f"Template not found: {template_path}")
@@ -97,88 +130,128 @@ class ImageMatcher:
         template = self._normalize_image(template, str(template_path))
         
         return template, mask
+
+    def _passes_optional_gates(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        location: Point,
+        mask: np.ndarray | None,
+        template_name: str,
+        center_x: int,
+        center_y: int,
+        confidence: float,
+        check_color: bool,
+        color_threshold: float,
+        hsv_ranges: Any,
+        hsv_match_threshold: float,
+    ) -> bool:
+        if check_color and not self._check_color_similarity(
+            screenshot,
+            template,
+            location,
+            mask,
+            color_threshold=color_threshold,
+        ):
+            logger.debug(
+                "[%s] Color check failed at (%s, %s), confidence: %.2f%%",
+                template_name,
+                center_x,
+                center_y,
+                confidence * 100,
+            )
+            return False
+
+        if not hsv_ranges:
+            return True
+
+        hsv_match = self._check_hsv_gate(
+            screenshot,
+            template,
+            location,
+            mask,
+            hsv_ranges,
+            hsv_match_threshold,
+        )
+        if hsv_match:
+            return True
+        logger.debug(
+            "[%s] HSV gate failed at (%s, %s), confidence: %.2f%%",
+            template_name,
+            center_x,
+            center_y,
+            confidence * 100,
+        )
+        return False
     
     def find_template(
         self,
-        screenshot,
-        template,
-        mask=None,
-        threshold=None,
-        template_name="Unknown",
-        check_color=False,
-        color_threshold=0.7,
-        hsv_ranges=None,
-        hsv_match_threshold=0.9,
-    ):
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None = None,
+        threshold: float | None = None,
+        template_name: str = "Unknown",
+        check_color: bool = False,
+        color_threshold: float = 0.7,
+        hsv_ranges: Any = None,
+        hsv_match_threshold: float = 0.9,
+    ) -> MatchResult:
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         try:
             screenshot = self._normalize_image(screenshot, "screenshot")
             template = self._normalize_image(template, template_name)
         except ValueError as exc:
             logger.warning("[%s] Invalid match input: %s", template_name, exc)
-            return False, 0.0, 0, 0
+            return self._failed_match()
         mask = self._normalize_mask(mask, template.shape, template_name)
 
-        if template.shape[0] > screenshot.shape[0] or template.shape[1] > screenshot.shape[1]:
-            logger.debug(f"Template is larger than screenshot. Template: {template.shape}, Screenshot: {screenshot.shape}")
-            return False, 0.0, 0, 0
+        if not self._template_fits_screenshot(screenshot, template, template_name):
+            return self._failed_match()
 
         result = self._safe_match_template(screenshot, template, mask, template_name)
         if result is None:
-            return False, 0.0, 0, 0
+            return self._failed_match()
 
-        min_val, _, min_loc, _ = cv2.minMaxLoc(result)
-        confidence = float(1.0 - min_val)
+        min_value, _, min_location, _ = cv2.minMaxLoc(result)
+        confidence = float(1.0 - min_value)
         if not np.isfinite(confidence):
-            return False, 0.0, 0, 0
+            return self._failed_match()
         
-        if confidence >= thresh:
-            h, w = template.shape[:2]
-            center_x = min_loc[0] + w // 2
-            center_y = min_loc[1] + h // 2
-            
-            if check_color:
-                color_match = self._check_color_similarity(
-                    screenshot,
-                    template,
-                    min_loc,
-                    mask,
-                    color_threshold=color_threshold,
-                )
-                if not color_match:
-                    logger.debug(f"[{template_name}] Color check failed at ({center_x}, {center_y}), confidence: {confidence:.2%}")
-                    return False, confidence, 0, 0
+        if confidence < thresh:
+            return self._failed_match(confidence)
 
-            if hsv_ranges:
-                hsv_match = self._check_hsv_gate(
-                    screenshot,
-                    template,
-                    min_loc,
-                    mask,
-                    hsv_ranges,
-                    hsv_match_threshold,
-                )
-                if not hsv_match:
-                    logger.debug(
-                        "[%s] HSV gate failed at (%s, %s), confidence: %.2f%%",
-                        template_name,
-                        center_x,
-                        center_y,
-                        confidence * 100,
-                    )
-                    return False, confidence, 0, 0
-            
-            return True, confidence, center_x, center_y
-        
-        return False, confidence, 0, 0
+        center_x, center_y = self._center_from_location(min_location, template)
+        if not self._passes_optional_gates(
+            screenshot,
+            template,
+            min_location,
+            mask,
+            template_name,
+            center_x,
+            center_y,
+            confidence,
+            check_color,
+            color_threshold,
+            hsv_ranges,
+            hsv_match_threshold,
+        ):
+            return self._failed_match(confidence)
+        return True, confidence, center_x, center_y
     
-    def _check_color_similarity(self, screenshot, template, location, mask=None, color_threshold=0.7):
+    def _check_color_similarity(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        location: Point,
+        mask: np.ndarray | None = None,
+        color_threshold: float = 0.7,
+    ) -> bool:
         x, y = location
-        h, w = template.shape[:2]
+        template_height, template_width = template.shape[:2]
         
-        roi = screenshot[y:y+h, x:x+w]
+        region_of_interest = screenshot[y : y + template_height, x : x + template_width]
         
-        if roi.shape[:2] != template.shape[:2]:
+        if region_of_interest.shape[:2] != template.shape[:2]:
             return False
 
         if mask is not None and not np.any(mask):
@@ -189,17 +262,17 @@ class ImageMatcher:
             hist_template_g = cv2.calcHist([template], [1], mask, [32], [0, 256])
             hist_template_r = cv2.calcHist([template], [2], mask, [32], [0, 256])
 
-            hist_roi_b = cv2.calcHist([roi], [0], mask, [32], [0, 256])
-            hist_roi_g = cv2.calcHist([roi], [1], mask, [32], [0, 256])
-            hist_roi_r = cv2.calcHist([roi], [2], mask, [32], [0, 256])
+            hist_region_b = cv2.calcHist([region_of_interest], [0], mask, [32], [0, 256])
+            hist_region_g = cv2.calcHist([region_of_interest], [1], mask, [32], [0, 256])
+            hist_region_r = cv2.calcHist([region_of_interest], [2], mask, [32], [0, 256])
 
             histograms = (
                 hist_template_b,
                 hist_template_g,
                 hist_template_r,
-                hist_roi_b,
-                hist_roi_g,
-                hist_roi_r,
+                hist_region_b,
+                hist_region_g,
+                hist_region_r,
             )
             if any(not np.any(hist) for hist in histograms):
                 return False
@@ -207,61 +280,83 @@ class ImageMatcher:
             for hist in histograms:
                 cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
 
-            corr_b = cv2.compareHist(hist_template_b, hist_roi_b, cv2.HISTCMP_CORREL)
-            corr_g = cv2.compareHist(hist_template_g, hist_roi_g, cv2.HISTCMP_CORREL)
-            corr_r = cv2.compareHist(hist_template_r, hist_roi_r, cv2.HISTCMP_CORREL)
+            correlation_blue = cv2.compareHist(hist_template_b, hist_region_b, cv2.HISTCMP_CORREL)
+            correlation_green = cv2.compareHist(hist_template_g, hist_region_g, cv2.HISTCMP_CORREL)
+            correlation_red = cv2.compareHist(hist_template_r, hist_region_r, cv2.HISTCMP_CORREL)
         except cv2.error as exc:
             logger.debug("Color similarity check failed: %s", exc)
             return False
         
-        correlations = (corr_b, corr_g, corr_r)
+        correlations = (correlation_blue, correlation_green, correlation_red)
         if not all(np.isfinite(value) for value in correlations):
             return False
 
-        avg_corr = sum(correlations) / 3
-        return avg_corr >= self._normalize_threshold(color_threshold, 0.7)
+        average_correlation = sum(correlations) / 3
+        return average_correlation >= self._normalize_threshold(color_threshold, 0.7)
 
     @staticmethod
-    def _normalize_hsv_ranges(hsv_ranges):
-        normalized = []
-        for hsv_range in hsv_ranges:
-            try:
-                lower, upper = hsv_range
-                lower = np.array(lower, dtype=np.int16)
-                upper = np.array(upper, dtype=np.int16)
-            except (TypeError, ValueError):
-                continue
-            if lower.shape != (3,) or upper.shape != (3,):
-                continue
-            lower = np.array(
-                [
-                    max(0, min(179, int(lower[0]))),
-                    max(0, min(255, int(lower[1]))),
-                    max(0, min(255, int(lower[2]))),
-                ],
-                dtype=np.uint8,
-            )
-            upper = np.array(
-                [
-                    max(0, min(179, int(upper[0]))),
-                    max(0, min(255, int(upper[1]))),
-                    max(0, min(255, int(upper[2]))),
-                ],
-                dtype=np.uint8,
-            )
-            normalized.append((lower, upper))
-        return normalized
+    def _normalize_hsv_component(values: np.ndarray) -> np.ndarray:
+        return np.array(
+            [
+                max(0, min(179, int(values[0]))),
+                max(0, min(255, int(values[1]))),
+                max(0, min(255, int(values[2]))),
+            ],
+            dtype=np.uint8,
+        )
 
-    def _check_hsv_gate(self, screenshot, template, location, mask, hsv_ranges, hsv_match_threshold):
+    @classmethod
+    def _normalize_hsv_range(cls: type["ImageMatcher"], hsv_range: Any) -> HsvRange | None:
+        try:
+            lower, upper = hsv_range
+            lower = np.array(lower, dtype=np.int16)
+            upper = np.array(upper, dtype=np.int16)
+        except (TypeError, ValueError):
+            return None
+        if lower.shape != (3,) or upper.shape != (3,):
+            return None
+        return cls._normalize_hsv_component(lower), cls._normalize_hsv_component(upper)
+
+    @classmethod
+    def _normalize_hsv_ranges(cls: type["ImageMatcher"], hsv_ranges: Any) -> list[HsvRange]:
+        return [
+            normalized_range
+            for hsv_range in hsv_ranges
+            if (normalized_range := cls._normalize_hsv_range(hsv_range)) is not None
+        ]
+
+    @staticmethod
+    def _apply_hsv_range_mask(hsv_region: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
+        if int(lower[0]) <= int(upper[0]):
+            return cv2.inRange(hsv_region, lower, upper)
+
+        lower_wrap = lower.copy()
+        upper_wrap = upper.copy()
+        lower_wrap[0] = 0
+        upper_wrap[0] = 179
+        return cv2.bitwise_or(
+            cv2.inRange(hsv_region, lower, upper_wrap),
+            cv2.inRange(hsv_region, lower_wrap, upper),
+        )
+
+    def _check_hsv_gate(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        location: Point,
+        mask: np.ndarray | None,
+        hsv_ranges: Any,
+        hsv_match_threshold: float,
+    ) -> bool:
         x, y = location
-        h, w = template.shape[:2]
-        roi = screenshot[y:y+h, x:x+w]
+        template_height, template_width = template.shape[:2]
+        region_of_interest = screenshot[y : y + template_height, x : x + template_width]
 
-        if roi.shape[:2] != template.shape[:2]:
+        if region_of_interest.shape[:2] != template.shape[:2]:
             return False
 
         if mask is None:
-            active_mask = np.ones((h, w), dtype=bool)
+            active_mask = np.ones((template_height, template_width), dtype=bool)
         else:
             active_mask = mask > 0
 
@@ -274,28 +369,29 @@ class ImageMatcher:
             return False
 
         try:
-            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            hsv_region = cv2.cvtColor(region_of_interest, cv2.COLOR_BGR2HSV)
         except cv2.error as exc:
             logger.debug("HSV gate conversion failed: %s", exc)
             return False
 
-        combined = np.zeros((h, w), dtype=np.uint8)
+        combined = np.zeros((template_height, template_width), dtype=np.uint8)
         for lower, upper in ranges:
-            if int(lower[0]) <= int(upper[0]):
-                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower, upper))
-            else:
-                lower_wrap = lower.copy()
-                upper_wrap = upper.copy()
-                lower_wrap[0] = 0
-                upper_wrap[0] = 179
-                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower, upper_wrap))
-                combined = cv2.bitwise_or(combined, cv2.inRange(hsv_roi, lower_wrap, upper))
+            combined = cv2.bitwise_or(combined, self._apply_hsv_range_mask(hsv_region, lower, upper))
 
         matched_count = int(np.count_nonzero((combined > 0) & active_mask))
         match_ratio = matched_count / active_count
         return match_ratio >= self._normalize_threshold(hsv_match_threshold, 0.9)
     
-    def find_all_templates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+    def find_all_templates(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None = None,
+        threshold: float | None = None,
+        min_distance: int = 15,
+        scales: list[float] | None = None,
+        template_name: str = "Unknown",
+    ) -> list[tuple[float, int, int]]:
         all_matches = self.find_template_candidates(
             screenshot,
             template,
@@ -309,7 +405,41 @@ class ImageMatcher:
             all_matches = self._non_max_suppression(all_matches, min_distance)
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
 
-    def find_template_candidates(self, screenshot, template, mask=None, threshold=None, min_distance=15, scales=None, template_name="Unknown"):
+    @staticmethod
+    def _scaled_template_and_mask(
+        template: np.ndarray,
+        mask: np.ndarray | None,
+        scale: float,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        if scale == 1.0:
+            return template, mask
+        scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if mask is None:
+            return scaled_template, None
+        scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        scaled_mask[scaled_mask > 0] = 255
+        return scaled_template, scaled_mask
+
+    @staticmethod
+    def _valid_scale(scale: Any) -> float | None:
+        try:
+            normalized_scale = float(scale)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(normalized_scale) or normalized_scale <= 0:
+            return None
+        return normalized_scale
+
+    def find_template_candidates(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None = None,
+        threshold: float | None = None,
+        min_distance: int = 15,
+        scales: list[float] | None = None,
+        template_name: str = "Unknown",
+    ) -> list[MatchCandidate]:
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         all_matches = []
         try:
@@ -322,45 +452,34 @@ class ImageMatcher:
 
         if scales is None:
             scales = [1.0]
-        
-        for scale in scales:
-            try:
-                scale = float(scale)
-            except (TypeError, ValueError):
+
+        for scale_value in scales:
+            scale = self._valid_scale(scale_value)
+            if scale is None:
                 continue
-            if not np.isfinite(scale) or scale <= 0:
-                continue
-            if scale != 1.0:
-                scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                scaled_mask = None
-                if mask is not None:
-                    scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-                    scaled_mask[scaled_mask > 0] = 255
-            else:
-                scaled_template = template
-                scaled_mask = mask
-            
+            scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
+
             if scaled_template.shape[0] > screenshot.shape[0] or scaled_template.shape[1] > screenshot.shape[1]:
                 continue
-            
+
             result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
             if result is None:
                 continue
-            
-            h, w = scaled_template.shape[:2]
+
+            template_height, template_width = scaled_template.shape[:2]
             candidates = self._local_minima_candidates(result, 1.0 - thresh, min_distance)
-            for px, py in candidates:
-                confidence = float(1.0 - result[py, px])
+            for candidate_x, candidate_y in candidates:
+                confidence = float(1.0 - result[candidate_y, candidate_x])
                 if not np.isfinite(confidence):
                     continue
-                center_x = px + w // 2
-                center_y = py + h // 2
-                all_matches.append((confidence, center_x, center_y, w, h))
-        
-        return sorted(all_matches, key=lambda x: x[0], reverse=True)
+                center_x = candidate_x + template_width // 2
+                center_y = candidate_y + template_height // 2
+                all_matches.append((confidence, center_x, center_y, template_width, template_height))
+
+        return sorted(all_matches, key=lambda match: match[0], reverse=True)
 
     @staticmethod
-    def _local_minima_candidates(result, max_score, min_distance):
+    def _local_minima_candidates(result: np.ndarray | None, max_score: float, min_distance: int) -> list[Point]:
         if result is None or result.size == 0:
             return []
         window = max(3, int(min_distance))
@@ -375,44 +494,59 @@ class ImageMatcher:
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         candidates = []
         for index in range(1, count):
-            x, y, w, h, area = stats[index]
-            if area <= 0:
+            component_x, component_y, component_width, component_height, component_area = stats[index]
+            if component_area <= 0:
                 continue
-            roi = result[y : y + h, x : x + w]
-            min_val, _, min_loc, _ = cv2.minMaxLoc(roi)
-            if min_val <= max_score:
-                candidates.append((int(x + min_loc[0]), int(y + min_loc[1])))
+            region = result[
+                component_y : component_y + component_height,
+                component_x : component_x + component_width,
+            ]
+            min_value, _, min_location, _ = cv2.minMaxLoc(region)
+            if min_value <= max_score:
+                candidates.append((int(component_x + min_location[0]), int(component_y + min_location[1])))
         return candidates
-    
-    def _non_max_suppression(self, matches, min_distance):
+
+    @staticmethod
+    def _box_intersection_over_union(first_match: MatchCandidate, second_match: MatchCandidate) -> float:
+        _, first_x, first_y, first_width, first_height = first_match
+        _, second_x, second_y, second_width, second_height = second_match
+        left = max(first_x - first_width // 2, second_x - second_width // 2)
+        top = max(first_y - first_height // 2, second_y - second_height // 2)
+        right = min(first_x + first_width // 2, second_x + second_width // 2)
+        bottom = min(first_y + first_height // 2, second_y + second_height // 2)
+        if right <= left or bottom <= top:
+            return 0.0
+        intersection = (right - left) * (bottom - top)
+        first_area = first_width * first_height
+        second_area = second_width * second_height
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    @classmethod
+    def _overlaps_existing_match(
+        cls: type["ImageMatcher"],
+        candidate_match: MatchCandidate,
+        filtered_match: MatchCandidate,
+        min_distance: int,
+    ) -> bool:
+        _, candidate_x, candidate_y, _, _ = candidate_match
+        _, filtered_x, filtered_y, _, _ = filtered_match
+        if abs(candidate_x - filtered_x) >= min_distance or abs(candidate_y - filtered_y) >= min_distance:
+            return False
+        return cls._box_intersection_over_union(candidate_match, filtered_match) > 0.2
+
+    def _non_max_suppression(self, matches: list[MatchCandidate], min_distance: int) -> list[MatchCandidate]:
         if not matches:
             return []
-        
-        matches = sorted(matches, key=lambda x: x[0], reverse=True)
+
+        matches = sorted(matches, key=lambda match: match[0], reverse=True)
         filtered = []
-        
-        for conf, x, y, w, h in matches:
-            is_unique = True
-            for f_conf, fx, fy, fw, fh in filtered:
-                dx = abs(x - fx)
-                dy = abs(y - fy)
-                
-                if dx < min_distance and dy < min_distance:
-                    x1, y1 = max(x - w//2, fx - fw//2), max(y - h//2, fy - fh//2)
-                    x2, y2 = min(x + w//2, fx + fw//2), min(y + h//2, fy + fh//2)
-                    
-                    if x2 > x1 and y2 > y1:
-                        intersection = (x2 - x1) * (y2 - y1)
-                        area1 = w * h
-                        area2 = fw * fh
-                        union = area1 + area2 - intersection
-                        iou = intersection / union if union > 0 else 0
-                        
-                        if iou > 0.2:
-                            is_unique = False
-                            break
-            
-            if is_unique:
-                filtered.append((conf, x, y, w, h))
-        
+
+        for candidate_match in matches:
+            if not any(
+                self._overlaps_existing_match(candidate_match, filtered_match, min_distance)
+                for filtered_match in filtered
+            ):
+                filtered.append(candidate_match)
+
         return filtered
