@@ -819,6 +819,40 @@ class EatventureBot:
             return self.vision_optimizer.stats_upgrade_threshold
         return config.STATS_RED_ICON_THRESHOLD
 
+    @staticmethod
+    def _supervision_nms_enabled(flag_name: str) -> bool:
+        return bool(getattr(config, "SUPERVISION_ENABLED", False) and getattr(config, flag_name, False))
+
+    def _scrcpy_miss_recovery_sleep(self, duration: Any) -> bool:
+        if not bool(getattr(config, "SCRCPY_MISS_RECOVERY_ENABLED", False)):
+            return False
+        try:
+            delay = max(0.0, float(duration))
+        except (TypeError, ValueError):
+            delay = 0.0
+        if delay <= 0:
+            return True
+        return self._sleep(delay)
+
+    def _scan_red_icon_frame(
+        self,
+        screenshot: Any,
+        limited_screenshot: Any,
+        scan_threshold: float,
+        min_matches: int,
+    ) -> tuple[list[RedIcon], list[float], RedIcon | None]:
+        all_detections = self._collect_red_icon_detections(
+            limited_screenshot,
+            scan_threshold,
+            min_distance=80,
+        )
+        red_icons, valid_red_icon_confidences = self._icons_from_detections(
+            all_detections,
+            min_matches,
+        )
+        best_new_level_icon = self._find_new_level_red_icon(screenshot, scan_threshold, min_matches)
+        return red_icons, valid_red_icon_confidences, best_new_level_icon
+
     def _find_new_level_button(self, screenshot: Any) -> tuple[bool, float, int, int]:
         template_pair = self._template("newLevel")
         if template_pair is None:
@@ -938,6 +972,19 @@ class EatventureBot:
             return relaxed
         return strict
 
+    def _merge_box_candidates_with_supervision(self, candidates: list[BoxCandidate]) -> list[BoxCandidate]:
+        legacy_candidates = self._merge_box_candidates(candidates)
+        if not candidates or not self._supervision_nms_enabled("SUPERVISION_BOX_NMS_ENABLED"):
+            return legacy_candidates
+        supervision_candidates = self.image_matcher.filter_candidates_with_supervision_nms(
+            candidates,
+            iou_threshold=getattr(config, "SUPERVISION_BOX_NMS_IOU_THRESHOLD", 0.25),
+            class_agnostic=getattr(config, "SUPERVISION_CLASS_AGNOSTIC_NMS", True),
+        )
+        if supervision_candidates is None or (not supervision_candidates and legacy_candidates):
+            return legacy_candidates
+        return [candidate for candidate in supervision_candidates]
+
     @staticmethod
     def _merge_icon_detection(
         detections: dict[tuple[int, int], list[tuple[str, float]]],
@@ -981,6 +1028,9 @@ class EatventureBot:
                 threshold=threshold,
                 min_distance=min_distance,
                 template_name=template_name,
+                use_supervision_nms=self._supervision_nms_enabled("SUPERVISION_RED_ICON_NMS_ENABLED"),
+                supervision_iou_threshold=getattr(config, "SUPERVISION_RED_ICON_NMS_IOU_THRESHOLD", 0.20),
+                supervision_class_agnostic=getattr(config, "SUPERVISION_CLASS_AGNOSTIC_NMS", True),
             )
             for confidence, x, y in icons:
                 self._merge_icon_detection(
@@ -1239,6 +1289,9 @@ class EatventureBot:
             threshold=threshold,
             min_distance=15,
             template_name="upgradeStation",
+            use_supervision_nms=self._supervision_nms_enabled("SUPERVISION_UPGRADE_STATION_NMS_ENABLED"),
+            supervision_iou_threshold=getattr(config, "SUPERVISION_UPGRADE_STATION_NMS_IOU_THRESHOLD", 0.20),
+            supervision_class_agnostic=getattr(config, "SUPERVISION_CLASS_AGNOSTIC_NMS", True),
         )
         if not candidates:
             return None
@@ -1332,7 +1385,12 @@ class EatventureBot:
         current_match = self._find_upgrade_station_match(base_threshold)
         if current_match is not None:
             return current_match
-        return self._find_upgrade_station_match(relaxed_threshold)
+        current_match = self._find_upgrade_station_match(relaxed_threshold)
+        if current_match is not None:
+            return current_match
+        if self._scrcpy_miss_recovery_sleep(getattr(config, "SCRCPY_UPGRADE_MISS_RECOVERY_DELAY", 0.0)):
+            return self._find_upgrade_station_match(relaxed_threshold)
+        return None
 
     def _reposition_held_upgrade_station(
         self,
@@ -1609,19 +1667,36 @@ class EatventureBot:
         scan_threshold = self._red_icon_scan_threshold()
 
         min_matches = self._red_icon_min_matches()
-        all_detections = self._collect_red_icon_detections(
+        self.red_icons, valid_red_icon_confidences, best_new_level_icon = self._scan_red_icon_frame(
+            screenshot,
             limited_screenshot,
             scan_threshold,
-            min_distance=80,
-        )
-        self.red_icons, valid_red_icon_confidences = self._icons_from_detections(
-            all_detections,
             min_matches,
         )
 
         self.vision_optimizer.update_red_icon_scan(valid_red_icon_confidences)
 
-        best_new_level_icon = self._find_new_level_red_icon(screenshot, scan_threshold, min_matches)
+        if (
+            not self.red_icons
+            and best_new_level_icon is None
+            and self._scrcpy_miss_recovery_sleep(getattr(config, "SCRCPY_RED_ICON_MISS_RECOVERY_DELAY", 0.0))
+        ):
+            screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+            limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
+            found, confidence, x, y = self._find_new_level_button(limited_screenshot)
+            if found:
+                self.cycle_counter = 0
+                self.vision_optimizer.update_new_level_confidence(confidence)
+                logger.info("newLevel.png found at (%s, %s) after SCRCPY recovery", x, y)
+                return State.TRANSITION_LEVEL
+            self.red_icons, valid_red_icon_confidences, best_new_level_icon = self._scan_red_icon_frame(
+                screenshot,
+                limited_screenshot,
+                scan_threshold,
+                min_matches,
+            )
+            self.vision_optimizer.update_red_icon_scan(valid_red_icon_confidences)
+
         if best_new_level_icon is not None:
             self.vision_optimizer.update_new_level_red_icon_confidence(best_new_level_icon[0])
             logger.info(
@@ -1889,8 +1964,20 @@ class EatventureBot:
             logger.info("New level found while opening boxes")
             return State.TRANSITION_LEVEL
 
-        box_candidates = self._collect_box_candidates(limited_screenshot, self._box_threshold())
-        merged_boxes = self._merge_box_candidates(box_candidates)
+        box_threshold = self._box_threshold()
+        box_candidates = self._collect_box_candidates(limited_screenshot, box_threshold)
+        if not box_candidates and self._scrcpy_miss_recovery_sleep(getattr(config, "SCRCPY_BOX_MISS_RECOVERY_DELAY", 0.0)):
+            limited_screenshot = self.window_capture.capture(
+                max_y=getattr(config, "BOX_SEARCH_Y", config.MAX_SEARCH_Y)
+            )
+            found, confidence, _, _ = self._find_new_level_button(limited_screenshot)
+            if found:
+                self.vision_optimizer.update_new_level_confidence(confidence)
+                logger.info("New level found while opening boxes after SCRCPY recovery")
+                return State.TRANSITION_LEVEL
+            box_candidates = self._collect_box_candidates(limited_screenshot, box_threshold)
+
+        merged_boxes = self._merge_box_candidates_with_supervision(box_candidates)
         boxes_found, best_box_confidence = self._click_box_candidates(merged_boxes)
 
         if boxes_found > 0:

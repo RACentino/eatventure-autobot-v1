@@ -4,6 +4,14 @@ from typing import Any
 import cv2
 import numpy as np
 
+try:
+    import supervision as sv
+except Exception as exc:
+    sv = None
+    _SUPERVISION_IMPORT_ERROR = exc
+else:
+    _SUPERVISION_IMPORT_ERROR = None
+
 logger = logging.getLogger(__name__)
 
 MatchResult = tuple[bool, float, int, int]
@@ -93,6 +101,150 @@ class ImageMatcher:
             return None
         result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
         return np.clip(result, 0.0, 1.0)
+
+    @staticmethod
+    def supervision_available() -> bool:
+        return sv is not None
+
+    @staticmethod
+    def _candidate_xyxy(candidate: tuple[Any, ...]) -> tuple[float, float, float, float] | None:
+        try:
+            _, center_x, center_y, width, height = candidate[:5]
+            center_x = float(center_x)
+            center_y = float(center_y)
+            width = float(width)
+            height = float(height)
+        except (TypeError, ValueError):
+            return None
+
+        if not all(np.isfinite(value) for value in (center_x, center_y, width, height)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+
+        half_width = width / 2.0
+        half_height = height / 2.0
+        return (
+            center_x - half_width,
+            center_y - half_height,
+            center_x + half_width,
+            center_y + half_height,
+        )
+
+    @staticmethod
+    def _candidate_class_id(class_ids: list[int] | tuple[int, ...] | None, index: int) -> int:
+        if class_ids is None:
+            return 0
+        try:
+            return int(class_ids[index])
+        except (IndexError, TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _candidate_detection_arrays(
+        cls: type["ImageMatcher"],
+        candidates: list[tuple[Any, ...]],
+        class_ids: list[int] | tuple[int, ...] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        boxes = []
+        confidences = []
+        normalized_class_ids = []
+        candidate_indexes = []
+
+        for index, candidate in enumerate(candidates):
+            xyxy = cls._candidate_xyxy(candidate)
+            if xyxy is None:
+                continue
+            try:
+                confidence = float(candidate[0])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(confidence):
+                continue
+            boxes.append(xyxy)
+            confidences.append(max(0.0, min(1.0, confidence)))
+            normalized_class_ids.append(cls._candidate_class_id(class_ids, index))
+            candidate_indexes.append(index)
+
+        if not boxes:
+            return None
+
+        return (
+            np.asarray(boxes, dtype=np.float32),
+            np.asarray(confidences, dtype=np.float32),
+            np.asarray(normalized_class_ids, dtype=np.int32),
+            np.asarray(candidate_indexes, dtype=np.int32),
+        )
+
+    @staticmethod
+    def _filtered_detection_candidate_indexes(
+        detections: Any,
+        boxes: np.ndarray,
+        candidate_indexes: np.ndarray,
+    ) -> list[int] | None:
+        if detections is None or len(detections) == 0:
+            return []
+
+        data = getattr(detections, "data", None)
+        if isinstance(data, dict) and "candidate_index" in data:
+            return [int(index) for index in data["candidate_index"]]
+
+        resolved_indexes = []
+        used_source_indexes: set[int] = set()
+        for filtered_box in detections.xyxy:
+            match_index = None
+            for source_index, source_box in enumerate(boxes):
+                if source_index in used_source_indexes:
+                    continue
+                if np.allclose(source_box, filtered_box, atol=0.5):
+                    match_index = source_index
+                    break
+            if match_index is None:
+                return None
+            used_source_indexes.add(match_index)
+            resolved_indexes.append(int(candidate_indexes[match_index]))
+        return resolved_indexes
+
+    def filter_candidates_with_supervision_nms(
+        self,
+        candidates: list[tuple[Any, ...]],
+        iou_threshold: float = 0.5,
+        class_agnostic: bool = True,
+        class_ids: list[int] | tuple[int, ...] | None = None,
+    ) -> list[tuple[Any, ...]] | None:
+        if not candidates:
+            return []
+        if sv is None:
+            if _SUPERVISION_IMPORT_ERROR is not None:
+                logger.debug("Supervision unavailable: %s", _SUPERVISION_IMPORT_ERROR)
+            return None
+
+        arrays = self._candidate_detection_arrays(candidates, class_ids=class_ids)
+        if arrays is None:
+            return []
+        boxes, confidences, normalized_class_ids, candidate_indexes = arrays
+
+        try:
+            detections = sv.Detections(
+                xyxy=boxes,
+                confidence=confidences,
+                class_id=normalized_class_ids,
+            )
+            detections["candidate_index"] = candidate_indexes
+            filtered = detections.with_nms(
+                threshold=self._normalize_threshold(iou_threshold, 0.5),
+                class_agnostic=bool(class_agnostic),
+            )
+        except Exception as exc:
+            logger.debug("Supervision NMS failed: %s", exc)
+            return None
+
+        retained_indexes = self._filtered_detection_candidate_indexes(filtered, boxes, candidate_indexes)
+        if retained_indexes is None:
+            return None
+
+        retained = [candidates[index] for index in retained_indexes if 0 <= index < len(candidates)]
+        return sorted(retained, key=lambda candidate: candidate[0], reverse=True)
 
     @staticmethod
     def _failed_match(confidence: float = 0.0) -> MatchResult:
@@ -391,6 +543,9 @@ class ImageMatcher:
         min_distance: int = 15,
         scales: list[float] | None = None,
         template_name: str = "Unknown",
+        use_supervision_nms: bool = False,
+        supervision_iou_threshold: float = 0.5,
+        supervision_class_agnostic: bool = True,
     ) -> list[tuple[float, int, int]]:
         all_matches = self.find_template_candidates(
             screenshot,
@@ -403,6 +558,14 @@ class ImageMatcher:
         )
         if all_matches:
             all_matches = self._non_max_suppression(all_matches, min_distance)
+            if use_supervision_nms:
+                supervision_matches = self.filter_candidates_with_supervision_nms(
+                    all_matches,
+                    iou_threshold=supervision_iou_threshold,
+                    class_agnostic=supervision_class_agnostic,
+                )
+                if supervision_matches is not None:
+                    all_matches = supervision_matches
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
 
     @staticmethod
