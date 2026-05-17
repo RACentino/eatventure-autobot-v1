@@ -60,8 +60,8 @@ def _print_chat(chat: dict[str, Any]) -> None:
 def main() -> int:
     bot_token = str(config.TELEGRAM_BOT_TOKEN or "").strip()
     if not bot_token:
-        print("ERROR: No bot token found in config.py or environment")
-        print("Please set EATVENTURE_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN")
+        print("ERROR: No bot token found in config.py")
+        print("Please set TELEGRAM_BOT_TOKEN in config.py")
         return 1
 
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"

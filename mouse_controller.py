@@ -121,15 +121,12 @@ class MouseController:
             config.MOUSE_MOVE_DELAY if move_delay is None else move_delay,
             float(config.MOUSE_MOVE_DELAY),
         )
-        legacy_down_duration = getattr(config, "RAPID_CLICK_DOWN_UP_DELAY", 0.013)
         self.mouse_down_duration = self._coerce_non_negative_float(
-            getattr(config, "MOUSE_DOWN_DURATION", legacy_down_duration)
-            if mouse_down_duration is None
-            else mouse_down_duration,
-            legacy_down_duration,
+            config.MOUSE_DOWN_DURATION if mouse_down_duration is None else mouse_down_duration,
+            float(config.MOUSE_DOWN_DURATION),
         )
         self.mouse_up_duration = self._coerce_non_negative_float(
-            getattr(config, "MOUSE_UP_DURATION", 0.0) if mouse_up_duration is None else mouse_up_duration,
+            config.MOUSE_UP_DURATION if mouse_up_duration is None else mouse_up_duration,
             0.0,
         )
         self.hover_enabled = bool(config.HOVER_ENABLED if hover_enabled is None else hover_enabled)
