@@ -172,13 +172,13 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.375
+CLICK_DELAY = 0.110
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.010
+MOUSE_MOVE_DELAY = 0.020
 
 # Duration to hold the left mouse button down for normal clicks.
-MOUSE_DOWN_DURATION = 0.045
+MOUSE_DOWN_DURATION = 0.055
 
 # Delay after releasing the left mouse button for normal clicks.
 MOUSE_UP_DURATION = 0.045
@@ -211,7 +211,7 @@ CLICK_HOLD_MAX_DURATION = 8.75
 SPAM_CLICK_DURATION = 1.60
 
 # Delay between clicks in generic spam-click loops.
-SPAM_CLICK_DELAY = 0.095
+SPAM_CLICK_DELAY = 0.016
 
 
 # --- Capture regions ---
