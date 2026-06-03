@@ -190,7 +190,7 @@ HOVER_ENABLED = True
 HOVER_DURATION = 0.075
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.175
+UPGRADE_SEARCH_INTERVAL = 0.25
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.25
@@ -202,7 +202,7 @@ UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.35
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.175
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.25
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 8.75
