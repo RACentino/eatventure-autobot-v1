@@ -172,10 +172,10 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.022
+CLICK_DELAY = 0.075
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.08
+MOUSE_MOVE_DELAY = 0.0375
 
 # Duration to hold the left mouse button down for normal clicks.
 MOUSE_DOWN_DURATION = 0.150
@@ -190,19 +190,19 @@ HOVER_ENABLED = True
 HOVER_DURATION = 0.075
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.25
+UPGRADE_SEARCH_INTERVAL = 0.4
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.25
 
 # Delay after the upgrade-station verification click before rescanning.
-UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.35
+UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
 
 # Number of upgrade-station verification searches before holding.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.25
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.75
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 8.75
