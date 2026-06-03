@@ -205,7 +205,7 @@ UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.75
 
 # Maximum duration for holding an upgrade station before releasing.
-CLICK_HOLD_MAX_DURATION = 8.75
+CLICK_HOLD_MAX_DURATION = 9.5
 
 # Duration for generic spam-click loops.
 SPAM_CLICK_DURATION = 1.60
