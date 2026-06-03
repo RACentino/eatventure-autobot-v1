@@ -193,7 +193,7 @@ HOVER_DURATION = 0.075
 UPGRADE_SEARCH_INTERVAL = 0.4
 
 # General state-settle delay after selected UI actions.
-STATE_DELAY = 0.25
+STATE_DELAY = 0.4
 
 # Delay after the upgrade-station verification click before rescanning.
 UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
