@@ -151,10 +151,10 @@ UPGRADE_STATION_HSV_MIN_MATCH_RATIO = 0.50
 # --- Red-icon matching ---
 
 # Minimum number of red-icon template variants required for consensus mode.
-RED_ICON_MIN_MATCHES = 6
+RED_ICON_MIN_MATCHES = 3
 
 # Enables fast red-icon detection using the configured fast template set.
-RED_ICON_FAST_MODE_ENABLED = True
+RED_ICON_FAST_MODE_ENABLED = False
 
 # Red-icon template names used when fast detection is enabled.
 RED_ICON_FAST_TEMPLATE_NAMES = ("RedIcon6",)
