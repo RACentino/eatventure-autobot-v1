@@ -239,7 +239,7 @@ BOX_SEARCH_Y = 780
 # --- Click targets ---
 
 # Safe idle click position used to clear focus and dismiss transient UI.
-IDLE_CLICK_POS = (4, 390)
+IDLE_CLICK_POS = (8, 390)
 
 # Button position used to open the stats-upgrade panel.
 STATS_UPGRADE_BUTTON_POS = (310, 698)
