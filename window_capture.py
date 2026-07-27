@@ -32,7 +32,7 @@ class WindowNotAvailableError(WindowCaptureError):
 class WindowCapture:
     def __init__(self, window_title: str, target_width: int = 800, target_height: int = 600) -> None:
         self.window_title = window_title
-        self.hwnd = None
+        self.hwnd: int | None = None
         try:
             self.target_width = int(target_width)
             self.target_height = int(target_height)
@@ -73,6 +73,10 @@ class WindowCapture:
         except pywintypes.error as exc:
             raise self._translate_win32_error(exc, "resizing the window") from exc
         x, y = rect[0], rect[1]
+        current_width = rect[2] - rect[0]
+        current_height = rect[3] - rect[1]
+        if current_width == self.target_width and current_height == self.target_height:
+            return
 
         result = ctypes.windll.user32.SetWindowPos(
             self.hwnd,
@@ -96,7 +100,7 @@ class WindowCapture:
             if hwnd != self.hwnd:
                 logger.info("Window found: %s (HWND: %s)", self.window_title, hwnd)
             self.hwnd = hwnd
-            return self.hwnd
+            return hwnd
 
     def ensure_window(self, resize: bool = False) -> int:
         with self._lock:
@@ -119,7 +123,7 @@ class WindowCapture:
                 logger.info("Window found: %s (HWND: %s)", self.window_title, hwnd)
             if resize or handle_changed:
                 self._resize_bound_window()
-            return self.hwnd
+            return hwnd
 
     def get_hwnd(self) -> int:
         return self.ensure_window()
@@ -192,13 +196,27 @@ class WindowCapture:
             except pywintypes.error as exc:
                 logger.debug("Could not restore capture DC bitmap: %s", exc)
         if save_bitmap is not None:
-            win32gui.DeleteObject(save_bitmap.GetHandle())
+            try:
+                win32gui.DeleteObject(save_bitmap.GetHandle())
+            except (pywintypes.error, AttributeError, TypeError) as exc:
+                logger.debug("Could not release capture bitmap: %s", exc)
         if save_dc is not None:
-            save_dc.DeleteDC()
+            try:
+                save_dc.DeleteDC()
+            except (pywintypes.error, AttributeError) as exc:
+                logger.debug("Could not release compatible capture DC: %s", exc)
         if mfc_dc is not None:
-            mfc_dc.DeleteDC()
+            try:
+                mfc_dc.DeleteDC()
+            except (pywintypes.error, AttributeError) as exc:
+                logger.debug("Could not release capture DC wrapper: %s", exc)
         if hwnd_dc is not None and hwnd:
-            win32gui.ReleaseDC(hwnd, hwnd_dc)
+            try:
+                released = win32gui.ReleaseDC(hwnd, hwnd_dc)
+                if not released:
+                    logger.debug("ReleaseDC did not confirm capture DC release")
+            except (pywintypes.error, TypeError) as exc:
+                logger.debug("Could not release window capture DC: %s", exc)
 
     def capture(self, max_y: Any = None) -> np.ndarray:
         with self._lock:
@@ -208,13 +226,15 @@ class WindowCapture:
             height = self._apply_capture_height_limit(height, max_y)
             self._validate_capture_size(width, height)
 
-            hwnd_dc = None
+            hwnd_dc: int | None = None
             mfc_dc = None
             save_dc = None
             save_bitmap = None
             old_bitmap = None
             try:
                 hwnd_dc = win32gui.GetWindowDC(hwnd)
+                if not hwnd_dc:
+                    raise WindowCaptureError(f"GetWindowDC failed for '{self.window_title}'")
                 mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
                 save_dc = mfc_dc.CreateCompatibleDC()
 
@@ -247,9 +267,9 @@ class ForbiddenAreaOverlay:
     def __init__(self, target_hwnd: int, forbidden_zones: list[ForbiddenZone]) -> None:
         self.target_hwnd = target_hwnd
         self.forbidden_zones = forbidden_zones
-        self.overlay_hwnd = None
+        self.overlay_hwnd: int | None = None
         self.running = False
-        self.thread = None
+        self.thread: threading.Thread | None = None
         
     def start(self) -> None:
         if self.running:
@@ -261,14 +281,12 @@ class ForbiddenAreaOverlay:
     
     def stop(self) -> None:
         self.running = False
-        if self.overlay_hwnd:
-            try:
-                win32gui.DestroyWindow(self.overlay_hwnd)
-            except pywintypes.error as exc:
-                logger.debug("Overlay destroy failed: %s", exc)
-            self.overlay_hwnd = None
         if self.thread is not None and self.thread.is_alive():
             self.thread.join(timeout=1.0)
+        if self.thread is not None and self.thread.is_alive():
+            logger.warning("Forbidden area overlay thread did not stop within the timeout")
+        else:
+            self.thread = None
         logger.info("Forbidden area overlay stopped")
 
     def _build_window_class(self) -> Any:
@@ -348,6 +366,12 @@ class ForbiddenAreaOverlay:
         except pywintypes.error as exc:
             logger.error("Failed to create overlay window: %s", exc)
         finally:
+            if self.overlay_hwnd:
+                try:
+                    win32gui.DestroyWindow(self.overlay_hwnd)
+                except pywintypes.error as exc:
+                    logger.debug("Overlay destroy failed: %s", exc)
+                self.overlay_hwnd = None
             self.running = False
 
     def _draw_zone_rectangles(self, device_context: Any, brush: Any) -> None:

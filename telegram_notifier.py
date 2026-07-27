@@ -21,10 +21,10 @@ class TelegramNotifier:
             queue_size = int(config.TELEGRAM_QUEUE_MAXSIZE)
         except (TypeError, ValueError):
             queue_size = 100
-        self._queue = queue.Queue(maxsize=max(1, queue_size))
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=max(1, queue_size))
         self._stop = threading.Event()
-        self._thread = None
-        self._session = requests.Session() if self.enabled else None
+        self._thread: threading.Thread | None = None
+        self._session: requests.Session | None = requests.Session() if self.enabled else None
 
         if self.enabled:
             self._thread = threading.Thread(target=self._worker_loop, name="telegram_notifier", daemon=True)
@@ -63,16 +63,18 @@ class TelegramNotifier:
                 response_data = response.json()
             except ValueError:
                 response_data = {}
+            if not isinstance(response_data, dict):
+                response_data = {}
 
             if response.ok and response_data.get("ok"):
                 logger.debug("Telegram message sent successfully")
                 return True
 
-            description = response_data.get("description") if isinstance(response_data, dict) else None
+            description = response_data.get("description")
             if not description:
                 description = response.text[:200] if response.text else "unavailable"
             logger.error(
-                "Failed to send Telegram message: status=%s description=%s",
+                "Failed to send Telegram message: status=%s description=%r",
                 response.status_code,
                 description,
             )

@@ -1,8 +1,8 @@
 import logging
 import queue
-from pathlib import Path
 import sys
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import win32api
@@ -56,8 +56,10 @@ def _toggle_bot_running(logger: logging.Logger) -> None:
 def _wipe_bot_memory(logger: logging.Logger) -> None:
     if bot_instance is None:
         return
-    bot_instance.wipe_memory()
-    logger.info("[C pressed] AI memory wiped")
+    if bot_instance.wipe_memory():
+        logger.info("[C pressed] AI memory wiped")
+        return
+    logger.warning("[C pressed] AI memory wipe skipped; retry after the active state operation")
 
 
 def _request_program_exit(logger: logging.Logger) -> None:
@@ -67,7 +69,6 @@ def _request_program_exit(logger: logging.Logger) -> None:
 
 
 def on_press(key: Any) -> None:
-    global should_exit
     try:
         character = _get_key_character(key)
         if character is None:
@@ -115,7 +116,7 @@ def setup_logging() -> None:
     if log_listener is not None:
         log_listener.stop()
 
-    log_queue = queue.SimpleQueue()
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
     queue_handler = QueueHandler(log_queue)
     root_logger.addHandler(queue_handler)
 
@@ -160,7 +161,7 @@ def _cleanup_runtime(listener: keyboard.Listener | None) -> None:
 
 
 def main() -> int:
-    global bot_instance, should_exit, log_listener
+    global bot_instance, should_exit
     listener = None
 
     _print_startup_banner()
@@ -187,8 +188,8 @@ def main() -> int:
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("Bot stopped by user (Ctrl+C)")
         return 0
-    except Exception as exc:
-        logging.getLogger(__name__).error("Fatal error: %s", exc, exc_info=True)
+    except Exception:
+        logging.getLogger(__name__).exception("Fatal error")
         return 1
     finally:
         _cleanup_runtime(listener)

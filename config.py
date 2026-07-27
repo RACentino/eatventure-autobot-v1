@@ -1,5 +1,5 @@
+import os
 from pathlib import Path
-
 
 # --- Runtime paths ---
 
@@ -195,6 +195,9 @@ UPGRADE_SEARCH_INTERVAL = 0.4
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.4
 
+# Delay used after clearing focus before screen confirmation.
+FOCUS_SETTLE_DELAY = 0.05
+
 # Delay after the upgrade-station verification click before rescanning.
 UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
 
@@ -206,6 +209,10 @@ UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.75
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 9.5
+
+# Lower and upper bounds for upgrade-station hold monitoring.
+UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.05
+UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.20
 
 # Duration for generic spam-click loops.
 SPAM_CLICK_DURATION = 1.60
@@ -248,6 +255,30 @@ NEW_LEVEL_BUTTON_POS = (30, 692)
 
 # Position used for the secondary level-transition click.
 LEVEL_TRANSITION_POS = (174, 520)
+
+# Number of visual searches used to locate a new-level transition button.
+NEW_LEVEL_SEARCH_ATTEMPTS = 5
+
+# Delay between new-level transition searches.
+NEW_LEVEL_SEARCH_INTERVAL = 0.20
+
+# Delay after a new-level button click before unlock confirmation starts.
+LEVEL_TRANSITION_SETTLE_DELAY = 1.0
+
+# Delay between the verified footer action and its secondary transition click.
+NEW_LEVEL_CONFIRMATION_DELAY = 0.30
+
+# Delay after the verified secondary transition click.
+LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY = 0.20
+
+# Number of visual searches used to confirm the next-level unlock button.
+UNLOCK_SEARCH_ATTEMPTS = 4
+
+# Delay between unlock-button searches.
+UNLOCK_SEARCH_INTERVAL = 0.30
+
+# Delay after a confirmed unlock click.
+UNLOCK_SETTLE_DELAY = 0.50
 
 
 # --- Red-icon target zones ---
@@ -312,14 +343,19 @@ STATS_UPGRADE_CLICK_DELAY = 0.016
 
 # --- Telegram notifications ---
 
-# Enables Telegram notification delivery.
-TELEGRAM_ENABLED = False
+# Enables Telegram notification delivery when set to a recognized true value.
+TELEGRAM_ENABLED = os.environ.get("EATVENTURE_TELEGRAM_ENABLED", "").strip().casefold() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
-# Telegram bot token used by TelegramNotifier and get_chat_id.py.
-TELEGRAM_BOT_TOKEN = ""
+# Telegram bot token supplied outside source control.
+TELEGRAM_BOT_TOKEN = os.environ.get("EATVENTURE_TELEGRAM_BOT_TOKEN", "").strip()
 
-# Telegram chat ID that receives bot notifications.
-TELEGRAM_CHAT_ID = ""
+# Telegram chat ID supplied outside source control.
+TELEGRAM_CHAT_ID = os.environ.get("EATVENTURE_TELEGRAM_CHAT_ID", "").strip()
 
 # Maximum queued Telegram messages before new messages are dropped.
 TELEGRAM_QUEUE_MAXSIZE = 100

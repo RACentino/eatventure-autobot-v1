@@ -4,9 +4,9 @@ Helper script to get your Telegram chat ID.
 Steps:
 1. Start your bot by messaging @YourBotName on Telegram.
 2. Send any message to your bot (for example, "Hello").
-3. Run this script: python get_chat_id.py
-4. Copy your chat_id from the output.
-5. Paste it into config.py as TELEGRAM_CHAT_ID.
+3. Set EATVENTURE_TELEGRAM_BOT_TOKEN in your environment.
+4. Run this script: python get_chat_id.py
+5. Copy a chat ID from the output into EATVENTURE_TELEGRAM_CHAT_ID.
 """
 
 import sys
@@ -26,6 +26,10 @@ def _redact_token(text: Any, token: str) -> str:
     return text
 
 
+def _terminal_safe_text(value: Any) -> str:
+    return repr(str(value))[1:-1]
+
+
 def _extract_chat(update: Any) -> dict[str, Any] | None:
     if not isinstance(update, dict):
         return None
@@ -33,7 +37,10 @@ def _extract_chat(update: Any) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return None
     chat = message.get("chat")
-    if not isinstance(chat, dict) or "id" not in chat:
+    if not isinstance(chat, dict):
+        return None
+    chat_id = chat.get("id")
+    if isinstance(chat_id, bool) or not isinstance(chat_id, int):
         return None
     return chat
 
@@ -47,21 +54,20 @@ def _print_no_messages_instructions() -> None:
 
 
 def _print_chat(chat: dict[str, Any]) -> None:
-    chat_id = str(chat["id"])
+    chat_id = chat["id"]
     print(f"Chat ID: {chat_id}")
-    print(f"Chat Type: {chat.get('type', 'unknown')}")
+    print(f"Chat Type: {_terminal_safe_text(chat.get('type', 'unknown'))}")
     if "username" in chat:
-        print(f"Username: @{chat['username']}")
+        print(f"Username: @{_terminal_safe_text(chat['username'])}")
     if "first_name" in chat:
-        print(f"Name: {chat['first_name']}")
+        print(f"Name: {_terminal_safe_text(chat['first_name'])}")
     print("-" * 40)
 
 
 def main() -> int:
     bot_token = str(config.TELEGRAM_BOT_TOKEN or "").strip()
     if not bot_token:
-        print("ERROR: No bot token found in config.py")
-        print("Please set TELEGRAM_BOT_TOKEN in config.py")
+        print("ERROR: EATVENTURE_TELEGRAM_BOT_TOKEN is not set")
         return 1
 
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
@@ -77,8 +83,12 @@ def main() -> int:
         print(f"Error decoding Telegram response: {exc}")
         return 1
 
+    if not isinstance(data, dict):
+        print("Telegram API error: response was not an object")
+        return 1
     if not data.get("ok"):
-        print(f"Telegram API error: {_redact_token(data.get('description', data), bot_token)}")
+        description = _redact_token(data.get("description", data), bot_token)
+        print(f"Telegram API error: {_terminal_safe_text(description)}")
         return 1
 
     updates = data.get("result", [])
@@ -90,13 +100,13 @@ def main() -> int:
         return 0
 
     print("Found messages!\n")
-    chat_ids = set()
+    chat_ids: set[int] = set()
     for update in updates:
         chat = _extract_chat(update)
         if chat is None:
             continue
 
-        chat_id = str(chat["id"])
+        chat_id = chat["id"]
         if chat_id in chat_ids:
             continue
 
@@ -104,11 +114,11 @@ def main() -> int:
         _print_chat(chat)
 
     if chat_ids:
-        example_chat_id = sorted(chat_ids)[0]
+        example_chat_id = min(chat_ids)
         print("\nOK: Copy one of the Chat IDs above")
-        print("OK: Paste it into config.py as TELEGRAM_CHAT_ID")
-        print("\nExample:")
-        print(f'TELEGRAM_CHAT_ID = "{example_chat_id}"')
+        print("OK: Set EATVENTURE_TELEGRAM_CHAT_ID in your environment")
+        print("\nPowerShell example:")
+        print(f'$env:EATVENTURE_TELEGRAM_CHAT_ID = "{example_chat_id}"')
     else:
         print("No chat IDs were present in the Telegram updates response.")
 

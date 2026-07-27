@@ -93,6 +93,10 @@ scrcpy --window-title "EatventureAuto"
 
 *(Note: Ensure the window title matches the `WINDOW_TITLE` variable in `config.py`)*
 
+Keep the scrcpy window in the foreground while automation is running. The bot
+rejects global cursor and mouse input whenever another window owns the
+foreground; press `Z` again after returning focus to scrcpy.
+
 ## Coming Soon
 
 * **Graphical User Interface (GUI)**: A dedicated control panel for easier operation, allowing real-time monitoring, visual threshold adjustment, and one-click start/stop functionality without terminal interaction.
@@ -108,9 +112,23 @@ scrcpy --window-title "EatventureAuto"
 ### Step 2: Get Chat ID
 
 1. Start a chat with your new bot and send any message.
-2. Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in your browser.
-3. Look for the `"chat":{"id":...}` field and copy the number.
-4. Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `TELEGRAM_ENABLED = True` directly in `config.py` before starting the bot.
+2. Set the token in the PowerShell session used to run the helper:
+
+```powershell
+$env:EATVENTURE_TELEGRAM_BOT_TOKEN = "your-token"
+python get_chat_id.py
+```
+
+3. Copy one of the reported chat IDs, then configure notifications in the same
+   PowerShell session before starting the bot:
+
+```powershell
+$env:EATVENTURE_TELEGRAM_CHAT_ID = "your-chat-id"
+$env:EATVENTURE_TELEGRAM_ENABLED = "true"
+python main.py
+```
+
+Do not paste the bot token into `config.py` or commit it to source control.
 
 ## Disclaimer
 

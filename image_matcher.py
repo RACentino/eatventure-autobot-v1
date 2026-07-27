@@ -1,9 +1,11 @@
 import logging
+from itertools import islice
 from typing import Any
 
 import cv2
 import numpy as np
 
+_SUPERVISION_IMPORT_ERROR: Exception | None
 try:
     import supervision as sv
 except Exception as exc:
@@ -18,6 +20,7 @@ MatchResult = tuple[bool, float, int, int]
 MatchCandidate = tuple[float, int, int, int, int]
 Point = tuple[int, int]
 HsvRange = tuple[np.ndarray, np.ndarray]
+MAX_TEMPLATE_SCALES = 16
 
 
 class ImageMatcher:
@@ -99,8 +102,9 @@ class ImageMatcher:
             return None
         if result.size == 0:
             return None
-        result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
-        return np.clip(result, 0.0, 1.0)
+        np.nan_to_num(result, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
+        np.clip(result, 0.0, 1.0, out=result)
+        return result
 
     @staticmethod
     def supervision_available() -> bool:
@@ -447,35 +451,37 @@ class ImageMatcher:
         return average_correlation >= self._normalize_threshold(color_threshold, 0.7)
 
     @staticmethod
-    def _normalize_hsv_component(values: np.ndarray) -> np.ndarray:
-        return np.array(
-            [
-                max(0, min(179, int(values[0]))),
-                max(0, min(255, int(values[1]))),
-                max(0, min(255, int(values[2]))),
-            ],
-            dtype=np.uint8,
-        )
+    def _normalize_hsv_component(values: np.ndarray) -> np.ndarray | None:
+        if values.shape != (3,) or not np.all(np.isfinite(values)):
+            return None
+        return np.clip(values, (0, 0, 0), (179, 255, 255)).astype(np.uint8)
 
     @classmethod
     def _normalize_hsv_range(cls: type["ImageMatcher"], hsv_range: Any) -> HsvRange | None:
         try:
             lower, upper = hsv_range
-            lower = np.array(lower, dtype=np.int16)
-            upper = np.array(upper, dtype=np.int16)
-        except (TypeError, ValueError):
+            lower = np.asarray(lower, dtype=np.float64)
+            upper = np.asarray(upper, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError):
             return None
         if lower.shape != (3,) or upper.shape != (3,):
             return None
-        return cls._normalize_hsv_component(lower), cls._normalize_hsv_component(upper)
+        normalized_lower = cls._normalize_hsv_component(lower)
+        normalized_upper = cls._normalize_hsv_component(upper)
+        if normalized_lower is None or normalized_upper is None:
+            return None
+        return normalized_lower, normalized_upper
 
     @classmethod
     def _normalize_hsv_ranges(cls: type["ImageMatcher"], hsv_ranges: Any) -> list[HsvRange]:
-        return [
-            normalized_range
-            for hsv_range in hsv_ranges
-            if (normalized_range := cls._normalize_hsv_range(hsv_range)) is not None
-        ]
+        try:
+            return [
+                normalized_range
+                for hsv_range in hsv_ranges
+                if (normalized_range := cls._normalize_hsv_range(hsv_range)) is not None
+            ]
+        except TypeError:
+            return []
 
     @staticmethod
     def _apply_hsv_range_mask(hsv_region: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
@@ -593,6 +599,24 @@ class ImageMatcher:
             return None
         return normalized_scale
 
+    @staticmethod
+    def _scaled_template_fits(screenshot: np.ndarray, template: np.ndarray, scale: float) -> bool:
+        scaled_width = float(template.shape[1]) * scale
+        scaled_height = float(template.shape[0]) * scale
+        return bool(
+            np.isfinite(scaled_width)
+            and np.isfinite(scaled_height)
+            and 1.0 <= scaled_width <= screenshot.shape[1]
+            and 1.0 <= scaled_height <= screenshot.shape[0]
+        )
+
+    @staticmethod
+    def _normalize_min_distance(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     def find_template_candidates(
         self,
         screenshot: np.ndarray,
@@ -604,7 +628,7 @@ class ImageMatcher:
         template_name: str = "Unknown",
     ) -> list[MatchCandidate]:
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
-        all_matches = []
+        all_matches: list[MatchCandidate] = []
         try:
             screenshot = self._normalize_image(screenshot, "screenshot")
             template = self._normalize_image(template, template_name)
@@ -615,14 +639,22 @@ class ImageMatcher:
 
         if scales is None:
             scales = [1.0]
+        try:
+            scale_values = iter(scales)
+        except TypeError:
+            logger.warning("[%s] Scales must be iterable", template_name)
+            return []
 
-        for scale_value in scales:
+        for scale_value in islice(scale_values, MAX_TEMPLATE_SCALES):
             scale = self._valid_scale(scale_value)
             if scale is None:
                 continue
-            scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
-
-            if scaled_template.shape[0] > screenshot.shape[0] or scaled_template.shape[1] > screenshot.shape[1]:
+            if not self._scaled_template_fits(screenshot, template, scale):
+                continue
+            try:
+                scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
+            except cv2.error as exc:
+                logger.warning("[%s] Template resize failed at scale %s: %s", template_name, scale, exc)
                 continue
 
             result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
@@ -643,18 +675,25 @@ class ImageMatcher:
 
     @staticmethod
     def _local_minima_candidates(result: np.ndarray | None, max_score: float, min_distance: int) -> list[Point]:
-        if result is None or result.size == 0:
+        if result is None or result.size == 0 or result.ndim != 2:
             return []
-        window = max(3, int(min_distance))
+        try:
+            normalized_max_score = float(max_score)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        if not np.isfinite(normalized_max_score):
+            return []
+        maximum_window = max(3, min(int(result.shape[0]), int(result.shape[1])))
+        window = min(maximum_window, max(3, ImageMatcher._normalize_min_distance(min_distance)))
         if window % 2 == 0:
-            window += 1
+            window = max(3, window - 1)
         kernel = np.ones((window, window), dtype=np.float32)
         local_min = cv2.erode(result, kernel)
-        candidate_mask = (result <= max_score) & (result <= local_min + 1e-6)
+        candidate_mask = (result <= normalized_max_score) & (result <= local_min + 1e-6)
         if not np.any(candidate_mask):
             return []
         mask = candidate_mask.astype(np.uint8)
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         candidates = []
         for index in range(1, count):
             component_x, component_y, component_width, component_height, component_area = stats[index]
@@ -665,18 +704,39 @@ class ImageMatcher:
                 component_x : component_x + component_width,
             ]
             min_value, _, min_location, _ = cv2.minMaxLoc(region)
-            if min_value <= max_score:
+            if min_value <= normalized_max_score:
                 candidates.append((int(component_x + min_location[0]), int(component_y + min_location[1])))
         return candidates
 
     @staticmethod
     def _box_intersection_over_union(first_match: MatchCandidate, second_match: MatchCandidate) -> float:
-        _, first_x, first_y, first_width, first_height = first_match
-        _, second_x, second_y, second_width, second_height = second_match
-        left = max(first_x - first_width // 2, second_x - second_width // 2)
-        top = max(first_y - first_height // 2, second_y - second_height // 2)
-        right = min(first_x + first_width // 2, second_x + second_width // 2)
-        bottom = min(first_y + first_height // 2, second_y + second_height // 2)
+        _, raw_first_x, raw_first_y, raw_first_width, raw_first_height = first_match
+        _, raw_second_x, raw_second_y, raw_second_width, raw_second_height = second_match
+        values = tuple(
+            float(value)
+            for value in (
+                raw_first_x,
+                raw_first_y,
+                raw_first_width,
+                raw_first_height,
+                raw_second_x,
+                raw_second_y,
+                raw_second_width,
+                raw_second_height,
+            )
+        )
+        if not all(np.isfinite(value) for value in values):
+            return 0.0
+        first_center_x, first_center_y, first_width, first_height = values[:4]
+        second_center_x, second_center_y, second_width, second_height = values[4:]
+        first_width = max(0.0, first_width)
+        first_height = max(0.0, first_height)
+        second_width = max(0.0, second_width)
+        second_height = max(0.0, second_height)
+        left = max(first_center_x - first_width / 2.0, second_center_x - second_width / 2.0)
+        top = max(first_center_y - first_height / 2.0, second_center_y - second_height / 2.0)
+        right = min(first_center_x + first_width / 2.0, second_center_x + second_width / 2.0)
+        bottom = min(first_center_y + first_height / 2.0, second_center_y + second_height / 2.0)
         if right <= left or bottom <= top:
             return 0.0
         intersection = (right - left) * (bottom - top)
@@ -702,8 +762,9 @@ class ImageMatcher:
         if not matches:
             return []
 
+        min_distance = self._normalize_min_distance(min_distance)
         matches = sorted(matches, key=lambda match: match[0], reverse=True)
-        filtered = []
+        filtered: list[MatchCandidate] = []
 
         for candidate_match in matches:
             if not any(

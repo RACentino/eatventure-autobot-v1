@@ -111,8 +111,10 @@ class MouseController:
         mouse_up_duration: Any = None,
         hover_enabled: bool | None = None,
         hover_duration: Any = None,
+        interrupt_check: Callable[[], bool] | None = None,
     ) -> None:
         self._hwnd_source = hwnd_source
+        self._interrupt_check = interrupt_check
         self.click_delay = self._coerce_non_negative_float(
             config.CLICK_DELAY if click_delay is None else click_delay,
             float(config.CLICK_DELAY),
@@ -165,6 +167,20 @@ class MouseController:
             raise RuntimeError("Target window is not available")
         return hwnd
 
+    def is_target_foreground(self) -> bool:
+        try:
+            return int(win32gui.GetForegroundWindow() or 0) == int(self._get_hwnd())
+        except (pywintypes.error, RuntimeError, TypeError, ValueError):
+            return False
+
+    def _input_allowed(self) -> bool:
+        if self._interrupt_check is not None and self._interrupt_check():
+            return False
+        if self.is_target_foreground():
+            return True
+        logger.warning("Rejected global mouse input because the target window is not foreground")
+        return False
+
     def get_window_position(self) -> Point:
         win_x, win_y, _, _ = self.get_window_bounds()
         return win_x, win_y
@@ -205,6 +221,8 @@ class MouseController:
         screen_y = int(y)
         last_exc = None
         for attempt in range(1, self.input_retry_count + 1):
+            if not self._input_allowed():
+                return False
             try:
                 win32api.SetCursorPos((screen_x, screen_y))
                 precise_sleep(0.001)
@@ -229,8 +247,11 @@ class MouseController:
     def _mouse_event(self, event: int, x: Any, y: Any) -> bool:
         screen_x = int(x)
         screen_y = int(y)
+        releases_left_button = bool(event & win32con.MOUSEEVENTF_LEFTUP)
         last_exc = None
         for attempt in range(1, self.input_retry_count + 1):
+            if not releases_left_button and not self._input_allowed():
+                return False
             try:
                 win32api.mouse_event(event, screen_x, screen_y, 0, 0)
                 return True
@@ -468,9 +489,7 @@ class MouseController:
     ) -> bool:
         if not self._left_down_at_screen(screen_x, screen_y, down_duration, interrupt_check):
             return False
-        if not self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check):
-            return False
-        return True
+        return self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check)
 
     def _wait_after_click(self, delay: Any = None) -> None:
         wait_time = self.click_delay if delay is None else delay

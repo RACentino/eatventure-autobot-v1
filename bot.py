@@ -5,14 +5,14 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
 from collections import deque
-from datetime import datetime
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import config
 import pywintypes
+
+import config
 from image_matcher import ImageMatcher
 from mouse_controller import MouseController, precise_sleep, wait_event
 from state_machine import State, StateMachine
@@ -167,15 +167,9 @@ class VisionPersistence:
 class VisionOptimizer:
     def __init__(self, persistence: VisionPersistence | None = None) -> None:
         self.enabled = bool(config.AI_VISION_ENABLED)
-        self.alpha = float(config.AI_VISION_ALPHA)
-        self.alpha_max = float(config.AI_VISION_ALPHA_MAX)
-        self.confidence_boost = float(config.AI_VISION_CONFIDENCE_BOOST)
-        self.red_icon_threshold = float(config.RED_ICON_THRESHOLD)
-        self.new_level_threshold = float(config.NEW_LEVEL_THRESHOLD)
-        self.new_level_red_icon_threshold = float(config.NEW_LEVEL_RED_ICON_THRESHOLD)
-        self.upgrade_station_threshold = float(config.UPGRADE_STATION_THRESHOLD)
-        self.stats_upgrade_threshold = float(config.STATS_RED_ICON_THRESHOLD)
-        self.box_threshold = float(config.BOX_THRESHOLD)
+        self.alpha = self._bounded_value(config.AI_VISION_ALPHA, 0.0, 1.0, 0.0)
+        self.alpha_max = self._bounded_value(config.AI_VISION_ALPHA_MAX, self.alpha, 1.0, self.alpha)
+        self.confidence_boost = self._bounded_value(config.AI_VISION_CONFIDENCE_BOOST, 0.0, 1.0, 0.0)
         self.persistence = persistence
         self._miss_counts = {
             "red_icon": 0,
@@ -185,6 +179,7 @@ class VisionOptimizer:
             "stats_upgrade": 0,
             "box": 0,
         }
+        self._restore_default_thresholds()
 
     def _ema(self, current: float, new_value: float, alpha: float | None = None) -> float:
         blend = self.alpha if alpha is None else alpha
@@ -199,6 +194,59 @@ class VisionOptimizer:
         if not math.isfinite(number):
             return None
         return number
+
+    @classmethod
+    def _bounded_value(
+        cls,
+        value: Any,
+        minimum: float,
+        maximum: float,
+        default: float,
+    ) -> float:
+        lower_bound = min(float(minimum), float(maximum))
+        upper_bound = max(float(minimum), float(maximum))
+        number = cls._finite_float(value)
+        if number is None:
+            number = float(default)
+        return max(lower_bound, min(upper_bound, number))
+
+    def _restore_default_thresholds(self) -> None:
+        self.red_icon_threshold = self._bounded_value(
+            config.RED_ICON_THRESHOLD,
+            config.AI_RED_ICON_THRESHOLD_MIN,
+            config.AI_RED_ICON_THRESHOLD_MAX,
+            config.AI_RED_ICON_THRESHOLD_MIN,
+        )
+        self.new_level_threshold = self._bounded_value(
+            config.NEW_LEVEL_THRESHOLD,
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_THRESHOLD_MAX,
+            config.AI_NEW_LEVEL_THRESHOLD_MIN,
+        )
+        self.new_level_red_icon_threshold = self._bounded_value(
+            config.NEW_LEVEL_RED_ICON_THRESHOLD,
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX,
+            config.AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN,
+        )
+        self.upgrade_station_threshold = self._bounded_value(
+            config.UPGRADE_STATION_THRESHOLD,
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+            config.AI_UPGRADE_STATION_THRESHOLD_MAX,
+            config.AI_UPGRADE_STATION_THRESHOLD_MIN,
+        )
+        self.stats_upgrade_threshold = self._bounded_value(
+            config.STATS_RED_ICON_THRESHOLD,
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+            config.AI_STATS_UPGRADE_THRESHOLD_MAX,
+            config.AI_STATS_UPGRADE_THRESHOLD_MIN,
+        )
+        self.box_threshold = self._bounded_value(
+            config.BOX_THRESHOLD,
+            config.AI_BOX_THRESHOLD_MIN,
+            config.AI_BOX_THRESHOLD_MAX,
+            config.AI_BOX_THRESHOLD_MIN,
+        )
 
     def _adaptive_alpha(self, confidence: Any) -> float:
         confidence = self._finite_float(confidence)
@@ -384,12 +432,7 @@ class VisionOptimizer:
             setattr(self, key, max(minimum, min(maximum, value)))
 
     def reset(self) -> None:
-        self.red_icon_threshold = float(config.RED_ICON_THRESHOLD)
-        self.new_level_threshold = float(config.NEW_LEVEL_THRESHOLD)
-        self.new_level_red_icon_threshold = float(config.NEW_LEVEL_RED_ICON_THRESHOLD)
-        self.upgrade_station_threshold = float(config.UPGRADE_STATION_THRESHOLD)
-        self.stats_upgrade_threshold = float(config.STATS_RED_ICON_THRESHOLD)
-        self.box_threshold = float(config.BOX_THRESHOLD)
+        self._restore_default_thresholds()
         for key in self._miss_counts:
             self._miss_counts[key] = 0
         self._persist(force=True)
@@ -423,12 +466,12 @@ class HistoricalLearner:
         self._last_apply_time = 0.0
         self._lock = threading.RLock()
         self._stop = threading.Event()
-        self._thread = None
-        self._records = []
+        self._thread: threading.Thread | None = None
+        self._records: list[dict[str, Any]] = []
         self._total_completions = 0
         self._last_pair_processed = 0
         self._last_batch_processed = 0
-        self._tuned_behavior = {}
+        self._tuned_behavior: dict[str, float] = {}
 
         persisted = self.persistence.load() if self.enabled and self.persistence else {}
         if isinstance(persisted, dict) and persisted:
@@ -498,12 +541,13 @@ class HistoricalLearner:
         self._persist(force=True)
 
     def record_completion(self, seconds_spent: float, source: str) -> None:
-        if not self.enabled or seconds_spent <= 0:
+        normalized_duration = self._safe_float(seconds_spent)
+        if not self.enabled or normalized_duration is None or normalized_duration <= 0:
             return
         record = {
             "timestamp": time.time(),
-            "time_spent": float(seconds_spent),
-            "source": source,
+            "time_spent": normalized_duration,
+            "source": str(source),
             "behavior": self.bot.get_runtime_behavior_snapshot(),
         }
         with self._lock:
@@ -534,22 +578,21 @@ class HistoricalLearner:
         with self._lock:
             records = list(self._records)
             total = int(self._total_completions)
+            if (time.monotonic() - self._last_apply_time) < self.apply_cooldown:
+                return
 
-        if (time.monotonic() - self._last_apply_time) < self.apply_cooldown:
-            return
+            changed = False
+            if total >= self.pair_window and (total // self.pair_window) > self._last_pair_processed:
+                changed = self._apply_profile(records[-self.pair_window :]) or changed
+                self._last_pair_processed = total // self.pair_window
 
-        changed = False
-        if total >= self.pair_window and (total // self.pair_window) > self._last_pair_processed:
-            changed = self._apply_profile(records[-self.pair_window :]) or changed
-            self._last_pair_processed = total // self.pair_window
+            if total >= self.batch_window and (total // self.batch_window) > self._last_batch_processed:
+                changed = self._apply_profile(records[-self.batch_window :]) or changed
+                self._last_batch_processed = total // self.batch_window
 
-        if total >= self.batch_window and (total // self.batch_window) > self._last_batch_processed:
-            changed = self._apply_profile(records[-self.batch_window :]) or changed
-            self._last_batch_processed = total // self.batch_window
-
-        if changed:
-            self._last_apply_time = time.monotonic()
-        self._persist()
+            if changed:
+                self._last_apply_time = time.monotonic()
+            self._persist()
 
     def _normalized_record(self, record: Any) -> dict[str, Any] | None:
         if not isinstance(record, dict):
@@ -639,13 +682,15 @@ class EatventureBot:
         logger.info("Initializing Eatventure Bot")
         self._stop_requested = threading.Event()
         self._step_active = threading.Event()
+        self._state_operation_lock = threading.Lock()
 
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
         self.mouse_controller = MouseController(
             self.window_capture.get_hwnd,
-            config.CLICK_DELAY,
-            config.MOUSE_MOVE_DELAY,
+            click_delay=config.CLICK_DELAY,
+            move_delay=config.MOUSE_MOVE_DELAY,
+            interrupt_check=self._stop_requested.is_set,
         )
         self.state_machine = StateMachine(State.FIND_RED_ICONS)
         self.telegram = TelegramNotifier(
@@ -669,27 +714,38 @@ class EatventureBot:
         self._red_icon_template_names_cache = self._red_icon_template_names()
         self._red_icon_max_width, self._red_icon_max_height = self._red_icon_template_span()
         self.ready = self._validate_required_templates()
+        self._initialize_runtime_state()
+
+        logger.info("Bot initialized successfully")
+
+    def _initialize_runtime_state(self) -> None:
         self._successful_red_icon_history_limit = 24
         self.running = False
-        self.red_icons = []
+        self.red_icons: list[RedIcon] = []
         self.current_red_icon_index = 0
         self.wait_for_unlock_attempts = 0
-        self.max_wait_for_unlock_attempts = 4
+        self.max_wait_for_unlock_attempts = max(1, int(config.UNLOCK_SEARCH_ATTEMPTS))
         self.work_done = False
         self.cycle_counter = 0
         self.upgrade_station_counter = 0
-        self.successful_red_icon_positions = deque(maxlen=self._successful_red_icon_history_limit)
+        self.successful_red_icon_positions: deque[int] = deque(
+            maxlen=self._successful_red_icon_history_limit
+        )
         self.upgrade_found_in_cycle = False
         self.consecutive_failed_cycles = 0
         self.total_levels_completed = 0
-        self.current_level_start_time = None
-        self.upgrade_station_pos = None
-        self.overlay = None
+        self.current_level_start_time: float | None = None
+        self.upgrade_station_pos: tuple[int, int] | None = None
+        self.overlay: ForbiddenAreaOverlay | None = None
         self._oscillation_cycle_index = 1
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
         self._new_level_red_icon_verified = False
-        self.forbidden_zones = [
+        self.forbidden_zones = self._configured_forbidden_zones()
+
+    @staticmethod
+    def _configured_forbidden_zones() -> list[tuple[int, int, int, int]]:
+        return [
             (
                 config.FORBIDDEN_ZONE_1_X_MIN,
                 config.FORBIDDEN_ZONE_1_X_MAX,
@@ -721,8 +777,6 @@ class EatventureBot:
                 config.FORBIDDEN_ZONE_5_Y_MAX,
             ),
         ]
-
-        logger.info("Bot initialized successfully")
 
     def load_templates(self) -> dict[str, TemplatePair]:
         templates: dict[str, TemplatePair] = {}
@@ -882,13 +936,22 @@ class EatventureBot:
         self.tuner.search_interval = float(learned.get("search_interval", self.tuner.search_interval))
         self._apply_tuning()
 
-    def wipe_memory(self) -> None:
-        self.tuner.reset()
-        self.vision_optimizer.reset()
-        self.historical_learner.reset()
-        self.successful_red_icon_positions = deque(maxlen=self._successful_red_icon_history_limit)
-        self.current_level_start_time = datetime.now() if self.running else None
-        self._apply_tuning()
+    def wipe_memory(self) -> bool:
+        if not self._state_operation_lock.acquire(blocking=False):
+            logger.warning("Cannot wipe memory while a state operation is active")
+            return False
+        self._step_active.set()
+        try:
+            self.tuner.reset()
+            self.vision_optimizer.reset()
+            self.historical_learner.reset()
+            self.successful_red_icon_positions = deque(maxlen=self._successful_red_icon_history_limit)
+            self.current_level_start_time = time.monotonic() if self.running else None
+            self._apply_tuning()
+            return True
+        finally:
+            self._step_active.clear()
+            self._state_operation_lock.release()
 
     def _red_icon_template_names(self) -> list[str]:
         cached = getattr(self, "_red_icon_template_names_cache", None)
@@ -941,7 +1004,7 @@ class EatventureBot:
         return screenshot[top:bottom, left:right], left, top
 
     @staticmethod
-    def _box_iou(first: MatchCandidate, second: MatchCandidate) -> float:
+    def _box_iou(first: MatchCandidate | BoxCandidate, second: MatchCandidate | BoxCandidate) -> float:
         _, x1, y1, w1, h1 = first[:5]
         _, x2, y2, w2, h2 = second[:5]
         left = max(x1 - w1 / 2, x2 - w2 / 2)
@@ -958,7 +1021,7 @@ class EatventureBot:
         candidates: list[BoxCandidate],
         iou_threshold: float,
     ) -> list[BoxCandidate]:
-        merged = []
+        merged: list[BoxCandidate] = []
         for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
             if all(cls._box_iou(candidate, existing) <= iou_threshold for existing in merged):
                 merged.append(candidate)
@@ -1166,9 +1229,10 @@ class EatventureBot:
     def _record_level_completion(self) -> float:
         self.total_levels_completed += 1
         elapsed = 0.0
+        completion_time = time.monotonic()
         if self.current_level_start_time is not None:
-            elapsed = (datetime.now() - self.current_level_start_time).total_seconds()
-        self.current_level_start_time = datetime.now()
+            elapsed = max(0.0, completion_time - self.current_level_start_time)
+        self.current_level_start_time = completion_time
         self._reset_search_cycle()
         self.telegram.notify_new_level(self.total_levels_completed, elapsed)
         self.historical_learner.record_completion(elapsed, "transition")
@@ -1197,7 +1261,7 @@ class EatventureBot:
             self._oscillation_cycle_index = 1
 
     def _perform_oscillating_scroll_step(self) -> bool:
-        distance = int(round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO)))
+        distance = round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO))
         start_x, start_y = config.SCROLL_START_POS
         direction = 1 if self._oscillation_leg_direction > 0 else -1
         target_y = start_y - distance if direction > 0 else start_y + distance
@@ -1215,15 +1279,17 @@ class EatventureBot:
             duration=config.SCROLL_DURATION,
             relative=True,
         )
-        if moved:
-            self._sleep(config.POST_SCROLL_SETTLE)
-            self._sleep(config.SCROLL_INTERVAL_PAUSE)
-            self._advance_oscillation_progress()
-            self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
-        return bool(moved)
+        if not moved:
+            return False
+        self._advance_oscillation_progress()
+        if not self._sleep(config.POST_SCROLL_SETTLE):
+            return False
+        if not self._sleep(config.SCROLL_INTERVAL_PAUSE):
+            return False
+        return self._click_idle()
 
     def _perform_single_down_scroll(self) -> bool:
-        distance = int(round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO)))
+        distance = round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO))
         start_x, start_y = config.SCROLL_START_POS
         target_y = start_y - distance
         logger.info("Verification scroll down before confirming new level red icon")
@@ -1235,10 +1301,11 @@ class EatventureBot:
             duration=config.SCROLL_DURATION,
             relative=True,
         )
-        if moved:
-            self._sleep(config.POST_SCROLL_SETTLE)
-            self._sleep(config.SCROLL_INTERVAL_PAUSE)
-        return bool(moved)
+        if not moved:
+            return False
+        if not self._sleep(config.POST_SCROLL_SETTLE):
+            return False
+        return self._sleep(config.SCROLL_INTERVAL_PAUSE)
 
     def _upgrade_station_threshold(self) -> float:
         if self.vision_optimizer.enabled:
@@ -1411,7 +1478,7 @@ class EatventureBot:
 
     @staticmethod
     def _hold_duration_reached(hold_max_duration: float, hold_elapsed: float) -> bool:
-        return hold_max_duration > 0.0 and hold_elapsed >= hold_max_duration
+        return hold_elapsed >= hold_max_duration
 
     def _monitor_upgrade_station_hold(
         self,
@@ -1461,23 +1528,24 @@ class EatventureBot:
         screen_x, screen_y = screen_position
         hold_started_at = time.monotonic()
         screen_position_holder = [screen_position]
-        holding = False
+        if hold_max_duration <= 0.0:
+            logger.error("Upgrade station hold rejected because its maximum duration is not positive")
+            return False, True, 0.0
 
-        try:
-            if not self.mouse_controller._left_down_at_screen(
-                screen_x,
-                screen_y,
-                interrupt_check=self._stop_requested.is_set,
-            ):
-                self.tuner.record_click_result(False)
-                self._apply_tuning()
-                logger.warning("Upgrade station hold press failed at (%s, %s)", screen_x, screen_y)
-                return False, False, time.monotonic() - hold_started_at
-
-            holding = True
-            self.tuner.record_click_result(True)
+        if not self.mouse_controller._left_down_at_screen(
+            screen_x,
+            screen_y,
+            interrupt_check=self._stop_requested.is_set,
+        ):
+            self.tuner.record_click_result(False)
             self._apply_tuning()
-            return self._monitor_upgrade_station_hold(
+            logger.warning("Upgrade station hold press failed at (%s, %s)", screen_x, screen_y)
+            return False, False, time.monotonic() - hold_started_at
+
+        self.tuner.record_click_result(True)
+        self._apply_tuning()
+        try:
+            hold_result = self._monitor_upgrade_station_hold(
                 screen_position_holder,
                 base_threshold,
                 relaxed_threshold,
@@ -1486,9 +1554,16 @@ class EatventureBot:
                 hold_started_at,
             )
         finally:
-            if holding:
-                release_x, release_y = screen_position_holder[0]
-                self.mouse_controller._left_up_at_screen(release_x, release_y)
+            release_x, release_y = screen_position_holder[0]
+            released = self.mouse_controller._left_up_at_screen(release_x, release_y)
+            if not released:
+                logger.critical("Upgrade station hold release could not be confirmed")
+
+        if not released:
+            self.tuner.record_click_result(False)
+            self._apply_tuning()
+            return False, False, time.monotonic() - hold_started_at
+        return hold_result
 
     def _box_template_names(self) -> list[str]:
         return [box_name for box_name in ("box1", "box2", "box3", "box4") if box_name in self.templates]
@@ -1577,13 +1652,17 @@ class EatventureBot:
             logger.error("Cannot start bot: %s", exc)
             self.running = False
             return False
+        if not self.mouse_controller.is_target_foreground():
+            logger.error("Cannot start bot because '%s' is not the foreground window", config.WINDOW_TITLE)
+            self.running = False
+            return False
         self._stop_requested.clear()
         self.running = True
         if self.current_level_start_time is None:
-            self.current_level_start_time = datetime.now()
+            self.current_level_start_time = time.monotonic()
         self.historical_learner.start()
         if config.ShowForbiddenArea and self.overlay is None:
-            self.overlay = ForbiddenAreaOverlay(self.window_capture.hwnd, self.forbidden_zones)
+            self.overlay = ForbiddenAreaOverlay(self.window_capture.get_hwnd(), self.forbidden_zones)
             self.overlay.start()
         return True
 
@@ -1599,7 +1678,7 @@ class EatventureBot:
             self.overlay = None
 
     def step(self) -> bool:
-        if self._step_active.is_set():
+        if not self._state_operation_lock.acquire(blocking=False):
             logger.warning("Ignoring reentrant bot step")
             return False
         self._step_active.set()
@@ -1607,8 +1686,9 @@ class EatventureBot:
             if self._stop_requested.is_set():
                 self.stop()
                 return False
-            if not self.window_capture.is_window_active():
-                logger.error("Window '%s' is not available", config.WINDOW_TITLE)
+            self.window_capture.ensure_window(resize=True)
+            if not self.mouse_controller.is_target_foreground():
+                logger.error("Window '%s' lost foreground ownership; stopping bot", config.WINDOW_TITLE)
                 self.stop()
                 return False
             self._apply_tuning()
@@ -1632,6 +1712,7 @@ class EatventureBot:
             return False
         finally:
             self._step_active.clear()
+            self._state_operation_lock.release()
 
     def run(self) -> None:
         if not self.start():
@@ -1646,8 +1727,37 @@ class EatventureBot:
         finally:
             self.stop()
 
+    def _state_from_red_icon_scan(self, best_new_level_icon: RedIcon | None) -> State:
+        if best_new_level_icon is not None:
+            self.vision_optimizer.update_new_level_red_icon_confidence(best_new_level_icon[0])
+            logger.info(
+                "New level red icon detected at (%s, %s) [%.3f]",
+                best_new_level_icon[1],
+                best_new_level_icon[2],
+                best_new_level_icon[0],
+            )
+            self._new_level_red_icon_verified = False
+            return State.CHECK_NEW_LEVEL
+
+        self.vision_optimizer.update_new_level_red_icon_miss()
+        if not self.red_icons:
+            return State.OPEN_BOXES
+
+        filtered_icons = self._clickable_red_icons(self.red_icons)
+        if not filtered_icons:
+            logger.info("No valid red icons after forbidden-zone filtering")
+            return State.OPEN_BOXES
+
+        self.red_icons = sorted(filtered_icons, key=self._red_icon_priority_key)
+        self.current_red_icon_index = 0
+        self.cycle_counter = 0
+        self.work_done = True
+        logger.info("%s red icons ready to process", len(self.red_icons))
+        return State.CLICK_RED_ICON
+
     def handle_find_red_icons(self, current_state: State) -> StateResult:
-        self._click_idle()
+        if not self._click_idle():
+            return current_state
 
         self.work_done = False
 
@@ -1697,33 +1807,7 @@ class EatventureBot:
             )
             self.vision_optimizer.update_red_icon_scan(valid_red_icon_confidences)
 
-        if best_new_level_icon is not None:
-            self.vision_optimizer.update_new_level_red_icon_confidence(best_new_level_icon[0])
-            logger.info(
-                "New level red icon detected at (%s, %s) [%.3f]",
-                best_new_level_icon[1],
-                best_new_level_icon[2],
-                best_new_level_icon[0],
-            )
-            self._new_level_red_icon_verified = False
-            return State.CHECK_NEW_LEVEL
-        self.vision_optimizer.update_new_level_red_icon_miss()
-
-        if self.red_icons:
-            filtered_icons = self._clickable_red_icons(self.red_icons)
-
-            if not filtered_icons:
-                logger.info("No valid red icons after forbidden-zone filtering")
-                return State.OPEN_BOXES
-
-            self.red_icons = sorted(filtered_icons, key=self._red_icon_priority_key)
-            self.current_red_icon_index = 0
-            self.cycle_counter = 0
-            self.work_done = True
-            logger.info("%s red icons ready to process", len(self.red_icons))
-            return State.CLICK_RED_ICON
-
-        return State.OPEN_BOXES
+        return self._state_from_red_icon_scan(best_new_level_icon)
 
     def handle_click_red_icon(self, current_state: State) -> StateResult:
         if self.current_red_icon_index >= len(self.red_icons):
@@ -1802,9 +1886,8 @@ class EatventureBot:
                 self._apply_tuning()
                 return State.HOLD_UPGRADE_STATION
 
-            if attempt < max_attempts - 1:
-                if not self._sleep(self.tuner.search_interval):
-                    return State.OPEN_BOXES
+            if attempt < max_attempts - 1 and not self._sleep(self.tuner.search_interval):
+                return State.OPEN_BOXES
 
         self.vision_optimizer.update_upgrade_station_miss()
         self.tuner.record_search_result(False)
@@ -1812,6 +1895,53 @@ class EatventureBot:
         self.consecutive_failed_cycles += 1
         logger.info("Upgrade station not found, returning to OPEN_BOXES")
         return State.OPEN_BOXES
+
+    def _verify_upgrade_station_hold_target(
+        self,
+        x: int,
+        y: int,
+    ) -> tuple[RedIcon, float, float] | None:
+        logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
+        clicked = self.mouse_controller.precise_click(x, y, relative=True)
+        self.tuner.record_click_result(clicked)
+        self._apply_tuning()
+        if not clicked:
+            logger.warning("Upgrade station verification click failed at (%s, %s)", x, y)
+            return None
+
+        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
+            return None
+
+        base_threshold = self._upgrade_station_threshold()
+        relaxed_threshold = max(0.0, base_threshold - 0.05)
+        verified_match, verification_completed = self._find_verified_upgrade_station_match(
+            base_threshold,
+            relaxed_threshold,
+        )
+        if not verification_completed:
+            return None
+
+        if verified_match is None:
+            logger.info("Upgrade station disappeared after verification click; continuing main flow")
+            self.upgrade_station_pos = None
+            self.upgrade_found_in_cycle = False
+            self.vision_optimizer.update_upgrade_station_miss()
+            self.tuner.record_search_result(False)
+            self._apply_tuning()
+            return None
+
+        confidence, verified_x, verified_y = verified_match
+        self.upgrade_station_pos = (verified_x, verified_y)
+        self.vision_optimizer.update_upgrade_station_confidence(confidence)
+        self.tuner.record_search_result(True)
+        self._apply_tuning()
+        logger.info(
+            "Upgrade station verified active at (%s, %s) [%.3f]",
+            verified_x,
+            verified_y,
+            confidence,
+        )
+        return verified_match, base_threshold, relaxed_threshold
 
     def handle_hold_upgrade_station(self, current_state: State) -> StateResult:
         if not self.upgrade_station_pos:
@@ -1822,46 +1952,18 @@ class EatventureBot:
             logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", x, y)
             return State.OPEN_BOXES
 
-        logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
-        clicked = self.mouse_controller.precise_click(x, y, relative=True)
-        self.tuner.record_click_result(clicked)
-        self._apply_tuning()
-        if not clicked:
-            logger.warning("Upgrade station verification click failed at (%s, %s)", x, y)
+        verified_target = self._verify_upgrade_station_hold_target(x, y)
+        if verified_target is None:
             return State.OPEN_BOXES
-
-        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
-            return State.OPEN_BOXES
-
-        base_threshold = self._upgrade_station_threshold()
-        relaxed_threshold = max(0.0, base_threshold - 0.05)
-        verified_match, verification_completed = self._find_verified_upgrade_station_match(
-            base_threshold,
-            relaxed_threshold,
-        )
-        if not verification_completed:
-            return State.OPEN_BOXES
-
-        if verified_match is None:
-            logger.info("Upgrade station disappeared after verification click; continuing main flow")
-            self.upgrade_station_pos = None
-            self.upgrade_found_in_cycle = False
-            self.vision_optimizer.update_upgrade_station_miss()
-            self.tuner.record_search_result(False)
-            self._apply_tuning()
-            return State.OPEN_BOXES
-
-        confidence, x, y = verified_match
-        self.upgrade_station_pos = (x, y)
-        self.vision_optimizer.update_upgrade_station_confidence(confidence)
-        self.tuner.record_search_result(True)
-        self._apply_tuning()
-        logger.info("Upgrade station verified active at (%s, %s) [%.3f]", x, y, confidence)
+        (_, x, y), base_threshold, relaxed_threshold = verified_target
         if self.current_red_icon_index < len(self.red_icons):
             _, _, red_y = self.red_icons[self.current_red_icon_index]
             self._remember_successful_red_icon_position(red_y)
 
-        hold_check_interval = max(0.05, min(0.20, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)))
+        hold_check_interval = max(
+            config.UPGRADE_HOLD_CHECK_INTERVAL_MIN,
+            min(config.UPGRADE_HOLD_CHECK_INTERVAL_MAX, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)),
+        )
         hold_max_duration = self._hold_max_duration()
         screen_position = self._position_cursor_for_upgrade_hold(x, y)
         if screen_position is None:
@@ -1884,8 +1986,10 @@ class EatventureBot:
             logger.info("Upgrade station no longer detected after %.2fs hold", hold_elapsed)
         self.upgrade_station_pos = None
 
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
-        self._sleep(config.STATE_DELAY)
+        if not self._click_idle():
+            return State.OPEN_BOXES
+        if not self._sleep(config.STATE_DELAY):
+            return State.OPEN_BOXES
         self.upgrade_station_counter += 1
         if self.upgrade_station_counter >= 2:
             self.upgrade_station_counter = 0
@@ -1895,7 +1999,8 @@ class EatventureBot:
         return State.OPEN_BOXES
 
     def handle_upgrade_stats(self, current_state: State) -> StateResult:
-        self._click_idle()
+        if not self._click_idle():
+            return State.OPEN_BOXES
 
         screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
         limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
@@ -1932,7 +2037,8 @@ class EatventureBot:
         if not opened:
             return State.OPEN_BOXES
 
-        self._sleep(config.STATE_DELAY)
+        if not self._sleep(config.STATE_DELAY):
+            return State.OPEN_BOXES
         clicked = self.mouse_controller.spam_click_at(
             config.STATS_UPGRADE_POS[0],
             config.STATS_UPGRADE_POS[1],
@@ -1947,12 +2053,14 @@ class EatventureBot:
             logger.warning("Stats upgrade spam-click failed at %s", config.STATS_UPGRADE_POS)
             return State.OPEN_BOXES
 
-        self.mouse_controller.click(config.IDLE_CLICK_POS[0], config.IDLE_CLICK_POS[1], relative=True)
+        if not self._click_idle():
+            return State.OPEN_BOXES
         logger.info("Stats upgrade completed")
         return State.OPEN_BOXES
 
     def handle_open_boxes(self, current_state: State) -> StateResult:
-        self._click_idle()
+        if not self._click_idle():
+            return current_state
 
         limited_screenshot = self.window_capture.capture(
             max_y=getattr(config, "BOX_SEARCH_Y", config.MAX_SEARCH_Y)
@@ -1991,8 +2099,10 @@ class EatventureBot:
         return self._next_state_after_box_cycle()
 
     def handle_scroll(self, current_state: State) -> StateResult:
-        self._click_idle()
-        self._perform_oscillating_scroll_step()
+        if not self._click_idle():
+            return current_state
+        if not self._perform_oscillating_scroll_step():
+            return current_state
         self.cycle_counter = 0
         return State.FIND_RED_ICONS
 
@@ -2000,7 +2110,8 @@ class EatventureBot:
         if not self._click_idle():
             logger.warning("Failed to clear focus before confirming the new level")
             return State.CHECK_NEW_LEVEL
-        self._sleep(0.05)
+        if not self._sleep(config.FOCUS_SETTLE_DELAY):
+            return State.CHECK_NEW_LEVEL
         if not self._new_level_red_icon_verified:
             if not self._perform_single_down_scroll():
                 logger.warning("Failed to perform verification scroll for new level red icon")
@@ -2031,7 +2142,8 @@ class EatventureBot:
         if not opened:
             logger.warning("Failed to click the new level button at %s", config.NEW_LEVEL_BUTTON_POS)
             return State.CHECK_NEW_LEVEL
-        self._sleep(0.30)
+        if not self._sleep(config.NEW_LEVEL_CONFIRMATION_DELAY):
+            return State.CHECK_NEW_LEVEL
         advanced = self.mouse_controller.click(
             config.LEVEL_TRANSITION_POS[0],
             config.LEVEL_TRANSITION_POS[1],
@@ -2040,20 +2152,16 @@ class EatventureBot:
         if not advanced:
             logger.warning("Failed to click the level transition button at %s", config.LEVEL_TRANSITION_POS)
             return State.CHECK_NEW_LEVEL
-        if not self._sleep(0.20):
-            return State.OPEN_BOXES
-        elapsed = self._record_level_completion()
-        logger.info(
-            "Level %s completed via verified red-icon path. Time spent: %.1fs",
-            self.total_levels_completed,
-            elapsed,
-        )
+        if not self._sleep(config.LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY):
+            return State.WAIT_FOR_UNLOCK
+        logger.info("Verified red-icon level transition submitted; awaiting unlock confirmation")
         return State.WAIT_FOR_UNLOCK
 
     def handle_transition_level(self, current_state: State) -> StateResult:
-        self._click_idle()
+        if not self._click_idle():
+            return State.TRANSITION_LEVEL
 
-        max_attempts = 5
+        max_attempts = max(1, int(config.NEW_LEVEL_SEARCH_ATTEMPTS))
         for attempt in range(max_attempts):
             limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
 
@@ -2065,17 +2173,12 @@ class EatventureBot:
                 if not clicked:
                     logger.warning("New level button click failed at (%s, %s)", x, y)
                     return State.CHECK_NEW_LEVEL
-                self._sleep(1.0)
-                elapsed = self._record_level_completion()
-                logger.info(
-                    "Level %s completed. Time spent: %.1fs",
-                    self.total_levels_completed,
-                    elapsed,
-                )
+                if self._sleep(config.LEVEL_TRANSITION_SETTLE_DELAY):
+                    logger.info("New-level transition submitted; awaiting unlock confirmation")
                 return State.WAIT_FOR_UNLOCK
 
-            if attempt < max_attempts - 1:
-                self._sleep(0.20)
+            if attempt < max_attempts - 1 and not self._sleep(config.NEW_LEVEL_SEARCH_INTERVAL):
+                return State.TRANSITION_LEVEL
 
         self.vision_optimizer.update_new_level_miss()
         logger.warning("New level button not found after %s attempts", max_attempts)
@@ -2086,7 +2189,8 @@ class EatventureBot:
         if not self._click_idle():
             logger.warning("Failed to clear focus while waiting for the next unlock")
             return State.WAIT_FOR_UNLOCK
-        self._sleep(0.05)
+        if not self._sleep(config.FOCUS_SETTLE_DELAY):
+            return State.WAIT_FOR_UNLOCK
 
         self.wait_for_unlock_attempts += 1
         if self.wait_for_unlock_attempts > self.max_wait_for_unlock_attempts:
@@ -2101,7 +2205,8 @@ class EatventureBot:
         screenshot = self.window_capture.capture()
         template_pair = self._template("unlock")
         if template_pair is None:
-            self._sleep(0.30)
+            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
+                return State.WAIT_FOR_UNLOCK
             return State.WAIT_FOR_UNLOCK
 
         template, mask = template_pair
@@ -2113,19 +2218,26 @@ class EatventureBot:
             template_name="unlock",
         )
         if not found:
-            self._sleep(0.30)
+            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
+                return State.WAIT_FOR_UNLOCK
             return State.WAIT_FOR_UNLOCK
 
         logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
         if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
             logger.warning("Unlock button found in forbidden zone at (%s, %s)", x, y)
-            self._sleep(0.30)
+            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
+                return State.WAIT_FOR_UNLOCK
             return State.WAIT_FOR_UNLOCK
         if not self.mouse_controller.click(x, y, relative=True):
             logger.warning("Unlock button click failed at (%s, %s)", x, y)
             return State.WAIT_FOR_UNLOCK
 
-        self._sleep(0.50)
-        self.wait_for_unlock_attempts = 0
-        self._reset_search_cycle()
+        elapsed = self._record_level_completion()
+        logger.info(
+            "Level %s confirmed by unlock. Time spent: %.1fs",
+            self.total_levels_completed,
+            elapsed,
+        )
+        if not self._sleep(config.UNLOCK_SETTLE_DELAY):
+            return State.FIND_RED_ICONS
         return State.FIND_RED_ICONS
