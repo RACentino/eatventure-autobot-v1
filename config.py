@@ -82,7 +82,7 @@ SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.160
 MATCH_THRESHOLD = 0.98
 
 # Confidence threshold for regular red-icon detection.
-RED_ICON_THRESHOLD = 0.920
+RED_ICON_THRESHOLD = 0.931
 
 # Confidence threshold for the footer red icon that indicates a new level.
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.942
@@ -154,10 +154,10 @@ UPGRADE_STATION_HSV_MIN_MATCH_RATIO = 0.50
 RED_ICON_MIN_MATCHES = 3
 
 # Enables fast red-icon detection using the configured fast template set.
-RED_ICON_FAST_MODE_ENABLED = False
+RED_ICON_FAST_MODE_ENABLED = True
 
 # Red-icon template names used when fast detection is enabled.
-RED_ICON_FAST_TEMPLATE_NAMES = ("RedIcon6",)
+RED_ICON_FAST_TEMPLATE_NAMES = ("RedIcon5",)
 
 # Minimum pixel spacing between fast-mode red-icon candidates.
 RED_ICON_FAST_MIN_DISTANCE = 30
