@@ -31,7 +31,7 @@ WINDOW_HEIGHT = 780
 DEBUG = False
 
 # Shows the forbidden-area overlay when the bot starts.
-ShowForbiddenArea = False
+ShowForbiddenArea = True
 
 
 # --- Supervision non-max suppression ---
