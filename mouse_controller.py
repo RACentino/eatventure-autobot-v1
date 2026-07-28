@@ -209,7 +209,7 @@ class MouseController:
     @staticmethod
     def _cursor_matches_position(screen_x: int, screen_y: int) -> tuple[bool, int, int]:
         current_x, current_y = win32api.GetCursorPos()
-        matches = abs(int(current_x) - screen_x) <= 1 and abs(int(current_y) - screen_y) <= 1
+        matches = int(current_x) == screen_x and int(current_y) == screen_y
         return matches, current_x, current_y
 
     def _sleep_before_input_retry(self, attempt: int) -> None:
@@ -446,6 +446,14 @@ class MouseController:
     ) -> bool:
         if self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
             logger.warning("Rejected click in forbidden zone at (%s, %s)", screen_x, screen_y)
+            return False
+        try:
+            current_x, current_y = win32api.GetCursorPos()
+        except pywintypes.error as exc:
+            logger.error("Cannot verify cursor position before click: %s", exc)
+            return False
+        if self.is_in_forbidden_zone(current_x, current_y, relative=False):
+            logger.warning("Rejected click at forbidden cursor position (%s, %s)", current_x, current_y)
             return False
         if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
             self._best_effort_left_up(screen_x, screen_y)
