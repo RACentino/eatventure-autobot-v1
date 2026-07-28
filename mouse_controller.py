@@ -219,6 +219,9 @@ class MouseController:
     def _set_cursor_pos(self, x: Any, y: Any) -> bool:
         screen_x = int(x)
         screen_y = int(y)
+        if self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
+            logger.warning("Rejected cursor move into forbidden zone at (%s, %s)", screen_x, screen_y)
+            return False
         last_exc = None
         for attempt in range(1, self.input_retry_count + 1):
             if not self._input_allowed():
@@ -441,6 +444,9 @@ class MouseController:
         duration: Any = None,
         interrupt_check: Callable[[], bool] | None = None,
     ) -> bool:
+        if self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
+            logger.warning("Rejected click in forbidden zone at (%s, %s)", screen_x, screen_y)
+            return False
         if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
             self._best_effort_left_up(screen_x, screen_y)
             return False
