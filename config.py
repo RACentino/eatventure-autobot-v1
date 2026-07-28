@@ -172,28 +172,28 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.075
+CLICK_DELAY = 0.0
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.0375
+MOUSE_MOVE_DELAY = 0.1
 
 # Duration to hold the left mouse button down for normal clicks.
-MOUSE_DOWN_DURATION = 0.150
+MOUSE_DOWN_DURATION = 0.1
 
 # Delay after releasing the left mouse button for normal clicks.
-MOUSE_UP_DURATION = 0.050
+MOUSE_UP_DURATION = 0.1
 
 # Enables a short hover delay before click input.
-HOVER_ENABLED = True
+HOVER_ENABLED = False
 
 # Hover delay used before click input when hover is enabled.
-HOVER_DURATION = 0.075
+HOVER_DURATION = 0.0
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.4
+UPGRADE_SEARCH_INTERVAL = 0.075
 
 # General state-settle delay after selected UI actions.
-STATE_DELAY = 0.4
+STATE_DELAY = 0.0
 
 # Delay used after clearing focus before screen confirmation.
 FOCUS_SETTLE_DELAY = 0.05
@@ -205,17 +205,17 @@ UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.75
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.025
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 9.5
 
 # Lower and upper bounds for upgrade-station hold monitoring.
-UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.05
-UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.20
+UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.025
+UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.2
 
 # Duration for generic spam-click loops.
-SPAM_CLICK_DURATION = 1.60
+SPAM_CLICK_DURATION = 1.75
 
 # Delay between clicks in generic spam-click loops.
 SPAM_CLICK_DELAY = 0.016
