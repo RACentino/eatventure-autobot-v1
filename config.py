@@ -589,7 +589,7 @@ FORBIDDEN_CLICK_Y_MIN = 668
 FORBIDDEN_ZONE_1_X_MIN = 290
 
 # Right boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_X_MAX = 270
+FORBIDDEN_ZONE_1_X_MAX = 350
 
 # Top boundary for forbidden zone 1.
 FORBIDDEN_ZONE_1_Y_MIN = 93
