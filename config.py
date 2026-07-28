@@ -172,16 +172,16 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.0
+CLICK_DELAY = 0.017
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.1
+MOUSE_MOVE_DELAY = 0.017
 
 # Duration to hold the left mouse button down for normal clicks.
-MOUSE_DOWN_DURATION = 0.1
+MOUSE_DOWN_DURATION = 0.117
 
 # Delay after releasing the left mouse button for normal clicks.
-MOUSE_UP_DURATION = 0.1
+MOUSE_UP_DURATION = 0.117
 
 # Enables a short hover delay before click input.
 HOVER_ENABLED = False
@@ -190,7 +190,7 @@ HOVER_ENABLED = False
 HOVER_DURATION = 0.0
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.075
+UPGRADE_SEARCH_INTERVAL = 0.100
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.0
@@ -199,13 +199,13 @@ STATE_DELAY = 0.0
 FOCUS_SETTLE_DELAY = 0.05
 
 # Delay after the upgrade-station verification click before rescanning.
-UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
+UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.134
 
 # Number of upgrade-station verification searches before holding.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.025
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.067
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 9.5
@@ -385,40 +385,40 @@ ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD = 0.90
 ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD = 0.985
 
 # Amount added to click delay after low click success.
-ADAPTIVE_TUNER_CLICK_DELAY_STEP = 0.010
+ADAPTIVE_TUNER_CLICK_DELAY_STEP = 0.008
 
 # Amount added to move delay after low click success.
-ADAPTIVE_TUNER_MOVE_DELAY_STEP = 0.0030
+ADAPTIVE_TUNER_MOVE_DELAY_STEP = 0.004
 
 # Amount removed from click delay after high click success.
 ADAPTIVE_TUNER_CLICK_DECREMENT = 0.0040
 
 # Amount removed from move delay after high click success.
-ADAPTIVE_TUNER_MOVE_DECREMENT = 0.0010
+ADAPTIVE_TUNER_MOVE_DECREMENT = 0.002
 
 # Amount added to search interval after low search success.
-ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.030
+ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.025
 
 # Amount removed from search interval after high search success.
 ADAPTIVE_TUNER_SEARCH_DECREMENT = 0.0100
 
 # Lowest click delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.130
+ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.008
 
 # Highest click delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.220
+ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.080
 
 # Lowest move delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.015
+ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.008
 
 # Highest move delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.040
+ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.050
 
 # Lowest upgrade search interval the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.200
+ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.075
 
 # Highest upgrade search interval the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.360
+ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.250
 
 
 # --- AI vision optimizer ---
@@ -556,22 +556,22 @@ AI_LEARNING_MIN_IMPROVEMENT_RATIO = 0.05
 AI_LEARNING_APPLY_COOLDOWN = 45.0
 
 # Minimum learned click delay allowed.
-AI_LEARNING_MIN_CLICK_DELAY = 0.130
+AI_LEARNING_MIN_CLICK_DELAY = 0.008
 
 # Maximum learned click delay allowed.
-AI_LEARNING_MAX_CLICK_DELAY = 0.220
+AI_LEARNING_MAX_CLICK_DELAY = 0.080
 
 # Minimum learned mouse move delay allowed.
-AI_LEARNING_MIN_MOVE_DELAY = 0.015
+AI_LEARNING_MIN_MOVE_DELAY = 0.008
 
 # Maximum learned mouse move delay allowed.
-AI_LEARNING_MAX_MOVE_DELAY = 0.040
+AI_LEARNING_MAX_MOVE_DELAY = 0.050
 
 # Minimum learned upgrade search interval allowed.
-AI_LEARNING_MIN_SEARCH_INTERVAL = 0.200
+AI_LEARNING_MIN_SEARCH_INTERVAL = 0.075
 
 # Maximum learned upgrade search interval allowed.
-AI_LEARNING_MAX_SEARCH_INTERVAL = 0.360
+AI_LEARNING_MAX_SEARCH_INTERVAL = 0.250
 
 
 # --- Forbidden click zones ---
