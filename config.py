@@ -28,7 +28,7 @@ WINDOW_WIDTH = 360
 WINDOW_HEIGHT = 780
 
 # Enables DEBUG logging when True and INFO logging when False.
-DEBUG = False
+DEBUG = True
 
 # Shows the forbidden-area overlay when the bot starts.
 ShowForbiddenArea = False
