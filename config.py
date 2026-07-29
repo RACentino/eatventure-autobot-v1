@@ -323,7 +323,7 @@ MAX_SCROLL_CYCLES = 1
 SCROLL_INCREMENT_STEP = 5 
 
 # Maximum consecutive no-work box cycles before the bot scrolls to a new area.
-MAX_IDLE_PASS_ATTEMPTS = 2
+MAX_IDLE_PASS_ATTEMPTS = 1
 
 # Pause between repeated scroll attempts.
 SCROLL_INTERVAL_PAUSE = 0.1
