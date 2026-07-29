@@ -172,10 +172,10 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.017
+CLICK_DELAY = 0.1
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.017
+MOUSE_MOVE_DELAY = 0.0
 
 # Duration to hold the left mouse button down for normal clicks.
 MOUSE_DOWN_DURATION = 0.117
