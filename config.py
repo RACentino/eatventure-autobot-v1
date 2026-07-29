@@ -637,7 +637,7 @@ FORBIDDEN_ZONE_4_Y_MAX = 110
 FORBIDDEN_ZONE_5_X_MIN = 55
 
 # Right boundary for forbidden zone 5.
-FORBIDDEN_ZONE_5_X_MAX = 260
+FORBIDDEN_ZONE_5_X_MAX = 285
 
 # Top boundary for forbidden zone 5.
 FORBIDDEN_ZONE_5_Y_MIN = 660
