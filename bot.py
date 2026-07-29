@@ -1629,9 +1629,14 @@ class EatventureBot:
             logger.info("Work completed in current area, rescanning before scrolling")
             return State.FIND_RED_ICONS
 
+        max_idle_pass_attempts = max(1, int(config.MAX_IDLE_PASS_ATTEMPTS))
         self.cycle_counter += 1
-        logger.info("No work detected in current area (idle pass %s/2)", self.cycle_counter)
-        if self.cycle_counter >= 2:
+        logger.info(
+            "No work detected in current area (idle pass %s/%s)",
+            self.cycle_counter,
+            max_idle_pass_attempts,
+        )
+        if self.cycle_counter >= max_idle_pass_attempts:
             self.cycle_counter = 0
             return State.SCROLL
 
