@@ -204,14 +204,11 @@ FOCUS_SETTLE_DELAY = 0.032
 # Delay before visually confirming an upgrade-station candidate.
 UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.112
 
-# Number of position-consistent upgrade-station observations required before holding.
+# Maximum fresh-screen searches allowed while locating the upgrade station for verification.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 4
 
 # Delay between upgrade-station verification searches.
 UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.048
-
-# Maximum coordinate drift allowed between upgrade-station verification frames.
-UPGRADE_STATION_VERIFY_POSITION_TOLERANCE = 15
 
 # Consecutive missed upgrade-station frames required before releasing a hold.
 UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 1
