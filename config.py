@@ -75,6 +75,9 @@ SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.120
 # Delay before retrying an upgrade-station scan after an empty frame.
 SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.160
 
+# Minimum wait after a state-changing input before trusting the next scrcpy frame.
+SCRCPY_ACTION_SETTLE_DELAY = 0.500
+
 
 # --- Template matching thresholds ---
 
@@ -198,21 +201,30 @@ STATE_DELAY = 0.0
 # Delay used after clearing focus before screen confirmation.
 FOCUS_SETTLE_DELAY = 0.050
 
-# Delay after the upgrade-station verification click before rescanning.
+# Delay before visually confirming an upgrade-station candidate.
 UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.150
 
-# Number of upgrade-station verification searches before holding.
+# Number of position-consistent upgrade-station observations required before holding.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
 
 # Delay between upgrade-station verification searches.
 UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.75
 
+# Maximum coordinate drift allowed between upgrade-station verification frames.
+UPGRADE_STATION_VERIFY_POSITION_TOLERANCE = 15
+
+# Consecutive missed upgrade-station frames required before releasing a hold.
+UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 2
+
 # Maximum duration for holding an upgrade station before releasing.
-CLICK_HOLD_MAX_DURATION = 0.0
+CLICK_HOLD_MAX_DURATION = 9.5
 
 # Lower and upper bounds for upgrade-station hold monitoring.
 UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.025
 UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.200
+
+# Absolute cap for the upgrade-station hold monitor.
+UPGRADE_HOLD_MAX_CHECKS = 400
 
 # Duration for generic spam-click loops.
 SPAM_CLICK_DURATION = 1.750

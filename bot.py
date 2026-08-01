@@ -1410,15 +1410,27 @@ class EatventureBot:
         base_threshold: float,
         relaxed_threshold: float,
     ) -> tuple[RedIcon | None, bool]:
-        verify_attempts = max(1, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
+        verify_attempts = max(2, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
+        previous_match: RedIcon | None = None
         for attempt in range(verify_attempts):
             current_threshold = base_threshold if attempt == 0 else relaxed_threshold
             verified_match = self._find_upgrade_station_match(current_threshold)
-            if verified_match is not None:
+            if verified_match is None:
+                previous_match = None
+            elif previous_match is not None and self._upgrade_station_matches(previous_match, verified_match):
                 return verified_match, True
+            else:
+                previous_match = verified_match
             if attempt < verify_attempts - 1 and not self._sleep(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL):
                 return None, False
         return None, True
+
+    @staticmethod
+    def _upgrade_station_matches(first_match: RedIcon, second_match: RedIcon) -> bool:
+        _, first_x, first_y = first_match
+        _, second_x, second_y = second_match
+        tolerance = int(config.UPGRADE_STATION_VERIFY_POSITION_TOLERANCE)
+        return abs(first_x - second_x) <= tolerance and abs(first_y - second_y) <= tolerance
 
     @staticmethod
     def _hold_max_duration() -> float:
@@ -1489,7 +1501,10 @@ class EatventureBot:
         hold_max_duration: float,
         hold_started_at: float,
     ) -> tuple[bool, bool, float]:
-        while True:
+        maximum_checks = max(1, int(config.UPGRADE_HOLD_MAX_CHECKS))
+        disappearance_confirmations = max(1, int(config.UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT))
+        consecutive_misses = 0
+        for _ in range(maximum_checks):
             hold_elapsed = time.monotonic() - hold_started_at
             if self._stop_requested.is_set():
                 logger.warning("Upgrade station hold interrupted after %.2fs", hold_elapsed)
@@ -1506,7 +1521,12 @@ class EatventureBot:
 
             current_match = self._find_current_upgrade_hold_match(base_threshold, relaxed_threshold)
             if current_match is None:
-                return True, False, time.monotonic() - hold_started_at
+                consecutive_misses += 1
+                if consecutive_misses >= disappearance_confirmations:
+                    return True, False, time.monotonic() - hold_started_at
+                continue
+
+            consecutive_misses = 0
 
             confidence, x, y = current_match
             self.upgrade_station_pos = (x, y)
@@ -1516,6 +1536,9 @@ class EatventureBot:
             if next_position is None:
                 return False, False, time.monotonic() - hold_started_at
             screen_position_holder[0] = next_position
+
+        logger.warning("Upgrade station hold safety limit of %s checks reached", maximum_checks)
+        return True, True, time.monotonic() - hold_started_at
 
     def _hold_upgrade_station_until_complete(
         self,
@@ -1844,6 +1867,9 @@ class EatventureBot:
         return State.CHECK_UNLOCK
 
     def handle_check_unlock(self, current_state: State) -> StateResult:
+        if not self._sleep(config.SCRCPY_ACTION_SETTLE_DELAY):
+            return current_state
+
         limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
 
         template_pair = self._template("unlock")
@@ -1866,6 +1892,8 @@ class EatventureBot:
             logger.warning("Unlock click failed at (%s, %s)", x, y)
             return State.CHECK_UNLOCK
 
+        if not self._sleep(config.SCRCPY_ACTION_SETTLE_DELAY):
+            return State.CHECK_UNLOCK
         return State.SEARCH_UPGRADE_STATION
 
     def handle_search_upgrade_station(self, current_state: State) -> StateResult:
@@ -1906,14 +1934,7 @@ class EatventureBot:
         x: int,
         y: int,
     ) -> tuple[RedIcon, float, float] | None:
-        logger.info("Single-clicking upgrade station before verification at (%s, %s)", x, y)
-        clicked = self.mouse_controller.precise_click(x, y, relative=True)
-        self.tuner.record_click_result(clicked)
-        self._apply_tuning()
-        if not clicked:
-            logger.warning("Upgrade station verification click failed at (%s, %s)", x, y)
-            return None
-
+        logger.info("Visually verifying upgrade station at (%s, %s) before holding", x, y)
         if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
             return None
 
@@ -1927,7 +1948,7 @@ class EatventureBot:
             return None
 
         if verified_match is None:
-            logger.info("Upgrade station disappeared after verification click; continuing main flow")
+            logger.info("Upgrade station was not stable across visual verification; continuing main flow")
             self.upgrade_station_pos = None
             self.upgrade_found_in_cycle = False
             self.vision_optimizer.update_upgrade_station_miss()
