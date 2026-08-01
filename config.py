@@ -610,7 +610,7 @@ FORBIDDEN_ZONE_1_X_MAX = 350
 FORBIDDEN_ZONE_1_Y_MIN = 93
 
 # Bottom boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_Y_MAX = 270
+FORBIDDEN_ZONE_1_Y_MAX = 320
 
 # Left boundary for forbidden zone 2.
 FORBIDDEN_ZONE_2_X_MIN = 0
