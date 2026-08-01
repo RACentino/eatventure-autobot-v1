@@ -255,7 +255,32 @@ class MouseController:
         for attempt in range(1, self.input_retry_count + 1):
             if not releases_left_button and not self._input_allowed():
                 return False
+            if (
+                not releases_left_button
+                and self._resolve_screen_position(
+                    screen_x,
+                    screen_y,
+                    relative=False,
+                )
+                != (screen_x, screen_y)
+            ):
+                return False
             try:
+                cursor_matches = True
+                current_x = screen_x
+                current_y = screen_y
+                if not releases_left_button:
+                    cursor_matches, current_x, current_y = self._cursor_matches_position(
+                        screen_x,
+                        screen_y,
+                    )
+                if not cursor_matches:
+                    logger.warning(
+                        "Rejected mouse input because the cursor moved to (%s, %s)",
+                        current_x,
+                        current_y,
+                    )
+                    return False
                 win32api.mouse_event(event, screen_x, screen_y, 0, 0)
                 return True
             except pywintypes.error as exc:

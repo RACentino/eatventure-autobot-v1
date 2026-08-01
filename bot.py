@@ -128,16 +128,22 @@ class VisionPersistence:
 
     @staticmethod
     def _write_temp_state_file(state: dict[str, Any], target_dir: str) -> str:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=target_dir,
-            prefix=".state-",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-            return handle.name
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target_dir,
+                prefix=".state-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = handle.name
+                json.dump(state, handle, indent=2, sort_keys=True)
+        except BaseException:
+            VisionPersistence._remove_temp_file(temp_path)
+            raise
+        return temp_path
 
     def save(self, state: dict[str, Any], force: bool = False) -> bool:
         if not self.path:
