@@ -1288,25 +1288,6 @@ class EatventureBot:
             return False
         return self._click_idle()
 
-    def _perform_single_down_scroll(self) -> bool:
-        distance = round(float(config.SCROLL_PIXEL_STEP) * float(config.SCROLL_DISTANCE_RATIO))
-        start_x, start_y = config.SCROLL_START_POS
-        target_y = start_y - distance
-        logger.info("Verification scroll down before confirming new level red icon")
-        moved = self.mouse_controller.drag(
-            start_x,
-            start_y,
-            start_x,
-            target_y,
-            duration=config.SCROLL_DURATION,
-            relative=True,
-        )
-        if not moved:
-            return False
-        if not self._sleep(config.POST_SCROLL_SETTLE):
-            return False
-        return self._sleep(config.SCROLL_INTERVAL_PAUSE)
-
     def _upgrade_station_threshold(self) -> float:
         if self.vision_optimizer.enabled:
             return self.vision_optimizer.upgrade_station_threshold
@@ -1410,27 +1391,15 @@ class EatventureBot:
         base_threshold: float,
         relaxed_threshold: float,
     ) -> tuple[RedIcon | None, bool]:
-        verify_attempts = max(2, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
-        previous_match: RedIcon | None = None
+        verify_attempts = max(1, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
         for attempt in range(verify_attempts):
             current_threshold = base_threshold if attempt == 0 else relaxed_threshold
             verified_match = self._find_upgrade_station_match(current_threshold)
-            if verified_match is None:
-                previous_match = None
-            elif previous_match is not None and self._upgrade_station_matches(previous_match, verified_match):
+            if verified_match is not None:
                 return verified_match, True
-            else:
-                previous_match = verified_match
             if attempt < verify_attempts - 1 and not self._sleep(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL):
                 return None, False
         return None, True
-
-    @staticmethod
-    def _upgrade_station_matches(first_match: RedIcon, second_match: RedIcon) -> bool:
-        _, first_x, first_y = first_match
-        _, second_x, second_y = second_match
-        tolerance = int(config.UPGRADE_STATION_VERIFY_POSITION_TOLERANCE)
-        return abs(first_x - second_x) <= tolerance and abs(first_y - second_y) <= tolerance
 
     @staticmethod
     def _hold_max_duration() -> float:
@@ -1947,8 +1916,26 @@ class EatventureBot:
         if not verification_completed:
             return None
 
+        if verified_match is not None:
+            _, verified_x, verified_y = verified_match
+            logger.info("Single-clicking visually verified upgrade station at (%s, %s)", verified_x, verified_y)
+            clicked = self.mouse_controller.precise_click(verified_x, verified_y, relative=True)
+            self.tuner.record_click_result(clicked)
+            self._apply_tuning()
+            if not clicked:
+                logger.warning("Upgrade station verification click failed at (%s, %s)", verified_x, verified_y)
+                return None
+            if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
+                return None
+            verified_match, verification_completed = self._find_verified_upgrade_station_match(
+                base_threshold,
+                relaxed_threshold,
+            )
+            if not verification_completed:
+                return None
+
         if verified_match is None:
-            logger.info("Upgrade station was not stable across visual verification; continuing main flow")
+            logger.info("Upgrade station was not visible during visual verification; continuing main flow")
             self.upgrade_station_pos = None
             self.upgrade_found_in_cycle = False
             self.vision_optimizer.update_upgrade_station_miss()
@@ -2139,13 +2126,9 @@ class EatventureBot:
         if not self._sleep(config.FOCUS_SETTLE_DELAY):
             return State.CHECK_NEW_LEVEL
         if not self._new_level_red_icon_verified:
-            if not self._perform_single_down_scroll():
-                logger.warning("Failed to perform verification scroll for new level red icon")
-                return State.CHECK_NEW_LEVEL
-
             confirmed_icon = self._find_new_level_red_icon()
             if confirmed_icon is None:
-                logger.info("New level red icon disappeared after verification scroll; resuming main flow")
+                logger.info("New level red icon disappeared before visual confirmation; resuming main flow")
                 self._new_level_red_icon_verified = False
                 self.vision_optimizer.update_new_level_red_icon_miss()
                 self._reset_search_cycle()
@@ -2154,7 +2137,7 @@ class EatventureBot:
             self._new_level_red_icon_verified = True
             self.vision_optimizer.update_new_level_red_icon_confidence(confirmed_icon[0])
             logger.info(
-                "New level red icon confirmed after verification scroll at (%s, %s) [%.3f]",
+                "New level red icon confirmed at (%s, %s) [%.3f]",
                 confirmed_icon[1],
                 confirmed_icon[2],
                 confirmed_icon[0],
