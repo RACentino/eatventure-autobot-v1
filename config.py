@@ -205,16 +205,16 @@ FOCUS_SETTLE_DELAY = 0.032
 UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.112
 
 # Number of position-consistent upgrade-station observations required before holding.
-UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 2
+UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 4
 
 # Delay between upgrade-station verification searches.
 UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.048
 
 # Maximum coordinate drift allowed between upgrade-station verification frames.
-UPGRADE_STATION_VERIFY_POSITION_TOLERANCE = 6
+UPGRADE_STATION_VERIFY_POSITION_TOLERANCE = 15
 
 # Consecutive missed upgrade-station frames required before releasing a hold.
-UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 2
+UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 1
 
 # Maximum duration for holding an upgrade station before releasing.
 CLICK_HOLD_MAX_DURATION = 9.5
