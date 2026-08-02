@@ -22,6 +22,7 @@ Point = tuple[int, int]
 WindowBounds = tuple[int, int, int, int]
 RelativeScreenPosition = tuple[int, int, int, int, int, int]
 ForbiddenZone = tuple[str, int, int, int, int | None]
+DRAG_STEPS = 20
 
 
 def _disable_timer_resolution() -> None:
@@ -528,7 +529,15 @@ class MouseController:
     ) -> bool:
         with self._input_lock:
             pressed = self._left_down_at_screen(screen_x, screen_y, down_duration, interrupt_check)
-            return pressed and self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check)
+            if not pressed:
+                return False
+            released = False
+            try:
+                released = self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check)
+                return released
+            finally:
+                if not released:
+                    self._best_effort_left_up(screen_x, screen_y)
 
     def _wait_after_click(self, delay: Any = None) -> None:
         wait_time = self.click_delay if delay is None else delay
@@ -586,11 +595,16 @@ class MouseController:
                     continue
                 if not self._left_down_at_screen(screen_x, screen_y, down_duration):
                     continue
-                if not self._set_cursor_pos(screen_x, screen_y):
-                    self._best_effort_left_up(screen_x, screen_y)
-                    continue
-                if not self._left_up_at_screen(screen_x, screen_y, up_duration):
-                    continue
+                released = False
+                try:
+                    if not self._set_cursor_pos(screen_x, screen_y):
+                        continue
+                    released = self._left_up_at_screen(screen_x, screen_y, up_duration)
+                    if not released:
+                        continue
+                finally:
+                    if not released:
+                        self._best_effort_left_up(screen_x, screen_y)
 
                 logger.debug("Precise-clicked at (%s, %s)", screen_x, screen_y)
                 self._wait_after_click(delay)
@@ -633,11 +647,19 @@ class MouseController:
                 return False
             logger.debug("Holding at (%s, %s) for %.2fs", screen_x, screen_y, duration)
 
-            if not self._interruptible_delay(duration, interrupt_check):
-                self._left_up_at_screen(screen_x, screen_y)
-                return False
-
-            if not self._left_up_at_screen(screen_x, screen_y, interrupt_check=interrupt_check):
+            hold_completed = False
+            released = False
+            try:
+                hold_completed = self._interruptible_delay(duration, interrupt_check)
+                released = self._left_up_at_screen(
+                    screen_x,
+                    screen_y,
+                    interrupt_check=interrupt_check if hold_completed else None,
+                )
+            finally:
+                if not released:
+                    self._best_effort_left_up(screen_x, screen_y)
+            if not hold_completed or not released:
                 return False
             if self.click_delay > 0:
                 precise_sleep(self.click_delay)
@@ -819,6 +841,26 @@ class MouseController:
                 precise_sleep(self.click_delay)
             return True
 
+    def _move_drag_cursor(
+        self,
+        screen_from_x: int,
+        screen_from_y: int,
+        screen_to_x: int,
+        screen_to_y: int,
+        duration: float,
+    ) -> tuple[bool, int, int]:
+        start_time = time.perf_counter()
+        current_x = screen_from_x
+        current_y = screen_from_y
+        for index in range(DRAG_STEPS + 1):
+            position = index / DRAG_STEPS
+            current_x = int(screen_from_x + (screen_to_x - screen_from_x) * position)
+            current_y = int(screen_from_y + (screen_to_y - screen_from_y) * position)
+            if not self._set_cursor_pos(current_x, current_y):
+                return False, current_x, current_y
+            sleep_until(start_time + ((index + 1) * (duration / DRAG_STEPS)))
+        return True, current_x, current_y
+
     def drag(
         self,
         from_x: Any,
@@ -848,18 +890,24 @@ class MouseController:
             if not self._left_down_at_screen(screen_from_x, screen_from_y):
                 return False
 
-            steps = 20
-            start_time = time.perf_counter()
-            for index in range(steps + 1):
-                position = index / steps
-                current_x = int(screen_from_x + (screen_to_x - screen_from_x) * position)
-                current_y = int(screen_from_y + (screen_to_y - screen_from_y) * position)
-                if not self._set_cursor_pos(current_x, current_y):
-                    self._left_up_at_screen(current_x, current_y)
+            released = False
+            release_x = screen_from_x
+            release_y = screen_from_y
+            try:
+                moved, release_x, release_y = self._move_drag_cursor(
+                    screen_from_x,
+                    screen_from_y,
+                    screen_to_x,
+                    screen_to_y,
+                    duration,
+                )
+                if not moved:
                     return False
-                sleep_until(start_time + ((index + 1) * (duration / steps)))
-
-            if not self._left_up_at_screen(screen_to_x, screen_to_y):
+                released = self._left_up_at_screen(screen_to_x, screen_to_y)
+            finally:
+                if not released:
+                    self._best_effort_left_up(release_x, release_y)
+            if not released:
                 return False
             logger.debug("Dragged from (%s, %s) to (%s, %s)", from_x, from_y, to_x, to_y)
             if self.click_delay > 0:

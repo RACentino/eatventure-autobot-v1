@@ -392,8 +392,10 @@ class ForbiddenAreaOverlay:
     def _draw_zone_rectangles(self, device_context: Any, brush: Any) -> None:
         for x_min, x_max, y_min, y_max in self.forbidden_zones:
             old_brush = win32gui.SelectObject(device_context, brush)
-            win32gui.Rectangle(device_context, int(x_min), int(y_min), int(x_max), int(y_max))
-            win32gui.SelectObject(device_context, old_brush)
+            try:
+                win32gui.Rectangle(device_context, int(x_min), int(y_min), int(x_max), int(y_max))
+            finally:
+                win32gui.SelectObject(device_context, old_brush)
     
     def _draw_zones(self) -> None:
         if not self.overlay_hwnd:
@@ -409,18 +411,30 @@ class ForbiddenAreaOverlay:
             logger.error("Error drawing zones: %s", exc)
         finally:
             if red_brush is not None:
-                win32gui.DeleteObject(red_brush)
+                try:
+                    win32gui.DeleteObject(red_brush)
+                except pywintypes.error as exc:
+                    logger.debug("Could not release overlay brush: %s", exc)
             if hdc is not None:
-                win32gui.ReleaseDC(self.overlay_hwnd, hdc)
+                try:
+                    win32gui.ReleaseDC(self.overlay_hwnd, hdc)
+                except pywintypes.error as exc:
+                    logger.debug("Could not release overlay DC: %s", exc)
     
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         if msg == win32con.WM_PAINT:
             hdc, ps = win32gui.BeginPaint(hwnd)
-            
-            red_brush = win32gui.CreateSolidBrush(win32api.RGB(255, 0, 0))
-            self._draw_zone_rectangles(hdc, red_brush)
-            win32gui.DeleteObject(red_brush)
-            win32gui.EndPaint(hwnd, ps)
+            red_brush = None
+            try:
+                red_brush = win32gui.CreateSolidBrush(win32api.RGB(255, 0, 0))
+                self._draw_zone_rectangles(hdc, red_brush)
+            finally:
+                if red_brush is not None:
+                    try:
+                        win32gui.DeleteObject(red_brush)
+                    except pywintypes.error as exc:
+                        logger.debug("Could not release paint brush: %s", exc)
+                win32gui.EndPaint(hwnd, ps)
             return 0
         if msg == win32con.WM_DESTROY:
             win32gui.PostQuitMessage(0)

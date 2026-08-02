@@ -1486,6 +1486,7 @@ class EatventureBot:
                 return False, False, time.monotonic() - hold_started_at
             self.tuner.record_click_result(True)
             self._apply_tuning()
+            released = False
             try:
                 hold_result = self._monitor_upgrade_station_hold(
                     base_threshold,
@@ -1495,7 +1496,11 @@ class EatventureBot:
                     hold_started_at,
                 )
             finally:
-                released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
+                try:
+                    released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
+                finally:
+                    if not released:
+                        self.mouse_controller._best_effort_left_up(screen_x, screen_y)
                 if not released:
                     logger.critical("Upgrade station hold release could not be confirmed")
 

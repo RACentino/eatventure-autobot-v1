@@ -354,6 +354,54 @@ class ImageMatcher:
         except (TypeError, ValueError, OverflowError):
             return 0
 
+    def _find_scaled_template_candidates(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None,
+        scale: float,
+        threshold: float,
+        min_distance: int,
+        template_name: str,
+        hsv_ranges: list[HsvRange] | None,
+        hsv_match_threshold: float,
+    ) -> list[MatchCandidate]:
+        if not self._scaled_template_fits(screenshot, template, scale):
+            return []
+        try:
+            scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
+        except cv2.error as exc:
+            logger.warning("[%s] Template resize failed at scale %s: %s", template_name, scale, exc)
+            return []
+
+        result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
+        if result is None:
+            return []
+
+        matches = []
+        template_height, template_width = scaled_template.shape[:2]
+        for candidate_x, candidate_y in self._local_minima_candidates(
+            result,
+            1.0 - threshold,
+            min_distance,
+        ):
+            confidence = float(1.0 - result[candidate_y, candidate_x])
+            if not np.isfinite(confidence):
+                continue
+            if hsv_ranges is not None and not self._check_hsv_gate(
+                screenshot,
+                scaled_template,
+                (candidate_x, candidate_y),
+                scaled_mask,
+                hsv_ranges,
+                hsv_match_threshold,
+            ):
+                continue
+            center_x = candidate_x + template_width // 2
+            center_y = candidate_y + template_height // 2
+            matches.append((confidence, center_x, center_y, template_width, template_height))
+        return matches
+
     def find_template_candidates(
         self,
         screenshot: np.ndarray,
@@ -390,36 +438,19 @@ class ImageMatcher:
             scale = self._valid_scale(scale_value)
             if scale is None:
                 continue
-            if not self._scaled_template_fits(screenshot, template, scale):
-                continue
-            try:
-                scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
-            except cv2.error as exc:
-                logger.warning("[%s] Template resize failed at scale %s: %s", template_name, scale, exc)
-                continue
-
-            result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
-            if result is None:
-                continue
-
-            template_height, template_width = scaled_template.shape[:2]
-            candidates = self._local_minima_candidates(result, 1.0 - thresh, min_distance)
-            for candidate_x, candidate_y in candidates:
-                confidence = float(1.0 - result[candidate_y, candidate_x])
-                if not np.isfinite(confidence):
-                    continue
-                if normalized_hsv_ranges is not None and not self._check_hsv_gate(
+            all_matches.extend(
+                self._find_scaled_template_candidates(
                     screenshot,
-                    scaled_template,
-                    (candidate_x, candidate_y),
-                    scaled_mask,
+                    template,
+                    mask,
+                    scale,
+                    thresh,
+                    min_distance,
+                    template_name,
                     normalized_hsv_ranges,
                     normalized_hsv_threshold,
-                ):
-                    continue
-                center_x = candidate_x + template_width // 2
-                center_y = candidate_y + template_height // 2
-                all_matches.append((confidence, center_x, center_y, template_width, template_height))
+                )
+            )
 
         return sorted(all_matches, key=lambda match: match[0], reverse=True)
 
