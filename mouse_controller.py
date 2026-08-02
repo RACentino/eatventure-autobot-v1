@@ -526,9 +526,9 @@ class MouseController:
         up_duration: Any = None,
         interrupt_check: Callable[[], bool] | None = None,
     ) -> bool:
-        if not self._left_down_at_screen(screen_x, screen_y, down_duration, interrupt_check):
-            return False
-        return self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check)
+        with self._input_lock:
+            pressed = self._left_down_at_screen(screen_x, screen_y, down_duration, interrupt_check)
+            return pressed and self._left_up_at_screen(screen_x, screen_y, up_duration, interrupt_check)
 
     def _wait_after_click(self, delay: Any = None) -> None:
         wait_time = self.click_delay if delay is None else delay

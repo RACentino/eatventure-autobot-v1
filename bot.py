@@ -1474,36 +1474,36 @@ class EatventureBot:
             logger.error("Upgrade station hold rejected because its maximum duration is not positive")
             return False, True, 0.0
 
-        if not self.mouse_controller._left_down_at_screen(
-            screen_x,
-            screen_y,
-            interrupt_check=self._stop_requested.is_set,
-        ):
-            self.tuner.record_click_result(False)
+        with self.tuner._lock, self.mouse_controller._input_lock:
+            if not self.mouse_controller._left_down_at_screen(
+                screen_x,
+                screen_y,
+                interrupt_check=self._stop_requested.is_set,
+            ):
+                self.tuner.record_click_result(False)
+                self._apply_tuning()
+                logger.warning("Upgrade station hold press failed at (%s, %s)", screen_x, screen_y)
+                return False, False, time.monotonic() - hold_started_at
+            self.tuner.record_click_result(True)
             self._apply_tuning()
-            logger.warning("Upgrade station hold press failed at (%s, %s)", screen_x, screen_y)
-            return False, False, time.monotonic() - hold_started_at
+            try:
+                hold_result = self._monitor_upgrade_station_hold(
+                    base_threshold,
+                    relaxed_threshold,
+                    hold_check_interval,
+                    hold_max_duration,
+                    hold_started_at,
+                )
+            finally:
+                released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
+                if not released:
+                    logger.critical("Upgrade station hold release could not be confirmed")
 
-        self.tuner.record_click_result(True)
-        self._apply_tuning()
-        try:
-            hold_result = self._monitor_upgrade_station_hold(
-                base_threshold,
-                relaxed_threshold,
-                hold_check_interval,
-                hold_max_duration,
-                hold_started_at,
-            )
-        finally:
-            released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
             if not released:
-                logger.critical("Upgrade station hold release could not be confirmed")
-
-        if not released:
-            self.tuner.record_click_result(False)
-            self._apply_tuning()
-            return False, False, time.monotonic() - hold_started_at
-        return hold_result
+                self.tuner.record_click_result(False)
+                self._apply_tuning()
+                return False, False, time.monotonic() - hold_started_at
+            return hold_result
 
     def _box_template_names(self) -> list[str]:
         return [box_name for box_name in ("box1", "box2", "box3", "box4") if box_name in self.templates]
