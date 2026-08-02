@@ -27,10 +27,10 @@ class StateMachine:
         self._lock = threading.RLock()
         self.current_state: State = initial_state
         self.previous_state: State | None = None
-        self.state_handlers: dict[State, Callable[[State], State | None]] = {}
+        self.state_handlers: dict[State, Callable[[], State | None]] = {}
         logger.info("State machine initialized in state: %s", initial_state.name)
     
-    def register_handler(self, state: State, handler: Callable[[State], State | None]) -> None:
+    def register_handler(self, state: State, handler: Callable[[], State | None]) -> None:
         if not isinstance(state, State):
             raise TypeError(f"state must be a State, got {type(state).__name__}")
         if not callable(handler):
@@ -52,22 +52,23 @@ class StateMachine:
     
     def update(self) -> bool:
         with self._lock:
-            handler = self.state_handlers.get(self.current_state)
+            current_state = self.current_state
+            handler = self.state_handlers.get(current_state)
             if handler is None:
-                logger.warning("No handler registered for state: %s", self.current_state.name)
+                logger.warning("No handler registered for state: %s", current_state.name)
                 return False
 
-            next_state = handler(self.current_state)
-            if next_state is None:
-                return True
-            if not isinstance(next_state, State):
-                logger.error(
-                    "Handler for %s returned invalid state: %r",
-                    self.current_state.name,
-                    next_state,
-                )
-                return False
-            return self.transition(next_state)
+        next_state = handler()
+        if next_state is None:
+            return True
+        if not isinstance(next_state, State):
+            logger.error(
+                "Handler for %s returned invalid state: %r",
+                current_state.name,
+                next_state,
+            )
+            return False
+        return self.transition(next_state)
     
     def get_state(self) -> State:
         with self._lock:

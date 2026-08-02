@@ -34,33 +34,6 @@ DEBUG = False
 ShowForbiddenArea = False
 
 
-# --- Supervision non-max suppression ---
-
-# Enables the optional supervision-backed NMS layer globally.
-SUPERVISION_ENABLED = True
-
-# Enables supervision NMS for box candidates.
-SUPERVISION_BOX_NMS_ENABLED = True
-
-# Enables supervision NMS for red-icon candidates.
-SUPERVISION_RED_ICON_NMS_ENABLED = True
-
-# Enables supervision NMS for upgrade-station candidates.
-SUPERVISION_UPGRADE_STATION_NMS_ENABLED = True
-
-# Applies supervision NMS without separating candidates by class.
-SUPERVISION_CLASS_AGNOSTIC_NMS = True
-
-# IOU threshold used when supervision NMS merges box candidates.
-SUPERVISION_BOX_NMS_IOU_THRESHOLD = 0.25
-
-# IOU threshold used when supervision NMS merges red-icon candidates.
-SUPERVISION_RED_ICON_NMS_IOU_THRESHOLD = 0.20
-
-# IOU threshold used when supervision NMS merges upgrade-station candidates.
-SUPERVISION_UPGRADE_STATION_NMS_IOU_THRESHOLD = 0.20
-
-
 # --- SCRCPY frame recovery ---
 
 # Enables one delayed retry after likely scrcpy frame misses.
