@@ -1414,30 +1414,12 @@ class EatventureBot:
             return self._find_upgrade_station_match(relaxed_threshold)
         return None
 
-    def _reposition_held_upgrade_station(
-        self,
-        screen_position: tuple[int, int],
-        x: int,
-        y: int,
-    ) -> tuple[int, int] | None:
-        next_screen_pos = self.mouse_controller._resolve_screen_position(x, y, relative=True)
-        if next_screen_pos is None:
-            logger.warning("Upgrade station hold target became invalid at (%s, %s)", x, y)
-            return None
-        if next_screen_pos == screen_position:
-            return screen_position
-        if self.mouse_controller._set_cursor_pos(next_screen_pos[0], next_screen_pos[1]):
-            return next_screen_pos
-        logger.warning("Failed to reposition held cursor to (%s, %s)", x, y)
-        return None
-
     @staticmethod
     def _hold_duration_reached(hold_max_duration: float, hold_elapsed: float) -> bool:
         return hold_elapsed >= hold_max_duration
 
     def _monitor_upgrade_station_hold(
         self,
-        screen_position_holder: list[tuple[int, int]],
         base_threshold: float,
         relaxed_threshold: float,
         hold_check_interval: float,
@@ -1475,11 +1457,6 @@ class EatventureBot:
             self.upgrade_station_pos = (x, y)
             self.vision_optimizer.update_upgrade_station_confidence(confidence)
 
-            next_position = self._reposition_held_upgrade_station(screen_position_holder[0], x, y)
-            if next_position is None:
-                return False, False, time.monotonic() - hold_started_at
-            screen_position_holder[0] = next_position
-
         logger.warning("Upgrade station hold safety limit of %s checks reached", maximum_checks)
         return True, True, time.monotonic() - hold_started_at
 
@@ -1493,7 +1470,6 @@ class EatventureBot:
     ) -> tuple[bool, bool, float]:
         screen_x, screen_y = screen_position
         hold_started_at = time.monotonic()
-        screen_position_holder = [screen_position]
         if hold_max_duration <= 0.0:
             logger.error("Upgrade station hold rejected because its maximum duration is not positive")
             return False, True, 0.0
@@ -1512,7 +1488,6 @@ class EatventureBot:
         self._apply_tuning()
         try:
             hold_result = self._monitor_upgrade_station_hold(
-                screen_position_holder,
                 base_threshold,
                 relaxed_threshold,
                 hold_check_interval,
@@ -1520,8 +1495,7 @@ class EatventureBot:
                 hold_started_at,
             )
         finally:
-            release_x, release_y = screen_position_holder[0]
-            released = self.mouse_controller._left_up_at_screen(release_x, release_y)
+            released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
             if not released:
                 logger.critical("Upgrade station hold release could not be confirmed")
 
