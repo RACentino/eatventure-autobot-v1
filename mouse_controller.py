@@ -601,9 +601,10 @@ class MouseController:
             return False
 
     def double_click(self, x: Any, y: Any, relative: bool = True) -> bool:
-        if not self.click(x, y, relative=relative, delay=0.05):
-            return False
-        return self.click(x, y, relative=relative)
+        with self._input_lock:
+            if not self.click(x, y, relative=relative, delay=0.05):
+                return False
+            return self.click(x, y, relative=relative)
 
     def hold_at(
         self,

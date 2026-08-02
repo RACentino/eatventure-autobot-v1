@@ -268,26 +268,41 @@ class ForbiddenAreaOverlay:
         self.target_hwnd = target_hwnd
         self.forbidden_zones = forbidden_zones
         self.overlay_hwnd: int | None = None
+        self._running = threading.Event()
+        self._lifecycle_lock = threading.RLock()
         self.running = False
         self.thread: threading.Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._running.is_set()
+
+    @running.setter
+    def running(self, is_running: bool) -> None:
+        if is_running:
+            self._running.set()
+            return
+        self._running.clear()
         
     def start(self) -> None:
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._create_overlay, daemon=True)
-        self.thread.start()
-        logger.info("Forbidden area overlay started")
+        with self._lifecycle_lock:
+            if self.running:
+                return
+            self.running = True
+            self.thread = threading.Thread(target=self._create_overlay, daemon=True)
+            self.thread.start()
+            logger.info("Forbidden area overlay started")
     
     def stop(self) -> None:
-        self.running = False
-        if self.thread is not None and self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-        if self.thread is not None and self.thread.is_alive():
-            logger.warning("Forbidden area overlay thread did not stop within the timeout")
-        else:
-            self.thread = None
-        logger.info("Forbidden area overlay stopped")
+        with self._lifecycle_lock:
+            self.running = False
+            if self.thread is not None and self.thread.is_alive():
+                self.thread.join(timeout=1.0)
+            if self.thread is not None and self.thread.is_alive():
+                logger.warning("Forbidden area overlay thread did not stop within the timeout")
+            else:
+                self.thread = None
+            logger.info("Forbidden area overlay stopped")
 
     def _build_window_class(self) -> Any:
         overlay_class = win32gui.WNDCLASS()

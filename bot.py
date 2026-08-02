@@ -35,6 +35,7 @@ StateResult = State | None
 
 class AdaptiveTuner:
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self.enabled = bool(config.ADAPTIVE_TUNER_ENABLED)
         self.alpha = float(config.ADAPTIVE_TUNER_ALPHA)
         self.click_success_rate = 1.0
@@ -47,49 +48,70 @@ class AdaptiveTuner:
         return (1.0 - self.alpha) * current + self.alpha * new_value
 
     def record_click_result(self, success: bool) -> None:
-        if not self.enabled:
-            return
-        self.click_success_rate = self._ema(self.click_success_rate, 1.0 if success else 0.0)
-        if self.click_success_rate < config.ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD:
-            self.click_delay = min(
-                self.click_delay + config.ADAPTIVE_TUNER_CLICK_DELAY_STEP,
-                config.ADAPTIVE_TUNER_MAX_CLICK_DELAY,
-            )
-            self.move_delay = min(
-                self.move_delay + config.ADAPTIVE_TUNER_MOVE_DELAY_STEP,
-                config.ADAPTIVE_TUNER_MAX_MOVE_DELAY,
-            )
-        elif self.click_success_rate > config.ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD:
-            self.click_delay = max(
-                self.click_delay - config.ADAPTIVE_TUNER_CLICK_DECREMENT,
-                config.ADAPTIVE_TUNER_MIN_CLICK_DELAY,
-            )
-            self.move_delay = max(
-                self.move_delay - config.ADAPTIVE_TUNER_MOVE_DECREMENT,
-                config.ADAPTIVE_TUNER_MIN_MOVE_DELAY,
-            )
+        with self._lock:
+            if not self.enabled:
+                return
+            self.click_success_rate = self._ema(self.click_success_rate, 1.0 if success else 0.0)
+            if self.click_success_rate < config.ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD:
+                self.click_delay = min(
+                    self.click_delay + config.ADAPTIVE_TUNER_CLICK_DELAY_STEP,
+                    config.ADAPTIVE_TUNER_MAX_CLICK_DELAY,
+                )
+                self.move_delay = min(
+                    self.move_delay + config.ADAPTIVE_TUNER_MOVE_DELAY_STEP,
+                    config.ADAPTIVE_TUNER_MAX_MOVE_DELAY,
+                )
+            elif self.click_success_rate > config.ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD:
+                self.click_delay = max(
+                    self.click_delay - config.ADAPTIVE_TUNER_CLICK_DECREMENT,
+                    config.ADAPTIVE_TUNER_MIN_CLICK_DELAY,
+                )
+                self.move_delay = max(
+                    self.move_delay - config.ADAPTIVE_TUNER_MOVE_DECREMENT,
+                    config.ADAPTIVE_TUNER_MIN_MOVE_DELAY,
+                )
 
     def record_search_result(self, success: bool) -> None:
-        if not self.enabled:
-            return
-        self.search_success_rate = self._ema(self.search_success_rate, 1.0 if success else 0.0)
-        if self.search_success_rate < config.ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD:
-            self.search_interval = min(
-                self.search_interval + config.ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP,
-                config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL,
-            )
-        elif self.search_success_rate > config.ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD:
-            self.search_interval = max(
-                self.search_interval - config.ADAPTIVE_TUNER_SEARCH_DECREMENT,
-                config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL,
-            )
+        with self._lock:
+            if not self.enabled:
+                return
+            self.search_success_rate = self._ema(self.search_success_rate, 1.0 if success else 0.0)
+            if self.search_success_rate < config.ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD:
+                self.search_interval = min(
+                    self.search_interval + config.ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP,
+                    config.ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL,
+                )
+            elif self.search_success_rate > config.ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD:
+                self.search_interval = max(
+                    self.search_interval - config.ADAPTIVE_TUNER_SEARCH_DECREMENT,
+                    config.ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL,
+                )
 
     def reset(self) -> None:
-        self.click_success_rate = 1.0
-        self.search_success_rate = 1.0
-        self.click_delay = float(config.CLICK_DELAY)
-        self.move_delay = float(config.MOUSE_MOVE_DELAY)
-        self.search_interval = float(config.UPGRADE_SEARCH_INTERVAL)
+        with self._lock:
+            self.click_success_rate = 1.0
+            self.search_success_rate = 1.0
+            self.click_delay = float(config.CLICK_DELAY)
+            self.move_delay = float(config.MOUSE_MOVE_DELAY)
+            self.search_interval = float(config.UPGRADE_SEARCH_INTERVAL)
+
+    def get_behavior_snapshot(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                "click_delay": float(self.click_delay),
+                "move_delay": float(self.move_delay),
+                "search_interval": float(self.search_interval),
+            }
+
+    def get_search_interval(self) -> float:
+        with self._lock:
+            return float(self.search_interval)
+
+    def apply_behavior(self, learned: dict[str, Any]) -> None:
+        with self._lock:
+            self.click_delay = float(learned.get("click_delay", self.click_delay))
+            self.move_delay = float(learned.get("move_delay", self.move_delay))
+            self.search_interval = float(learned.get("search_interval", self.search_interval))
 
 
 class VisionPersistence:
@@ -471,6 +493,7 @@ class HistoricalLearner:
         self.apply_cooldown = max(0.0, float(config.AI_LEARNING_APPLY_COOLDOWN))
         self._last_apply_time = 0.0
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._records: list[dict[str, Any]] = []
@@ -532,19 +555,21 @@ class HistoricalLearner:
         return sanitized
 
     def start(self) -> None:
-        if not self.enabled:
-            return
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="historical_learner", daemon=True)
-        self._thread.start()
+        with self._lifecycle_lock:
+            if not self.enabled:
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="historical_learner", daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=config.AI_LEARNING_THREAD_JOIN_TIMEOUT)
-        self._persist(force=True)
+        with self._lifecycle_lock:
+            self._stop.set()
+            if self._thread is not None and self._thread.is_alive():
+                self._thread.join(timeout=config.AI_LEARNING_THREAD_JOIN_TIMEOUT)
+            self._persist(force=True)
 
     def record_completion(self, seconds_spent: float, source: str) -> None:
         normalized_duration = self._safe_float(seconds_spent)
@@ -640,26 +665,27 @@ class HistoricalLearner:
         for key in profile:
             profile[key] /= count
 
-        current = self.bot.get_runtime_behavior_snapshot()
-        tuned = {
-            "click_delay": self._clamp(
-                self._ema(current["click_delay"], profile["click_delay"]),
-                config.AI_LEARNING_MIN_CLICK_DELAY,
-                config.AI_LEARNING_MAX_CLICK_DELAY,
-            ),
-            "move_delay": self._clamp(
-                self._ema(current["move_delay"], profile["move_delay"]),
-                config.AI_LEARNING_MIN_MOVE_DELAY,
-                config.AI_LEARNING_MAX_MOVE_DELAY,
-            ),
-            "search_interval": self._clamp(
-                self._ema(current["search_interval"], profile["search_interval"]),
-                config.AI_LEARNING_MIN_SEARCH_INTERVAL,
-                config.AI_LEARNING_MAX_SEARCH_INTERVAL,
-            ),
-        }
-        self._tuned_behavior = tuned
-        self.bot.apply_learned_behavior(tuned)
+        with self.bot.tuner._lock:
+            current = self.bot.get_runtime_behavior_snapshot()
+            tuned = {
+                "click_delay": self._clamp(
+                    self._ema(current["click_delay"], profile["click_delay"]),
+                    config.AI_LEARNING_MIN_CLICK_DELAY,
+                    config.AI_LEARNING_MAX_CLICK_DELAY,
+                ),
+                "move_delay": self._clamp(
+                    self._ema(current["move_delay"], profile["move_delay"]),
+                    config.AI_LEARNING_MIN_MOVE_DELAY,
+                    config.AI_LEARNING_MAX_MOVE_DELAY,
+                ),
+                "search_interval": self._clamp(
+                    self._ema(current["search_interval"], profile["search_interval"]),
+                    config.AI_LEARNING_MIN_SEARCH_INTERVAL,
+                    config.AI_LEARNING_MAX_SEARCH_INTERVAL,
+                ),
+            }
+            self._tuned_behavior = tuned
+            self.bot.apply_learned_behavior(tuned)
         return True
 
     def _ema(self, current: float, target: float) -> float:
@@ -686,9 +712,10 @@ class HistoricalLearner:
 class EatventureBot:
     def __init__(self) -> None:
         logger.info("Initializing Eatventure Bot")
+        self._running = threading.Event()
         self._stop_requested = threading.Event()
         self._step_active = threading.Event()
-        self._state_operation_lock = threading.Lock()
+        self._state_operation_lock = threading.RLock()
 
         self.window_capture = WindowCapture(config.WINDOW_TITLE, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)
         self.image_matcher = ImageMatcher(config.MATCH_THRESHOLD)
@@ -723,6 +750,17 @@ class EatventureBot:
         self._initialize_runtime_state()
 
         logger.info("Bot initialized successfully")
+
+    @property
+    def running(self) -> bool:
+        return self._running.is_set()
+
+    @running.setter
+    def running(self, is_running: bool) -> None:
+        if is_running:
+            self._running.set()
+            return
+        self._running.clear()
 
     def _initialize_runtime_state(self) -> None:
         self._successful_red_icon_history_limit = 24
@@ -847,8 +885,9 @@ class EatventureBot:
         return wait_event(self._stop_requested, duration)
 
     def _apply_tuning(self) -> None:
-        self.mouse_controller.click_delay = float(self.tuner.click_delay)
-        self.mouse_controller.move_delay = float(self.tuner.move_delay)
+        with self.tuner._lock, self.mouse_controller._input_lock:
+            self.mouse_controller.click_delay = float(self.tuner.click_delay)
+            self.mouse_controller.move_delay = float(self.tuner.move_delay)
 
     def _template(self, template_name: str) -> TemplatePair | None:
         return self.templates.get(template_name)
@@ -927,20 +966,15 @@ class EatventureBot:
         )
 
     def get_runtime_behavior_snapshot(self) -> dict[str, float]:
-        return {
-            "click_delay": float(self.tuner.click_delay),
-            "move_delay": float(self.tuner.move_delay),
-            "search_interval": float(self.tuner.search_interval),
-        }
+        return self.tuner.get_behavior_snapshot()
 
     def apply_learned_behavior(self, learned: dict[str, Any]) -> None:
         learned = self.historical_learner._sanitize_behavior(learned) if hasattr(self, "historical_learner") else learned
         if not learned:
             return
-        self.tuner.click_delay = float(learned.get("click_delay", self.tuner.click_delay))
-        self.tuner.move_delay = float(learned.get("move_delay", self.tuner.move_delay))
-        self.tuner.search_interval = float(learned.get("search_interval", self.tuner.search_interval))
-        self._apply_tuning()
+        with self.tuner._lock:
+            self.tuner.apply_behavior(learned)
+            self._apply_tuning()
 
     def wipe_memory(self) -> bool:
         if not self._state_operation_lock.acquire(blocking=False):
@@ -1641,44 +1675,52 @@ class EatventureBot:
         return State.FIND_RED_ICONS
 
     def start(self) -> bool:
-        if self.running:
-            return True
-        if self._step_active.is_set():
-            logger.warning("Cannot start bot while a previous state step is still stopping")
-            return False
-        if not self.ready:
-            logger.error("Cannot start bot because required templates are missing")
+        if not self._state_operation_lock.acquire(blocking=False):
+            logger.warning("Cannot start bot while a state operation is active")
             return False
         try:
-            self.window_capture.ensure_window(resize=True)
-        except WindowCaptureError as exc:
-            logger.error("Cannot start bot: %s", exc)
-            self.running = False
-            return False
-        if not self.mouse_controller.is_target_foreground():
-            logger.error("Cannot start bot because '%s' is not the foreground window", config.WINDOW_TITLE)
-            self.running = False
-            return False
-        self._stop_requested.clear()
-        self.running = True
-        if self.current_level_start_time is None:
-            self.current_level_start_time = time.monotonic()
-        self.historical_learner.start()
-        if config.ShowForbiddenArea and self.overlay is None:
-            self.overlay = ForbiddenAreaOverlay(self.window_capture.get_hwnd(), self.forbidden_zones)
-            self.overlay.start()
-        return True
+            if self.running:
+                return True
+            if self._step_active.is_set():
+                logger.warning("Cannot start bot while a previous state step is still stopping")
+                return False
+            if not self.ready:
+                logger.error("Cannot start bot because required templates are missing")
+                return False
+            try:
+                self.window_capture.ensure_window(resize=True)
+            except WindowCaptureError as exc:
+                logger.error("Cannot start bot: %s", exc)
+                self.running = False
+                return False
+            if not self.mouse_controller.is_target_foreground():
+                logger.error("Cannot start bot because '%s' is not the foreground window", config.WINDOW_TITLE)
+                self.running = False
+                return False
+            self._stop_requested.clear()
+            self.running = True
+            if self.current_level_start_time is None:
+                self.current_level_start_time = time.monotonic()
+            self.historical_learner.start()
+            if config.ShowForbiddenArea and self.overlay is None:
+                self.overlay = ForbiddenAreaOverlay(self.window_capture.get_hwnd(), self.forbidden_zones)
+                self.overlay.start()
+            return True
+        finally:
+            self._state_operation_lock.release()
 
     def stop(self) -> None:
         self._stop_requested.set()
-        if not self.running and self.overlay is None:
+        with self._state_operation_lock:
+            self._stop_requested.set()
+            if not self.running and self.overlay is None:
+                self.historical_learner.stop()
+                return
+            self.running = False
             self.historical_learner.stop()
-            return
-        self.running = False
-        self.historical_learner.stop()
-        if self.overlay is not None:
-            self.overlay.stop()
-            self.overlay = None
+            if self.overlay is not None:
+                self.overlay.stop()
+                self.overlay = None
 
     def step(self) -> bool:
         if not self._state_operation_lock.acquire(blocking=False):
@@ -1894,7 +1936,7 @@ class EatventureBot:
                 self._apply_tuning()
                 return State.HOLD_UPGRADE_STATION
 
-            if attempt < max_attempts - 1 and not self._sleep(self.tuner.search_interval):
+            if attempt < max_attempts - 1 and not self._sleep(self.tuner.get_search_interval()):
                 return State.OPEN_BOXES
 
         self.vision_optimizer.update_upgrade_station_miss()
@@ -1984,18 +2026,21 @@ class EatventureBot:
             min(config.UPGRADE_HOLD_CHECK_INTERVAL_MAX, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)),
         )
         hold_max_duration = self._hold_max_duration()
-        screen_position = self._position_cursor_for_upgrade_hold(x, y)
-        if screen_position is None:
-            return State.OPEN_BOXES
+        with self.tuner._lock, self.mouse_controller._input_lock:
+            screen_position = self._position_cursor_for_upgrade_hold(x, y)
+            if screen_position is None:
+                return State.OPEN_BOXES
 
-        logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
-        hold_completed, hold_stopped_by_max_duration, hold_elapsed = self._hold_upgrade_station_until_complete(
-            screen_position,
-            base_threshold,
-            relaxed_threshold,
-            hold_check_interval,
-            hold_max_duration,
-        )
+            logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
+            hold_completed, hold_stopped_by_max_duration, hold_elapsed = (
+                self._hold_upgrade_station_until_complete(
+                    screen_position,
+                    base_threshold,
+                    relaxed_threshold,
+                    hold_check_interval,
+                    hold_max_duration,
+                )
+            )
         if not hold_completed:
             return State.OPEN_BOXES
 

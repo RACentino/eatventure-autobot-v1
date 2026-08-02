@@ -1,6 +1,7 @@
 import logging
 import queue
 import sys
+import threading
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from bot import EatventureBot
 from mouse_controller import precise_sleep
 
 bot_instance: EatventureBot | None = None
-should_exit: bool = False
+should_exit = threading.Event()
 log_listener: QueueListener | None = None
 
 
@@ -63,9 +64,8 @@ def _wipe_bot_memory(logger: logging.Logger) -> None:
 
 
 def _request_program_exit(logger: logging.Logger) -> None:
-    global should_exit
     logger.info("[P pressed] Exiting program")
-    should_exit = True
+    should_exit.set()
 
 
 def on_press(key: Any) -> None:
@@ -140,7 +140,7 @@ def _print_startup_banner() -> None:
 
 
 def _run_bot_event_loop() -> None:
-    while not should_exit:
+    while not should_exit.is_set():
         if bot_instance is not None and bot_instance.running:
             bot_instance.step()
         precise_sleep(0.1)
@@ -161,14 +161,14 @@ def _cleanup_runtime(listener: keyboard.Listener | None) -> None:
 
 
 def main() -> int:
-    global bot_instance, should_exit
+    global bot_instance
     listener = None
 
     _print_startup_banner()
 
     try:
         setup_logging()
-        should_exit = False
+        should_exit.clear()
 
         listener = keyboard.Listener(on_press=on_press)
         listener.start()

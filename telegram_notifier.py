@@ -23,6 +23,7 @@ class TelegramNotifier:
             queue_size = 100
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max(1, queue_size))
         self._stop = threading.Event()
+        self._lifecycle_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._session: requests.Session | None = requests.Session() if self.enabled else None
 
@@ -84,20 +85,21 @@ class TelegramNotifier:
             return False
 
     def send_message(self, message: Any) -> bool:
-        if not self.enabled or self._stop.is_set():
-            return False
+        with self._lifecycle_lock:
+            if not self.enabled or self._stop.is_set():
+                return False
 
-        message = str(message).strip()
-        if not message:
-            return False
-        if len(message) > 4096:
-            message = message[:4093] + "..."
-        try:
-            self._queue.put_nowait(message)
-            return True
-        except queue.Full:
-            logger.warning("Telegram queue is full; dropping notification")
-            return False
+            message = str(message).strip()
+            if not message:
+                return False
+            if len(message) > 4096:
+                message = message[:4093] + "..."
+            try:
+                self._queue.put_nowait(message)
+                return True
+            except queue.Full:
+                logger.warning("Telegram queue is full; dropping notification")
+                return False
 
     def _discard_pending_messages(self) -> None:
         while True:
@@ -108,24 +110,25 @@ class TelegramNotifier:
             self._queue.task_done()
 
     def close(self) -> None:
-        if not self.enabled and self._session is None:
-            return
-        self._stop.set()
-        self.enabled = False
-        self._discard_pending_messages()
-        if self._thread is not None and self._thread.is_alive():
-            try:
-                close_timeout = float(config.TELEGRAM_CLOSE_TIMEOUT)
-            except (TypeError, ValueError):
-                close_timeout = 2.0
-            close_timeout = max(0.0, close_timeout, float(self.timeout) + 0.5)
-            self._thread.join(timeout=close_timeout)
-            if self._thread.is_alive():
-                logger.warning("Telegram notifier did not stop before timeout; session left open")
+        with self._lifecycle_lock:
+            if not self.enabled and self._session is None:
                 return
-        if self._session is not None:
-            self._session.close()
-            self._session = None
+            self._stop.set()
+            self.enabled = False
+            self._discard_pending_messages()
+            if self._thread is not None and self._thread.is_alive():
+                try:
+                    close_timeout = float(config.TELEGRAM_CLOSE_TIMEOUT)
+                except (TypeError, ValueError):
+                    close_timeout = 2.0
+                close_timeout = max(0.0, close_timeout, float(self.timeout) + 0.5)
+                self._thread.join(timeout=close_timeout)
+                if self._thread.is_alive():
+                    logger.warning("Telegram notifier did not stop before timeout; session left open")
+                    return
+            if self._session is not None:
+                self._session.close()
+                self._session = None
 
     def notify_bot_started(self) -> None:
         message = "Bot Started"
