@@ -106,16 +106,7 @@ UNLOCK_THRESHOLD = 0.905
 NEW_LEVEL_THRESHOLD = 0.965
 
 
-# --- Box detection gates ---
-
-# Enables legacy color-histogram verification for box candidates.
-BOX_COLOR_CHECK = False
-
-# Minimum color-histogram similarity required when box color checks are enabled.
-BOX_COLOR_THRESHOLD = 0.5
-
-# Enables HSV pixel-ratio verification for box candidates.
-BOX_HSV_COLOR_GATE_ENABLED = True
+# --- Box HSV gate ---
 
 # HSV ranges accepted as valid box-colored pixels.
 BOX_HSV_RANGES = (
@@ -133,13 +124,7 @@ BOX_HSV_RANGES = (
 BOX_HSV_MIN_MATCH_RATIO = 0.390
 
 
-# --- Upgrade-station detection gates ---
-
-# Enables legacy color-histogram verification for upgrade-station candidates.
-UPGRADE_STATION_COLOR_CHECK = False
-
-# Enables HSV pixel-ratio verification for upgrade-station candidates.
-UPGRADE_STATION_HSV_COLOR_GATE_ENABLED = True
+# --- Upgrade-station HSV gate ---
 
 # HSV ranges accepted as valid upgrade-station-colored pixels.
 UPGRADE_STATION_HSV_RANGES = (
@@ -152,6 +137,15 @@ UPGRADE_STATION_HSV_MIN_MATCH_RATIO = 0.50
 
 
 # --- Red-icon matching ---
+
+# HSV ranges accepted as valid red-icon pixels.
+RED_ICON_HSV_RANGES = (
+    ((0, 110, 120), (12, 255, 255)),
+    ((166, 110, 120), (179, 255, 255)),
+)
+
+# Minimum active-template pixel ratio that must match RED_ICON_HSV_RANGES.
+RED_ICON_HSV_MIN_MATCH_RATIO = 0.30
 
 # Minimum number of red-icon template variants required for consensus mode.
 RED_ICON_MIN_MATCHES = 3

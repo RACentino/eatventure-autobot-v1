@@ -1135,7 +1135,18 @@ class EatventureBot:
                 supervision_iou_threshold=getattr(config, "SUPERVISION_RED_ICON_NMS_IOU_THRESHOLD", 0.20),
                 supervision_class_agnostic=getattr(config, "SUPERVISION_CLASS_AGNOSTIC_NMS", True),
             )
+            template_height, template_width = template.shape[:2]
             for confidence, x, y in icons:
+                location = (x - template_width // 2, y - template_height // 2)
+                if not self.image_matcher._check_hsv_gate(
+                    screenshot,
+                    template,
+                    location,
+                    mask,
+                    config.RED_ICON_HSV_RANGES,
+                    config.RED_ICON_HSV_MIN_MATCH_RATIO,
+                ):
+                    continue
                 self._merge_icon_detection(
                     detections,
                     x + offset_x,
@@ -1333,37 +1344,6 @@ class EatventureBot:
             return self.vision_optimizer.upgrade_station_threshold
         return config.UPGRADE_STATION_THRESHOLD
 
-    def _candidate_passes_template_gates(
-        self,
-        screenshot: Any,
-        template: Any,
-        mask: Any,
-        location: tuple[int, int],
-        color_check_enabled: bool,
-        color_threshold: float,
-        hsv_gate_enabled: bool,
-        hsv_ranges: Any,
-        hsv_min_match_ratio: float,
-    ) -> bool:
-        if color_check_enabled and not self.image_matcher._check_color_similarity(
-            screenshot,
-            template,
-            location,
-            mask,
-            color_threshold=color_threshold,
-        ):
-            return False
-        if not hsv_gate_enabled:
-            return True
-        return self.image_matcher._check_hsv_gate(
-            screenshot,
-            template,
-            location,
-            mask,
-            hsv_ranges,
-            hsv_min_match_ratio,
-        )
-
     def _find_upgrade_station_match(self, threshold: float) -> RedIcon | None:
         if "upgradeStation" not in self.templates:
             return None
@@ -1390,14 +1370,11 @@ class EatventureBot:
             y = int(y)
             location = (x - template_width // 2, y - template_height // 2)
 
-            if not self._candidate_passes_template_gates(
+            if not self.image_matcher._check_hsv_gate(
                 limited_screenshot,
                 template,
-                mask,
                 location,
-                config.UPGRADE_STATION_COLOR_CHECK,
-                0.7,
-                config.UPGRADE_STATION_HSV_COLOR_GATE_ENABLED,
+                mask,
                 config.UPGRADE_STATION_HSV_RANGES,
                 config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
             ):
@@ -1616,14 +1593,11 @@ class EatventureBot:
                 candidate_width = int(candidate_width)
                 candidate_height = int(candidate_height)
                 location = (int(x) - candidate_width // 2, int(y) - candidate_height // 2)
-                if not self._candidate_passes_template_gates(
+                if not self.image_matcher._check_hsv_gate(
                     limited_screenshot,
                     template,
-                    mask,
                     location,
-                    config.BOX_COLOR_CHECK,
-                    config.BOX_COLOR_THRESHOLD,
-                    config.BOX_HSV_COLOR_GATE_ENABLED,
+                    mask,
                     config.BOX_HSV_RANGES,
                     config.BOX_HSV_MIN_MATCH_RATIO,
                 ):
