@@ -553,6 +553,7 @@ class MouseController:
         screen_to_y: int,
         duration: float,
     ) -> tuple[bool, int, int]:
+        started_at = time.perf_counter()
         current_x = screen_from_x
         current_y = screen_from_y
         step_delay = duration / DRAG_STEPS
@@ -562,7 +563,8 @@ class MouseController:
             current_y = int(screen_from_y + (screen_to_y - screen_from_y) * position)
             if not self._set_cursor_pos(current_x, current_y):
                 return False, current_x, current_y
-            if index < DRAG_STEPS and not self._wait(step_delay):
+            deadline = started_at + ((index + 1) * step_delay)
+            if index < DRAG_STEPS and not self._wait_until(deadline):
                 return False, current_x, current_y
         return True, current_x, current_y
 
