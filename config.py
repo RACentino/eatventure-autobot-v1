@@ -311,13 +311,13 @@ SCROLL_INCREMENT_STEP = 5
 MAX_IDLE_PASS_ATTEMPTS = 1
 
 # Pause between repeated scroll attempts.
-SCROLL_INTERVAL_PAUSE = 0.1
+SCROLL_INTERVAL_PAUSE = 0.100
 
 # Settle delay after each completed scroll.
-POST_SCROLL_SETTLE = 0.1
+POST_SCROLL_SETTLE = 0.100
 
 # Drag duration used for scroll gestures.
-SCROLL_DURATION = 0.3
+SCROLL_DURATION = 0.300
 
 
 # --- Stats upgrades ---
