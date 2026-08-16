@@ -1,6 +1,6 @@
 # Eatventure Autobot V1
 
-Eatventure Autobot is a Python-powered automation tool designed for the popular mobile game *Eatventure*. By leveraging advanced computer vision, state-machine logic, and adaptive AI learning, the bot autonomously manages restaurant completions with high precision and human-like interaction patterns.
+Eatventure Autobot is a deterministic Python screen-automation tool for the mobile game *Eatventure*. It combines OpenCV template matching, explicit state transitions, and guarded Windows mouse input.
 
 ## Bot Description
 
@@ -10,16 +10,20 @@ The Eatventure Autobot is a sophisticated screen automation tool that interacts 
 
 ### State Handlers
 
-The bot's intelligence is built upon a formal **Finite State Machine (FSM)**. Every action is encapsulated within dedicated handlers that manage transitions based on real-time visual feedback:
+The bot runs a complete **Finite State Machine (FSM)**: every state has one handler and every handler returns an explicit next state. A 15-second same-state watchdog resets stalled flows to `FIND_RED_ICONS`.
 
 * **FIND_RED_ICONS**: Scans the screen for actionable red icons.
 * **CLICK_RED_ICON**: Executes precise clicks on detected targets with sub-pixel refinement.
+* **CHECK_UNLOCK**: Handles an unlock prompt after a red-icon action.
 * **SEARCH_UPGRADE_STATION**: Locates the active cooking station to apply upgrades.
 * **HOLD_UPGRADE_STATION**: Simulates a "long-press" to rapidly purchase upgrades.
 * **OPEN_BOXES**: Automatically detects and collects gift box rewards.
 * **UPGRADE_STATS**: Manages the secondary stat-boost menu to maximize efficiency.
 * **SCROLL**: Executes intelligent, oscillating search patterns when no targets are visible.
 * **CHECK_NEW_LEVEL / TRANSITION_LEVEL**: Detects restaurant completion and handles the travel sequence to the next city.
+* **WAIT_FOR_UNLOCK**: Confirms the next restaurant is ready before restarting the scan.
+
+Normal flow: `FIND_RED_ICONS → CLICK_RED_ICON → CHECK_UNLOCK → SEARCH_UPGRADE_STATION → HOLD_UPGRADE_STATION → OPEN_BOXES → FIND_RED_ICONS/SCROLL`. Level-complete detections preempt that loop through `CHECK_NEW_LEVEL/TRANSITION_LEVEL → WAIT_FOR_UNLOCK → FIND_RED_ICONS`.
 
 ### Priority and Interrupts
 
@@ -32,23 +36,14 @@ The vision system is built around masked OpenCV template matching with a few pra
 * **Masked Template Matching**: Uses transparent PNG masks so icon shape matching stays stable.
 * **Multi-Template Consensus**: Red icons are only trusted after enough template variants agree on roughly the same location.
 * **HSV-Only Color Verification**: Red-icon, box, and upgrade-station candidates pass one HSV pixel-ratio gate.
-* **Adaptive Thresholds**: Detection thresholds can tighten or relax over time based on observed confidence.
-
-### Adaptive and Historical Learning
-
-The bot features a self-optimizing AI layer that adapts to your device's performance:
-
-* **Adaptive Tuner**: Automatically monitors success rates and adjusts `CLICK_DELAY` and `MOUSE_MOVE_DELAY` in real-time. If clicks are missing, it slows down; if successful, it speeds up to find the "sweet spot" of efficiency.
-* **Vision Optimizer**: Dynamically adjusts detection thresholds based on past match confidence, ensuring reliable detection even in varying lighting or game environments.
-* **Historical Learner**: Records the time taken for every restaurant completion. Over time, it identifies the most efficient timing profiles and applies them as the "Global Best" configuration, learning the optimal cadence for your specific game progress.
+* **Fixed Calibrated Thresholds**: Detection behavior comes directly from `config.py`, so the same frame produces the same decision.
 
 ### Better Logging System
 
 A comprehensive logging system tracks every decision the bot makes. It includes:
 
 * **Structured Tracebacks**: Detailed exception handling to prevent crashes.
-* **State Persistence**: AI vision and learning states are saved to JSON files, allowing the bot to retain its "knowledge" even after a restart.
-* **Performance Metrics**: Logs completion times and AI "confidence" levels for debugging.
+* **Performance Metrics**: With `DEBUG = True`, logs include per-capture and per-template-match timings.
 
 ### Visual Debugging
 
@@ -97,6 +92,12 @@ Keep the scrcpy window in the foreground while automation is running. The bot
 rejects global cursor and mouse input whenever another window owns the
 foreground; press `Z` again after returning focus to scrcpy.
 
+Runtime hotkeys:
+
+* `Z`: start or stop automation.
+* `X`: log the cursor position relative to the scrcpy client.
+* `P`: exit cleanly.
+
 ## Coming Soon
 
 * **Graphical User Interface (GUI)**: A dedicated control panel for easier operation, allowing real-time monitoring, visual threshold adjustment, and one-click start/stop functionality without terminal interaction.
@@ -138,4 +139,4 @@ This bot is developed for **educational purposes only**. Using automation tools 
 
 Eatventure Autobot is open-source software. It is free to use, modify, and distribute for personal and educational use.
 
-Keywords: [eatventure bot, python automation, opencv, scrcpy, mobile game bot, image recognition, state machine, adaptive ai, android automation, game botting]
+Keywords: [eatventure bot, python automation, opencv, scrcpy, mobile game bot, image recognition, state machine, android automation, game botting]

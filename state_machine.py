@@ -1,5 +1,4 @@
 import logging
-import threading
 from collections.abc import Callable
 from enum import Enum, auto
 
@@ -21,59 +20,33 @@ class State(Enum):
 
 
 class StateMachine:
-    def __init__(self, initial_state: State = State.FIND_RED_ICONS) -> None:
+    def __init__(self, initial_state: State, handlers: dict[State, Callable[[], State]]) -> None:
         if not isinstance(initial_state, State):
             raise TypeError(f"initial_state must be a State, got {type(initial_state).__name__}")
-        self._lock = threading.RLock()
+        missing_states = set(State) - handlers.keys()
+        if missing_states:
+            missing = ", ".join(sorted(state.name for state in missing_states))
+            raise ValueError(f"Missing state handlers: {missing}")
+        if any(not isinstance(state, State) or not callable(handler) for state, handler in handlers.items()):
+            raise TypeError("handlers must map State values to callables")
         self.current_state: State = initial_state
-        self.previous_state: State | None = None
-        self.state_handlers: dict[State, Callable[[], State | None]] = {}
+        self.state_handlers = dict(handlers)
         logger.info("State machine initialized in state: %s", initial_state.name)
-    
-    def register_handler(self, state: State, handler: Callable[[], State | None]) -> None:
-        if not isinstance(state, State):
-            raise TypeError(f"state must be a State, got {type(state).__name__}")
-        if not callable(handler):
-            raise TypeError(f"handler for {state.name} must be callable")
-        with self._lock:
-            self.state_handlers[state] = handler
-            logger.debug("Registered handler for state: %s", state.name)
-    
-    def transition(self, new_state: State) -> bool:
-        if not isinstance(new_state, State):
-            logger.error("Invalid transition target: %r", new_state)
-            return False
-        with self._lock:
-            if new_state != self.current_state:
-                logger.debug("State transition: %s -> %s", self.current_state.name, new_state.name)
-                self.previous_state = self.current_state
-                self.current_state = new_state
-            return True
-    
-    def update(self) -> bool:
-        with self._lock:
-            current_state = self.current_state
-            handler = self.state_handlers.get(current_state)
-            if handler is None:
-                logger.warning("No handler registered for state: %s", current_state.name)
-                return False
 
+    def transition(self, new_state: State) -> State:
+        if not isinstance(new_state, State):
+            raise TypeError(f"new_state must be a State, got {type(new_state).__name__}")
+        if new_state != self.current_state:
+            logger.debug("State transition: %s -> %s", self.current_state.name, new_state.name)
+            self.current_state = new_state
+        return self.current_state
+
+    def update(self) -> State:
+        current_state = self.current_state
+        handler = self.state_handlers[current_state]
         next_state = handler()
-        if next_state is None:
-            return True
         if not isinstance(next_state, State):
-            logger.error(
-                "Handler for %s returned invalid state: %r",
-                current_state.name,
-                next_state,
+            raise RuntimeError(
+                f"Handler for {current_state.name} returned invalid state: {next_state!r}"
             )
-            return False
         return self.transition(next_state)
-    
-    def get_state(self) -> State:
-        with self._lock:
-            return self.current_state
-    
-    def get_state_name(self) -> str:
-        with self._lock:
-            return self.current_state.name

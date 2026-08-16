@@ -9,13 +9,6 @@ ASSETS_DIR = str(Path(__file__).resolve().parent / "Assets")
 # Directory where rotating runtime logs are written.
 LOGS_DIR = str(Path(__file__).resolve().parent / "logs")
 
-# JSON file used to persist adaptive vision threshold state.
-AI_VISION_STATE_FILE = str(Path(__file__).resolve().parent / "memory" / "vision_state.json")
-
-# JSON file used to persist historical learning state.
-AI_LEARNING_STATE_FILE = str(Path(__file__).resolve().parent / "memory" / "learning_state_stable.json")
-
-
 # --- Window and diagnostics ---
 
 # Exact scrcpy window title the automation attaches to.
@@ -153,6 +146,10 @@ MOUSE_DOWN_DURATION = 0.112
 # Delay after releasing the left mouse button for normal clicks.
 MOUSE_UP_DURATION = 0.112
 
+# Attempts and delay used to confirm low-level cursor and button input.
+INPUT_RETRY_COUNT = 3
+INPUT_RETRY_DELAY = 0.05
+
 # Enables a short hover delay before click input.
 HOVER_ENABLED = False
 
@@ -161,6 +158,18 @@ HOVER_DURATION = 0.0
 
 # Delay between upgrade-station search attempts.
 UPGRADE_SEARCH_INTERVAL = 0.048
+
+# Fresh-screen attempts used to locate an upgrade station.
+UPGRADE_SEARCH_ATTEMPTS = 5
+
+# Failed upgrade-search cycles required before forcing a scroll.
+FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL = 3
+
+# Successful upgrade holds required before opening stats upgrades.
+UPGRADES_BEFORE_STATS = 2
+
+# Maximum time a handler may remain in the same state before flow recovery.
+STATE_STALL_TIMEOUT_SECONDS = 15.0
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.0
@@ -341,216 +350,6 @@ TELEGRAM_QUEUE_MAXSIZE = 100
 
 # Maximum time to wait for the Telegram worker to stop.
 TELEGRAM_CLOSE_TIMEOUT = 5.5
-
-
-# --- Adaptive input tuner ---
-
-# Enables adaptive runtime adjustment of click and search timing.
-ADAPTIVE_TUNER_ENABLED = False
-
-# Exponential moving-average weight for adaptive tuner success rates.
-ADAPTIVE_TUNER_ALPHA = 0.18
-
-# Click success rate below which click and move delays are increased.
-ADAPTIVE_TUNER_CLICK_LOW_THRESHOLD = 0.96
-
-# Click success rate above which click and move delays are decreased.
-ADAPTIVE_TUNER_CLICK_HIGH_THRESHOLD = 0.995
-
-# Search success rate below which the search interval is increased.
-ADAPTIVE_TUNER_SEARCH_LOW_THRESHOLD = 0.90
-
-# Search success rate above which the search interval is decreased.
-ADAPTIVE_TUNER_SEARCH_HIGH_THRESHOLD = 0.985
-
-# Amount added to click delay after low click success.
-ADAPTIVE_TUNER_CLICK_DELAY_STEP = 0.016
-
-# Amount added to move delay after low click success.
-ADAPTIVE_TUNER_MOVE_DELAY_STEP = 0.016
-
-# Amount removed from click delay after high click success.
-ADAPTIVE_TUNER_CLICK_DECREMENT = 0.016
-
-# Amount removed from move delay after high click success.
-ADAPTIVE_TUNER_MOVE_DECREMENT = 0.016
-
-# Amount added to search interval after low search success.
-ADAPTIVE_TUNER_SEARCH_INTERVAL_STEP = 0.016
-
-# Amount removed from search interval after high search success.
-ADAPTIVE_TUNER_SEARCH_DECREMENT = 0.016
-
-# Lowest click delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_CLICK_DELAY = 0.016
-
-# Highest click delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_CLICK_DELAY = 0.064
-
-# Lowest move delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_MOVE_DELAY = 0.016
-
-# Highest move delay the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_MOVE_DELAY = 0.048
-
-# Lowest upgrade search interval the adaptive tuner may apply.
-ADAPTIVE_TUNER_MIN_SEARCH_INTERVAL = 0.048
-
-# Highest upgrade search interval the adaptive tuner may apply.
-ADAPTIVE_TUNER_MAX_SEARCH_INTERVAL = 0.112
-
-
-# --- AI vision optimizer ---
-
-# Enables adaptive vision threshold adjustment.
-AI_VISION_ENABLED = False
-
-# Base exponential moving-average weight for vision confidence updates.
-AI_VISION_ALPHA = 0.18
-
-# Maximum adaptive moving-average weight for strong confidence updates.
-AI_VISION_ALPHA_MAX = 0.35
-
-# Confidence-derived boost used when updating adaptive thresholds.
-AI_VISION_CONFIDENCE_BOOST = 0.10
-
-# Confidence threshold above which adaptive alpha is boosted.
-AI_VISION_CONFIDENCE_THRESHOLD = 0.96
-
-# Minimum adaptive threshold for box detection.
-AI_BOX_THRESHOLD_MIN = 0.903
-
-# Maximum adaptive threshold for box detection.
-AI_BOX_THRESHOLD_MAX = 0.903
-
-# Consecutive box misses required before lowering the adaptive box threshold.
-AI_BOX_MISS_WINDOW = 3
-
-# Amount subtracted from box threshold after a miss window.
-AI_BOX_MISS_STEP = 0.0020
-
-# Minimum adaptive threshold for red-icon detection.
-AI_RED_ICON_THRESHOLD_MIN = 0.942
-
-# Maximum adaptive threshold for red-icon detection.
-AI_RED_ICON_THRESHOLD_MAX = 0.942
-
-# Safety margin subtracted from averaged red-icon confidence.
-AI_RED_ICON_MARGIN = 0.012
-
-# Consecutive red-icon misses required before lowering the adaptive red-icon threshold.
-AI_RED_ICON_MISS_WINDOW = 5
-
-# Amount subtracted from red-icon threshold after a miss window.
-AI_RED_ICON_MISS_STEP = 0.0010
-
-# Minimum adaptive threshold for new-level button detection.
-AI_NEW_LEVEL_THRESHOLD_MIN = 0.945
-
-# Maximum adaptive threshold for new-level button detection.
-AI_NEW_LEVEL_THRESHOLD_MAX = 0.988
-
-# Consecutive new-level button misses required before lowering the adaptive threshold.
-AI_NEW_LEVEL_MISS_WINDOW = 3
-
-# Amount subtracted from new-level button threshold after a miss window.
-AI_NEW_LEVEL_MISS_STEP = 0.0025
-
-# Minimum adaptive threshold for footer new-level red-icon detection.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MIN = 0.942
-
-# Maximum adaptive threshold for footer new-level red-icon detection.
-AI_NEW_LEVEL_RED_ICON_THRESHOLD_MAX = 0.942
-
-# Consecutive footer new-level red-icon misses required before lowering the adaptive threshold.
-AI_NEW_LEVEL_RED_ICON_MISS_WINDOW = 5
-
-# Amount subtracted from footer new-level red-icon threshold after a miss window.
-AI_NEW_LEVEL_RED_ICON_MISS_STEP = 0.0010
-
-# Minimum adaptive threshold for upgrade-station detection.
-AI_UPGRADE_STATION_THRESHOLD_MIN = 0.918
-
-# Maximum adaptive threshold for upgrade-station detection.
-AI_UPGRADE_STATION_THRESHOLD_MAX = 0.918
-
-# Consecutive upgrade-station misses required before lowering the adaptive threshold.
-AI_UPGRADE_STATION_MISS_WINDOW = 3
-
-# Amount subtracted from upgrade-station threshold after a miss window.
-AI_UPGRADE_STATION_MISS_STEP = 0.0020
-
-# Minimum adaptive threshold for stats-upgrade icon detection.
-AI_STATS_UPGRADE_THRESHOLD_MIN = 0.942
-
-# Maximum adaptive threshold for stats-upgrade icon detection.
-AI_STATS_UPGRADE_THRESHOLD_MAX = 0.942
-
-# Consecutive stats-upgrade misses required before lowering the adaptive threshold.
-AI_STATS_UPGRADE_MISS_WINDOW = 3
-
-# Amount subtracted from stats-upgrade threshold after a miss window.
-AI_STATS_UPGRADE_MISS_STEP = 0.0010
-
-# Minimum seconds between persisted vision state saves.
-AI_VISION_SAVE_INTERVAL = 1.75
-
-
-# --- Historical learner ---
-
-# Enables historical completion-time learning.
-AI_LEARNING_ENABLED = False
-
-# Minimum seconds between persisted learning state saves.
-AI_LEARNING_SAVE_INTERVAL = 7.0
-
-# Maximum historical completion records retained.
-AI_LEARNING_RECORDS_LIMIT = 256
-
-# Maximum seconds to wait for the learner thread to join during stop.
-AI_LEARNING_THREAD_JOIN_TIMEOUT = 1.75
-
-# Seconds between historical learner background cycles.
-AI_LEARNING_THREAD_INTERVAL = 1.75
-
-# Minimum sleep used by the historical learner loop.
-LEARNING_LOOP_MIN_SLEEP = 0.1
-
-# Time-window size used to pair completion records for profile analysis.
-AI_LEARNING_PAIR_WINDOW = 5
-
-# Batch size used when selecting historical records for profile analysis.
-AI_LEARNING_BATCH_WINDOW = 12
-
-# Exponential moving-average weight for learned behavior profiles.
-AI_LEARNING_EMA_ALPHA = 0.14
-
-# Number of top historical profiles blended into learned behavior.
-AI_LEARNING_PROFILE_BLEND_TOP_K = 3
-
-# Minimum improvement ratio required before applying learned behavior.
-AI_LEARNING_MIN_IMPROVEMENT_RATIO = 0.05
-
-# Cooldown in seconds between learned behavior applications.
-AI_LEARNING_APPLY_COOLDOWN = 7.0
-
-# Minimum learned click delay allowed.
-AI_LEARNING_MIN_CLICK_DELAY = 0.016
-
-# Maximum learned click delay allowed.
-AI_LEARNING_MAX_CLICK_DELAY = 0.064
-
-# Minimum learned mouse move delay allowed.
-AI_LEARNING_MIN_MOVE_DELAY = 0.016
-
-# Maximum learned mouse move delay allowed.
-AI_LEARNING_MAX_MOVE_DELAY = 0.048
-
-# Minimum learned upgrade search interval allowed.
-AI_LEARNING_MIN_SEARCH_INTERVAL = 0.048
-
-# Maximum learned upgrade search interval allowed.
-AI_LEARNING_MAX_SEARCH_INTERVAL = 0.112
 
 
 # --- Forbidden click zones ---

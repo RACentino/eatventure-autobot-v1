@@ -220,6 +220,7 @@ class WindowCapture:
 
     def capture(self, max_y: Any = None) -> np.ndarray:
         with self._lock:
+            started_at = time.perf_counter() if logger.isEnabledFor(logging.DEBUG) else None
             hwnd = self.ensure_window()
             _, width, height = self._get_client_size(hwnd)
 
@@ -254,6 +255,8 @@ class WindowCapture:
                 raise WindowCaptureError(f"Captured bitmap could not be decoded: {exc}") from exc
             finally:
                 self._release_capture_resources(hwnd, hwnd_dc, mfc_dc, save_dc, save_bitmap, old_bitmap)
+                if started_at is not None:
+                    logger.debug("Window capture %sx%s %.2fms", width, height, (time.perf_counter() - started_at) * 1000)
 
     def is_window_active(self) -> bool:
         with self._lock:

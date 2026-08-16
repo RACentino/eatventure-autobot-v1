@@ -1,5 +1,5 @@
 import logging
-from itertools import islice
+import time
 from typing import Any
 
 import cv2
@@ -11,7 +11,6 @@ MatchResult = tuple[bool, float, int, int]
 MatchCandidate = tuple[float, int, int, int, int]
 Point = tuple[int, int]
 HsvRange = tuple[np.ndarray, np.ndarray]
-MAX_TEMPLATE_SCALES = 16
 
 
 class ImageMatcher:
@@ -92,11 +91,15 @@ class ImageMatcher:
         template_name: str,
     ) -> np.ndarray | None:
         match_mask = None if mask is not None and np.all(mask) else mask
+        started_at = time.perf_counter() if logger.isEnabledFor(logging.DEBUG) else None
         try:
             result = cv2.matchTemplate(screenshot, template, cv2.TM_SQDIFF_NORMED, mask=match_mask)
         except cv2.error as exc:
             logger.warning("[%s] Template matching failed: %s", template_name, exc)
             return None
+        finally:
+            if started_at is not None:
+                logger.debug("[%s] matchTemplate %.2fms", template_name, (time.perf_counter() - started_at) * 1000)
         if result.size == 0:
             return None
         np.nan_to_num(result, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
@@ -291,7 +294,6 @@ class ImageMatcher:
         mask: np.ndarray | None = None,
         threshold: float | None = None,
         min_distance: int = 15,
-        scales: list[float] | None = None,
         template_name: str = "Unknown",
         hsv_ranges: Any = None,
         hsv_match_threshold: float = 0.9,
@@ -302,50 +304,13 @@ class ImageMatcher:
             mask=mask,
             threshold=threshold,
             min_distance=min_distance,
-            scales=scales,
             template_name=template_name,
             hsv_ranges=hsv_ranges,
             hsv_match_threshold=hsv_match_threshold,
         )
         if all_matches:
-            all_matches = self._non_max_suppression(all_matches, min_distance)
+            all_matches = self.suppress_overlaps(all_matches, 0.20, min_distance)
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
-
-    @staticmethod
-    def _scaled_template_and_mask(
-        template: np.ndarray,
-        mask: np.ndarray | None,
-        scale: float,
-    ) -> tuple[np.ndarray, np.ndarray | None]:
-        if scale == 1.0:
-            return template, mask
-        scaled_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        if mask is None:
-            return scaled_template, None
-        scaled_mask = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-        scaled_mask[scaled_mask > 0] = 255
-        return scaled_template, scaled_mask
-
-    @staticmethod
-    def _valid_scale(scale: Any) -> float | None:
-        try:
-            normalized_scale = float(scale)
-        except (TypeError, ValueError):
-            return None
-        if not np.isfinite(normalized_scale) or normalized_scale <= 0:
-            return None
-        return normalized_scale
-
-    @staticmethod
-    def _scaled_template_fits(screenshot: np.ndarray, template: np.ndarray, scale: float) -> bool:
-        scaled_width = float(template.shape[1]) * scale
-        scaled_height = float(template.shape[0]) * scale
-        return bool(
-            np.isfinite(scaled_width)
-            and np.isfinite(scaled_height)
-            and 1.0 <= scaled_width <= screenshot.shape[1]
-            and 1.0 <= scaled_height <= screenshot.shape[0]
-        )
 
     @staticmethod
     def _normalize_min_distance(value: Any) -> int:
@@ -354,53 +319,6 @@ class ImageMatcher:
         except (TypeError, ValueError, OverflowError):
             return 0
 
-    def _find_scaled_template_candidates(
-        self,
-        screenshot: np.ndarray,
-        template: np.ndarray,
-        mask: np.ndarray | None,
-        scale: float,
-        threshold: float,
-        min_distance: int,
-        template_name: str,
-        hsv_ranges: list[HsvRange] | None,
-        hsv_match_threshold: float,
-    ) -> list[MatchCandidate]:
-        if not self._scaled_template_fits(screenshot, template, scale):
-            return []
-        try:
-            scaled_template, scaled_mask = self._scaled_template_and_mask(template, mask, scale)
-        except cv2.error as exc:
-            logger.warning("[%s] Template resize failed at scale %s: %s", template_name, scale, exc)
-            return []
-
-        result = self._safe_match_template(screenshot, scaled_template, scaled_mask, template_name)
-        if result is None:
-            return []
-
-        matches = []
-        template_height, template_width = scaled_template.shape[:2]
-        for candidate_x, candidate_y in self._local_minima_candidates(
-            result,
-            1.0 - threshold,
-            min_distance,
-        ):
-            confidence = float(1.0 - result[candidate_y, candidate_x])
-            if not np.isfinite(confidence):
-                continue
-            if hsv_ranges is not None and not self._check_hsv_gate(
-                screenshot,
-                scaled_template,
-                (candidate_x, candidate_y),
-                scaled_mask,
-                hsv_ranges,
-                hsv_match_threshold,
-            ):
-                continue
-            center_x = candidate_x + template_width // 2
-            center_y = candidate_y + template_height // 2
-            matches.append((confidence, center_x, center_y, template_width, template_height))
-        return matches
 
     def find_template_candidates(
         self,
@@ -409,7 +327,6 @@ class ImageMatcher:
         mask: np.ndarray | None = None,
         threshold: float | None = None,
         min_distance: int = 15,
-        scales: list[float] | None = None,
         template_name: str = "Unknown",
         hsv_ranges: Any = None,
         hsv_match_threshold: float = 0.9,
@@ -425,30 +342,33 @@ class ImageMatcher:
         mask = self._normalize_mask(mask, template.shape, template_name)
         normalized_hsv_ranges = self._normalize_hsv_ranges(hsv_ranges) if hsv_ranges is not None else None
         normalized_hsv_threshold = self._normalize_threshold(hsv_match_threshold, 0.9)
-
-        if scales is None:
-            scales = [1.0]
-        try:
-            scale_values = iter(scales)
-        except TypeError:
-            logger.warning("[%s] Scales must be iterable", template_name)
+        if not self._template_fits_screenshot(screenshot, template, template_name):
             return []
 
-        for scale_value in islice(scale_values, MAX_TEMPLATE_SCALES):
-            scale = self._valid_scale(scale_value)
-            if scale is None:
+        result = self._safe_match_template(screenshot, template, mask, template_name)
+        if result is None:
+            return []
+        template_height, template_width = template.shape[:2]
+        for candidate_x, candidate_y in self._local_minima_candidates(result, 1.0 - thresh, min_distance):
+            confidence = float(1.0 - result[candidate_y, candidate_x])
+            if not np.isfinite(confidence):
                 continue
-            all_matches.extend(
-                self._find_scaled_template_candidates(
-                    screenshot,
-                    template,
-                    mask,
-                    scale,
-                    thresh,
-                    min_distance,
-                    template_name,
-                    normalized_hsv_ranges,
-                    normalized_hsv_threshold,
+            if normalized_hsv_ranges is not None and not self._check_hsv_gate(
+                screenshot,
+                template,
+                (candidate_x, candidate_y),
+                mask,
+                normalized_hsv_ranges,
+                normalized_hsv_threshold,
+            ):
+                continue
+            all_matches.append(
+                (
+                    confidence,
+                    candidate_x + template_width // 2,
+                    candidate_y + template_height // 2,
+                    template_width,
+                    template_height,
                 )
             )
 
@@ -490,9 +410,9 @@ class ImageMatcher:
         return candidates
 
     @staticmethod
-    def _box_intersection_over_union(first_match: MatchCandidate, second_match: MatchCandidate) -> float:
-        _, raw_first_x, raw_first_y, raw_first_width, raw_first_height = first_match
-        _, raw_second_x, raw_second_y, raw_second_width, raw_second_height = second_match
+    def _box_intersection_over_union(first_match: tuple[Any, ...], second_match: tuple[Any, ...]) -> float:
+        _, raw_first_x, raw_first_y, raw_first_width, raw_first_height = first_match[:5]
+        _, raw_second_x, raw_second_y, raw_second_width, raw_second_height = second_match[:5]
         values = tuple(
             float(value)
             for value in (
@@ -527,31 +447,32 @@ class ImageMatcher:
         return intersection / union if union > 0 else 0.0
 
     @classmethod
-    def _overlaps_existing_match(
-        cls: type["ImageMatcher"],
-        candidate_match: MatchCandidate,
-        filtered_match: MatchCandidate,
-        min_distance: int,
-    ) -> bool:
-        _, candidate_x, candidate_y, _, _ = candidate_match
-        _, filtered_x, filtered_y, _, _ = filtered_match
-        if abs(candidate_x - filtered_x) >= min_distance or abs(candidate_y - filtered_y) >= min_distance:
-            return False
-        return cls._box_intersection_over_union(candidate_match, filtered_match) > 0.2
-
-    def _non_max_suppression(self, matches: list[MatchCandidate], min_distance: int) -> list[MatchCandidate]:
+    def suppress_overlaps(
+        cls,
+        matches: list[Any],
+        iou_threshold: float = 0.20,
+        min_distance: int | None = None,
+    ) -> list[Any]:
         if not matches:
             return []
-
-        min_distance = self._normalize_min_distance(min_distance)
+        iou_threshold = cls._normalize_threshold(iou_threshold, 0.20)
+        if min_distance is not None:
+            min_distance = cls._normalize_min_distance(min_distance)
         matches = sorted(matches, key=lambda match: match[0], reverse=True)
-        filtered: list[MatchCandidate] = []
+        filtered: list[Any] = []
 
-        for candidate_match in matches:
-            if not any(
-                self._overlaps_existing_match(candidate_match, filtered_match, min_distance)
-                for filtered_match in filtered
-            ):
-                filtered.append(candidate_match)
+        for candidate in matches:
+            overlaps = False
+            for existing in filtered:
+                if min_distance is not None and (
+                    abs(candidate[1] - existing[1]) >= min_distance
+                    or abs(candidate[2] - existing[2]) >= min_distance
+                ):
+                    continue
+                if cls._box_intersection_over_union(candidate, existing) > iou_threshold:
+                    overlaps = True
+                    break
+            if not overlaps:
+                filtered.append(candidate)
 
         return filtered

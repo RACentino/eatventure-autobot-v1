@@ -12,7 +12,6 @@ from pynput import keyboard
 
 import config
 from bot import EatventureBot
-from mouse_controller import precise_sleep
 
 bot_instance: EatventureBot | None = None
 should_exit = threading.Event()
@@ -54,15 +53,6 @@ def _toggle_bot_running(logger: logging.Logger) -> None:
     logger.warning("[Z pressed] Bot START failed")
 
 
-def _wipe_bot_memory(logger: logging.Logger) -> None:
-    if bot_instance is None:
-        return
-    if bot_instance.wipe_memory():
-        logger.info("[C pressed] AI memory wiped")
-        return
-    logger.warning("[C pressed] AI memory wipe skipped; retry after the active state operation")
-
-
 def _request_program_exit(logger: logging.Logger) -> None:
     logger.info("[P pressed] Exiting program")
     should_exit.set()
@@ -78,7 +68,6 @@ def on_press(key: Any) -> None:
         key_handlers = {
             "x": _log_window_relative_cursor_position,
             "z": _toggle_bot_running,
-            "c": _wipe_bot_memory,
             "p": _request_program_exit,
         }
         handler = key_handlers.get(character)
@@ -143,7 +132,7 @@ def _run_bot_event_loop() -> None:
     while not should_exit.is_set():
         if bot_instance is not None and bot_instance.running:
             bot_instance.step()
-        precise_sleep(0.1)
+        should_exit.wait(0.1)
 
 
 def _cleanup_runtime(listener: keyboard.Listener | None) -> None:
@@ -179,7 +168,6 @@ def main() -> int:
         logger.info("Bot initialized and ready")
         logger.info("Press Z to START/STOP the bot")
         logger.info("Press X to see window-relative cursor position")
-        logger.info("Press C to wipe AI memory")
         logger.info("Press P to EXIT the program")
 
         _run_bot_event_loop()
