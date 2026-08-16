@@ -203,7 +203,7 @@ UPGRADE_HOLD_MAX_CHECKS = 400
 SPAM_CLICK_DURATION = 1.75
 
 # Delay between clicks in generic spam-click loops.
-SPAM_CLICK_DELAY = 0.224
+SPAM_CLICK_DELAY = 0.016
 
 
 # --- Capture regions ---
