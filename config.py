@@ -302,10 +302,10 @@ SCROLL_PIXEL_STEP = 180
 SCROLL_DISTANCE_RATIO = 1.0
 
 # Maximum oscillation cycle count before scroll progress wraps.
-MAX_SCROLL_CYCLES = 1
+MAX_SCROLL_CYCLES = 6
 
 # Additional scroll steps added per oscillation cycle.
-SCROLL_INCREMENT_STEP = 5 
+SCROLL_INCREMENT_STEP = 1
 
 # Maximum consecutive no-work box cycles before the bot scrolls to a new area.
 MAX_IDLE_PASS_ATTEMPTS = 1
