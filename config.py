@@ -111,7 +111,7 @@ RED_ICON_HSV_RANGES = (
 )
 
 # Minimum active-template pixel ratio that must match RED_ICON_HSV_RANGES.
-RED_ICON_HSV_MIN_MATCH_RATIO = 0.30
+RED_ICON_HSV_MIN_MATCH_RATIO = 0.60
 
 # Minimum number of red-icon template variants required for consensus mode.
 RED_ICON_MIN_MATCHES = 3
