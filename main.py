@@ -19,6 +19,7 @@ bot_toggle_requested = threading.Event()
 log_listener: QueueListener | None = None
 
 ForbiddenZoneBounds = tuple[int, int, int, int]
+primed_event_selection: tuple[int, ForbiddenZoneBounds] | None = None
 
 
 def _get_key_character(key: Any) -> str | None:
@@ -74,7 +75,7 @@ def _select_event_forbidden_zone() -> tuple[int, ForbiddenZoneBounds] | None:
     try:
         options = _event_forbidden_zone_options()
     except ValueError as exc:
-        print(f"\nCannot start bot: invalid event forbidden-zone configuration: {exc}")
+        print(f"\nCannot prime bot: invalid event forbidden-zone configuration: {exc}")
         return None
 
     print("\n" + "=" * 60)
@@ -116,37 +117,57 @@ def _select_event_forbidden_zone() -> tuple[int, ForbiddenZoneBounds] | None:
         event_label = "Event" if event_count == 1 else "Events"
         print(
             f"Selected: {event_count} {event_label} Active. "
-            f"Protected area: x={x_min}-{x_max}, y={y_min}-{y_max}. Starting bot..."
+            f"Protected area: x={x_min}-{x_max}, y={y_min}-{y_max}."
+        )
+        print("Bot primed but NOT running.")
+        print(
+            f"Focus the '{config.WINDOW_TITLE}' scrcpy window, "
+            "then press Z again to START."
         )
         print("=" * 60)
         return event_count, bounds
 
 
 def _toggle_bot_running(logger: logging.Logger) -> None:
+    global primed_event_selection
+
     if bot_instance is None:
         return
     if bot_instance.running:
         bot_instance.stop()
         bot_instance.telegram.notify_bot_stopped()
-        logger.info("[Z pressed] Bot STOPPED")
+        primed_event_selection = None
+        logger.info(
+            "[Z pressed] Bot STOPPED. Press Z to select the active-event count "
+            "for the next run."
+        )
         return
 
-    selection = _select_event_forbidden_zone()
-    bot_toggle_requested.clear()
-    if selection is None or should_exit.is_set():
-        logger.warning("[Z pressed] Bot START cancelled")
+    if primed_event_selection is None:
+        selection = _select_event_forbidden_zone()
+        bot_toggle_requested.clear()
+        if selection is None or should_exit.is_set():
+            logger.warning("[Z pressed] Bot priming cancelled")
+            return
+
+        event_count, bounds = selection
+        bot_instance.set_event_forbidden_zone(bounds)
+        primed_event_selection = selection
+        logger.info("[Z pressed] Bot PRIMED for %s active event(s): %s", event_count, bounds)
         return
 
-    event_count, bounds = selection
-    bot_instance.set_event_forbidden_zone(bounds)
-    logger.info("[Z pressed] Selected %s active event(s): %s", event_count, bounds)
-
+    event_count, _ = primed_event_selection
     started = bot_instance.start()
     if started:
         bot_instance.telegram.notify_bot_started()
         logger.info("[Z pressed] Bot STARTED")
         return
-    logger.warning("[Z pressed] Bot START failed")
+    logger.warning(
+        "[Z pressed] Bot START failed; the %s-event selection remains primed. "
+        "Resolve the error above, focus '%s', and press Z again to retry.",
+        event_count,
+        config.WINDOW_TITLE,
+    )
 
 
 def _request_bot_toggle(logger: logging.Logger) -> None:
@@ -272,7 +293,12 @@ def main() -> int:
 
         logger = logging.getLogger(__name__)
         logger.info("Bot initialized and ready")
-        logger.info("Press Z to START/STOP the bot")
+        logger.info("Press Z to select the active-event count and PRIME the bot")
+        logger.info(
+            "After priming, focus '%s' and press Z again to START",
+            config.WINDOW_TITLE,
+        )
+        logger.info("Press Z while running to STOP the bot")
         logger.info("Press X to see window-relative cursor position")
         logger.info("Press P to EXIT the program")
 

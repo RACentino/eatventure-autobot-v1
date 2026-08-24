@@ -90,11 +90,21 @@ scrcpy --window-title "EatventureAuto"
 
 Keep the scrcpy window in the foreground while automation is running. The bot
 rejects global cursor and mouse input whenever another window owns the
-foreground; press `Z` again after returning focus to scrcpy.
+foreground.
+
+Starting the bot takes two `Z` presses:
+
+1. Press `Z`, choose the number of active events, and press Enter. The bot is
+   now primed but is not running.
+2. Focus the scrcpy window, then press `Z` again to start automation.
+
+If startup fails, the selection remains primed. Resolve the reported error,
+focus scrcpy, and press `Z` again to retry. Pressing `Z` while the bot is
+running stops it; the next run will ask for the active-event count again.
 
 Runtime hotkeys:
 
-* `Z`: start or stop automation.
+* `Z`: prime, start, retry, or stop automation according to its current state.
 * `X`: log the cursor position relative to the scrcpy client.
 * `P`: exit cleanly.
 
