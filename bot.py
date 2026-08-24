@@ -107,38 +107,7 @@ class EatventureBot:
 
     @staticmethod
     def _configured_forbidden_zones() -> list[tuple[int, int, int, int]]:
-        return [
-            (
-                config.FORBIDDEN_ZONE_1_X_MIN,
-                config.FORBIDDEN_ZONE_1_X_MAX,
-                config.FORBIDDEN_ZONE_1_Y_MIN,
-                config.FORBIDDEN_ZONE_1_Y_MAX,
-            ),
-            (
-                config.FORBIDDEN_ZONE_2_X_MIN,
-                config.FORBIDDEN_ZONE_2_X_MAX,
-                config.FORBIDDEN_ZONE_2_Y_MIN,
-                config.FORBIDDEN_ZONE_2_Y_MAX,
-            ),
-            (
-                config.FORBIDDEN_ZONE_3_X_MIN,
-                config.FORBIDDEN_ZONE_3_X_MAX,
-                config.FORBIDDEN_ZONE_3_Y_MIN,
-                config.FORBIDDEN_ZONE_3_Y_MAX,
-            ),
-            (
-                config.FORBIDDEN_ZONE_4_X_MIN,
-                config.FORBIDDEN_ZONE_4_X_MAX,
-                config.FORBIDDEN_ZONE_4_Y_MIN,
-                config.FORBIDDEN_ZONE_4_Y_MAX,
-            ),
-            (
-                config.FORBIDDEN_ZONE_5_X_MIN,
-                config.FORBIDDEN_ZONE_5_X_MAX,
-                config.FORBIDDEN_ZONE_5_Y_MIN,
-                config.FORBIDDEN_ZONE_5_Y_MAX,
-            ),
-        ]
+        return list(config.NUMBERED_FORBIDDEN_ZONE_BOUNDS)
 
     def load_templates(self) -> dict[str, TemplatePair]:
         templates: dict[str, TemplatePair] = {}

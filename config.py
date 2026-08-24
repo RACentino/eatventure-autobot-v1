@@ -363,62 +363,10 @@ FORBIDDEN_CLICK_X_MAX = 260
 # Top boundary for the broad footer click block zone.
 FORBIDDEN_CLICK_Y_MIN = 668
 
-# Left boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_X_MIN = 290
-
-# Right boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_X_MAX = 350
-
-# Top boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_Y_MIN = 93
-
-# Bottom boundary for forbidden zone 1.
-FORBIDDEN_ZONE_1_Y_MAX = 330
-
-# Left boundary for forbidden zone 2.
-FORBIDDEN_ZONE_2_X_MIN = 0
-
-# Right boundary for forbidden zone 2.
-FORBIDDEN_ZONE_2_X_MAX = 60
-
-# Top boundary for forbidden zone 2.
-FORBIDDEN_ZONE_2_Y_MIN = 50
-
-# Bottom boundary for forbidden zone 2.
-FORBIDDEN_ZONE_2_Y_MAX = 280
-
-# Left boundary for forbidden zone 3.
-FORBIDDEN_ZONE_3_X_MIN = 0
-
-# Right boundary for forbidden zone 3.
-FORBIDDEN_ZONE_3_X_MAX = 60
-
-# Top boundary for forbidden zone 3.
-FORBIDDEN_ZONE_3_Y_MIN = 600
-
-# Bottom boundary for forbidden zone 3.
-FORBIDDEN_ZONE_3_Y_MAX = 667
-
-# Left boundary for forbidden zone 4.
-FORBIDDEN_ZONE_4_X_MIN = 145
-
-# Right boundary for forbidden zone 4.
-FORBIDDEN_ZONE_4_X_MAX = 200
-
-# Top boundary for forbidden zone 4.
-FORBIDDEN_ZONE_4_Y_MIN = 65
-
-# Bottom boundary for forbidden zone 4.
-FORBIDDEN_ZONE_4_Y_MAX = 110
-
-# Left boundary for forbidden zone 5.
-FORBIDDEN_ZONE_5_X_MIN = 55
-
-# Right boundary for forbidden zone 5.
-FORBIDDEN_ZONE_5_X_MAX = 285
-
-# Top boundary for forbidden zone 5.
-FORBIDDEN_ZONE_5_Y_MIN = 660
-
-# Bottom boundary for forbidden zone 5.
-FORBIDDEN_ZONE_5_Y_MAX = 725
+NUMBERED_FORBIDDEN_ZONE_BOUNDS = (
+    (290, 350, 93, 330),
+    (0, 60, 50, 280),
+    (0, 60, 600, 667),
+    (145, 200, 65, 110),
+    (55, 285, 660, 725),
+)

@@ -213,7 +213,7 @@ class MouseController:
 
     @staticmethod
     def _configured_forbidden_zones() -> list[ForbiddenZone]:
-        return [
+        zones: list[ForbiddenZone] = [
             (
                 "FORBIDDEN_CLICK zone",
                 config.FORBIDDEN_CLICK_X_MIN,
@@ -221,42 +221,14 @@ class MouseController:
                 config.FORBIDDEN_CLICK_Y_MIN,
                 None,
             ),
-            (
-                "FORBIDDEN_ZONE_1",
-                config.FORBIDDEN_ZONE_1_X_MIN,
-                config.FORBIDDEN_ZONE_1_X_MAX,
-                config.FORBIDDEN_ZONE_1_Y_MIN,
-                config.FORBIDDEN_ZONE_1_Y_MAX,
-            ),
-            (
-                "FORBIDDEN_ZONE_2",
-                config.FORBIDDEN_ZONE_2_X_MIN,
-                config.FORBIDDEN_ZONE_2_X_MAX,
-                config.FORBIDDEN_ZONE_2_Y_MIN,
-                config.FORBIDDEN_ZONE_2_Y_MAX,
-            ),
-            (
-                "FORBIDDEN_ZONE_3",
-                config.FORBIDDEN_ZONE_3_X_MIN,
-                config.FORBIDDEN_ZONE_3_X_MAX,
-                config.FORBIDDEN_ZONE_3_Y_MIN,
-                config.FORBIDDEN_ZONE_3_Y_MAX,
-            ),
-            (
-                "FORBIDDEN_ZONE_4",
-                config.FORBIDDEN_ZONE_4_X_MIN,
-                config.FORBIDDEN_ZONE_4_X_MAX,
-                config.FORBIDDEN_ZONE_4_Y_MIN,
-                config.FORBIDDEN_ZONE_4_Y_MAX,
-            ),
-            (
-                "FORBIDDEN_ZONE_5",
-                config.FORBIDDEN_ZONE_5_X_MIN,
-                config.FORBIDDEN_ZONE_5_X_MAX,
-                config.FORBIDDEN_ZONE_5_Y_MIN,
-                config.FORBIDDEN_ZONE_5_Y_MAX,
-            ),
         ]
+        for zone_index, (x_min, x_max, y_min, y_max) in enumerate(
+            config.NUMBERED_FORBIDDEN_ZONE_BOUNDS, start=1
+        ):
+            zones.append(
+                (f"FORBIDDEN_ZONE_{zone_index}", x_min, x_max, y_min, y_max)
+            )
+        return zones
 
     @staticmethod
     def _position_in_forbidden_zone(x: int, y: int, forbidden_zone: ForbiddenZone) -> bool:
