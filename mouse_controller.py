@@ -75,7 +75,7 @@ class MouseController:
         hwnd = self._hwnd_source() if callable(self._hwnd_source) else self._hwnd_source
         if not hwnd or not win32gui.IsWindow(hwnd):
             raise RuntimeError("Target window is not available")
-        return hwnd
+        return int(hwnd)
 
     def is_target_foreground(self) -> bool:
         try:
@@ -173,6 +173,12 @@ class MouseController:
             if not releases_left_button and not self._input_allowed():
                 return False
             try:
+                if (
+                    not releases_left_button
+                    and self._resolve_screen_position(screen_x, screen_y, relative=False)
+                    != (screen_x, screen_y)
+                ):
+                    return False
                 cursor_matches = True
                 current_x = screen_x
                 current_y = screen_y

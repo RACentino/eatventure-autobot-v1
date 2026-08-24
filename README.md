@@ -10,7 +10,7 @@ The Eatventure Autobot is a sophisticated screen automation tool that interacts 
 
 ### State Handlers
 
-The bot runs a complete **Finite State Machine (FSM)**: every state has one handler and every handler returns an explicit next state. A 15-second same-state watchdog resets stalled flows to `FIND_RED_ICONS`.
+The bot runs a complete **Finite State Machine (FSM)**: every state has one handler and every handler returns an explicit next state. Between handlers, a 15-second same-state watchdog resets stalled flows to `FIND_RED_ICONS`.
 
 * **FIND_RED_ICONS**: Scans the screen for actionable red icons.
 * **CLICK_RED_ICON**: Executes precise clicks on detected targets with sub-pixel refinement.
@@ -34,7 +34,7 @@ The bot gives level transitions priority during normal state processing. Before 
 The vision system is built around masked OpenCV template matching with a few practical safeguards:
 
 * **Masked Template Matching**: Uses transparent PNG masks so icon shape matching stays stable.
-* **Multi-Template Consensus**: Red icons are only trusted after enough template variants agree on roughly the same location.
+* **Calibrated Fast Mode**: By default, red icons use the configured `RedIcon5` template and HSV gate. Disabling Fast Mode enables multi-template consensus.
 * **HSV-Only Color Verification**: Red-icon, box, and upgrade-station candidates pass one HSV pixel-ratio gate.
 * **Fixed Calibrated Thresholds**: Detection behavior comes directly from `config.py`, so the same frame produces the same decision.
 

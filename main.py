@@ -171,12 +171,16 @@ def _toggle_bot_running(logger: logging.Logger) -> None:
 
 
 def _request_bot_toggle(logger: logging.Logger) -> None:
+    if bot_instance is not None and bot_instance.running:
+        bot_instance.request_stop()
     bot_toggle_requested.set()
     logger.debug("[Z pressed] Bot toggle requested")
 
 
 def _request_program_exit(logger: logging.Logger) -> None:
     logger.info("[P pressed] Exiting program")
+    if bot_instance is not None and bot_instance.running:
+        bot_instance.request_stop()
     should_exit.set()
 
 

@@ -49,7 +49,7 @@ class WindowCapture:
     def _find_window_handle(self) -> int | None:
         hwnd = win32gui.FindWindow(None, self.window_title)
         if hwnd and win32gui.IsWindow(hwnd):
-            return hwnd
+            return int(hwnd)
         return None
 
     def _invalidate_window(self) -> None:
@@ -329,14 +329,24 @@ class ForbiddenAreaOverlay:
         return target_position, width, height
 
     def _create_overlay_window(self, target_position: tuple[int, int], width: int, height: int) -> int:
-        return win32gui.CreateWindowEx(
-            win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST | win32con.WS_EX_TOOLWINDOW,
-            "ForbiddenAreaOverlay",
-            "Forbidden Area Overlay",
-            win32con.WS_POPUP,
-            target_position[0], target_position[1],
-            width, height,
-            0, 0, 0, None
+        return int(
+            win32gui.CreateWindowEx(
+                win32con.WS_EX_LAYERED
+                | win32con.WS_EX_TRANSPARENT
+                | win32con.WS_EX_TOPMOST
+                | win32con.WS_EX_TOOLWINDOW,
+                "ForbiddenAreaOverlay",
+                "Forbidden Area Overlay",
+                win32con.WS_POPUP,
+                target_position[0],
+                target_position[1],
+                width,
+                height,
+                0,
+                0,
+                0,
+                None,
+            )
         )
 
     def _show_overlay_window(self) -> None:
@@ -350,7 +360,8 @@ class ForbiddenAreaOverlay:
         win32gui.UpdateWindow(self.overlay_hwnd)
 
     def _sync_overlay_position(self, last_position: tuple[int, int], width: int, height: int) -> tuple[int, int]:
-        new_position = win32gui.ClientToScreen(self.target_hwnd, (0, 0))
+        raw_position = win32gui.ClientToScreen(self.target_hwnd, (0, 0))
+        new_position = int(raw_position[0]), int(raw_position[1])
         if new_position == last_position:
             return last_position
         win32gui.SetWindowPos(
@@ -442,5 +453,5 @@ class ForbiddenAreaOverlay:
         if msg == win32con.WM_DESTROY:
             win32gui.PostQuitMessage(0)
             return 0
-        return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+        return int(win32gui.DefWindowProc(hwnd, msg, wparam, lparam))
 

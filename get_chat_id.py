@@ -20,10 +20,10 @@ REQUEST_TIMEOUT = 10
 
 
 def _redact_token(text: Any, token: str) -> str:
-    text = str(text)
+    safe_text = str(text)
     if token:
-        return text.replace(token, "<redacted-token>")
-    return text
+        return safe_text.replace(token, "<redacted-token>")
+    return safe_text
 
 
 def _terminal_safe_text(value: Any) -> str:

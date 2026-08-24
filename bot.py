@@ -67,6 +67,7 @@ class EatventureBot:
         )
 
         self.templates = self.load_templates()
+        self._red_icon_template_names_cache: list[str] | None = None
         self._red_icon_template_names_cache = self._red_icon_template_names()
         self._red_icon_max_width, self._red_icon_max_height = self._red_icon_template_span()
         self.ready = self._validate_required_templates()
@@ -146,11 +147,28 @@ class EatventureBot:
         configured = max(1, int(config.RED_ICON_MIN_MATCHES))
         return min(configured, available)
 
+    @staticmethod
+    def _configured_fast_red_icon_template_names() -> tuple[str, ...]:
+        configured_names = config.RED_ICON_FAST_TEMPLATE_NAMES
+        if not isinstance(configured_names, tuple) or not configured_names:
+            return ()
+        if any(not isinstance(name, str) or not name for name in configured_names):
+            return ()
+        if len(set(configured_names)) != len(configured_names):
+            return ()
+        return tuple(configured_names)
+
     def _validate_required_templates(self) -> bool:
         missing = [name for name in ("newLevel", "unlock", "upgradeStation") if name not in self.templates]
         red_icon_count = self._available_red_icon_template_count()
         if red_icon_count <= 0:
             missing.append("RedIcon*")
+        if config.RED_ICON_FAST_MODE_ENABLED:
+            fast_template_names = self._configured_fast_red_icon_template_names()
+            if not fast_template_names:
+                missing.append("RED_ICON_FAST_TEMPLATE_NAMES")
+            else:
+                missing.extend(name for name in fast_template_names if name not in self.templates)
         if missing:
             logger.error("Missing required templates: %s", ", ".join(missing))
             return False
@@ -216,7 +234,7 @@ class EatventureBot:
         )
 
     def _red_icon_template_names(self) -> list[str]:
-        cached = getattr(self, "_red_icon_template_names_cache", None)
+        cached = self._red_icon_template_names_cache
         if cached is not None:
             return cached
         template_names = [name for name in self.templates if name.startswith("RedIcon")]
@@ -291,10 +309,13 @@ class EatventureBot:
             return detections
         template_names = self._red_icon_template_names()
         if config.RED_ICON_FAST_MODE_ENABLED:
-            fast_names = [name for name in config.RED_ICON_FAST_TEMPLATE_NAMES if name in self.templates]
-            if fast_names:
-                template_names = fast_names
-                min_distance = int(config.RED_ICON_FAST_MIN_DISTANCE)
+            configured_fast_names = self._configured_fast_red_icon_template_names()
+            fast_names = [name for name in configured_fast_names if name in self.templates]
+            if not fast_names:
+                logger.error("No configured Fast Mode red-icon template is loaded")
+                return detections
+            template_names = fast_names
+            min_distance = int(config.RED_ICON_FAST_MIN_DISTANCE)
         for template_name in template_names:
             if template_name not in self.templates:
                 continue
@@ -391,7 +412,9 @@ class EatventureBot:
         if screenshot is None:
             screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
         if scan_threshold is None:
-            scan_threshold = config.RED_ICON_THRESHOLD
+            scan_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
+        else:
+            scan_threshold = min(float(scan_threshold), float(config.NEW_LEVEL_RED_ICON_THRESHOLD))
         if min_matches is None:
             min_matches = self._red_icon_min_matches()
 
@@ -620,6 +643,9 @@ class EatventureBot:
                 return True, True, hold_elapsed
             if not self._sleep(hold_check_interval):
                 return False, False, hold_elapsed
+            if not self.mouse_controller.is_target_foreground():
+                logger.warning("Upgrade station hold interrupted because target lost foreground")
+                return False, False, time.monotonic() - hold_started_at
 
             current_match = self._find_current_upgrade_hold_match(base_threshold, relaxed_threshold)
             if current_match is None:
@@ -772,12 +798,23 @@ class EatventureBot:
         finally:
             self._state_operation_lock.release()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
         self._stop_requested.set()
+
+    def stop(self) -> None:
+        self.request_stop()
         with self._state_operation_lock:
             if not self.running and self.overlay is None:
                 return
             self.running = False
+            self.state_machine.transition(State.FIND_RED_ICONS)
+            self._reset_search_cycle()
+            self.red_icons.clear()
+            self.current_red_icon_index = 0
+            self.upgrade_station_pos = None
+            self.upgrade_found_in_cycle = False
+            self.work_done = False
+            self.consecutive_failed_cycles = 0
             if self.overlay is not None:
                 self.overlay.stop()
                 self.overlay = None
