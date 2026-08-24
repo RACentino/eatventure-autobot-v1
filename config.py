@@ -363,8 +363,15 @@ FORBIDDEN_CLICK_X_MAX = 260
 # Top boundary for the broad footer click block zone.
 FORBIDDEN_CLICK_Y_MIN = 668
 
+# Map active event counts to (x_min, x_max, y_min, y_max) menu choices.
+# Add, change, or remove entries here to update the menu automatically.
+EVENT_FORBIDDEN_ZONE_OPTIONS: dict[int, tuple[int, int, int, int]] = {
+    1: (290, 350, 93, 260),
+    2: (290, 350, 93, 320),
+    3: (290, 350, 93, 370),
+}
+
 NUMBERED_FORBIDDEN_ZONE_BOUNDS = (
-    (290, 350, 93, 320),
     (0, 60, 50, 280),
     (0, 60, 600, 667),
     (145, 200, 65, 110),

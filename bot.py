@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 TemplatePair = tuple[Any, Any]
 BoxCandidate = tuple[float, int, int, int, int, str]
 RedIcon = tuple[float, int, int]
+ForbiddenZoneBounds = tuple[int, int, int, int]
+
+
 class EatventureBot:
     def __init__(self) -> None:
         logger.info("Initializing Eatventure Bot")
@@ -108,6 +111,10 @@ class EatventureBot:
     @staticmethod
     def _configured_forbidden_zones() -> list[tuple[int, int, int, int]]:
         return list(config.NUMBERED_FORBIDDEN_ZONE_BOUNDS)
+
+    def set_event_forbidden_zone(self, bounds: ForbiddenZoneBounds) -> None:
+        self.forbidden_zones = [bounds, *self._configured_forbidden_zones()]
+        self.mouse_controller.set_event_forbidden_zone(bounds)
 
     def load_templates(self) -> dict[str, TemplatePair]:
         templates: dict[str, TemplatePair] = {}

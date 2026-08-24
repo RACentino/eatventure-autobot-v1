@@ -17,7 +17,9 @@ Point = tuple[int, int]
 WindowBounds = tuple[int, int, int, int]
 RelativeScreenPosition = tuple[int, int, int, int, int, int]
 ForbiddenZone = tuple[str, int, int, int, int | None]
+ForbiddenZoneBounds = tuple[int, int, int, int]
 DRAG_STEPS = 20
+
 
 class MouseController:
     def __init__(
@@ -229,6 +231,11 @@ class MouseController:
                 (f"FORBIDDEN_ZONE_{zone_index}", x_min, x_max, y_min, y_max)
             )
         return zones
+
+    def set_event_forbidden_zone(self, bounds: ForbiddenZoneBounds) -> None:
+        event_zone: ForbiddenZone = ("EVENT_FORBIDDEN_ZONE", *bounds)
+        with self._input_lock:
+            self._forbidden_zones = (event_zone, *self._configured_forbidden_zones())
 
     @staticmethod
     def _position_in_forbidden_zone(x: int, y: int, forbidden_zone: ForbiddenZone) -> bool:

@@ -15,7 +15,10 @@ from bot import EatventureBot
 
 bot_instance: EatventureBot | None = None
 should_exit = threading.Event()
+bot_toggle_requested = threading.Event()
 log_listener: QueueListener | None = None
+
+ForbiddenZoneBounds = tuple[int, int, int, int]
 
 
 def _get_key_character(key: Any) -> str | None:
@@ -36,6 +39,89 @@ def _log_window_relative_cursor_position(logger: logging.Logger) -> None:
     logger.info("[X pressed] Window position: (%s, %s)", screen_x - window_x, screen_y - window_y)
 
 
+def _event_forbidden_zone_options() -> list[tuple[int, ForbiddenZoneBounds]]:
+    options = config.EVENT_FORBIDDEN_ZONE_OPTIONS
+    if not isinstance(options, dict) or not options:
+        raise ValueError("EVENT_FORBIDDEN_ZONE_OPTIONS must contain at least one option")
+
+    validated_options: list[tuple[int, ForbiddenZoneBounds]] = []
+    for event_count, bounds in options.items():
+        if not isinstance(event_count, int) or isinstance(event_count, bool) or event_count < 1:
+            raise ValueError("event option keys must be positive integers")
+        if (
+            not isinstance(bounds, tuple)
+            or len(bounds) != 4
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in bounds)
+        ):
+            raise ValueError(f"event option {event_count} must contain four integer coordinates")
+        x_min, x_max, y_min, y_max = bounds
+        if x_min > x_max or y_min > y_max:
+            raise ValueError(f"event option {event_count} has reversed coordinate bounds")
+        if not (
+            0 <= x_min <= x_max < config.WINDOW_WIDTH
+            and 0 <= y_min <= y_max < config.WINDOW_HEIGHT
+        ):
+            raise ValueError(
+                f"event option {event_count} must fit inside the configured "
+                f"{config.WINDOW_WIDTH}x{config.WINDOW_HEIGHT} window"
+            )
+        validated_options.append((event_count, bounds))
+
+    return sorted(validated_options)
+
+
+def _select_event_forbidden_zone() -> tuple[int, ForbiddenZoneBounds] | None:
+    try:
+        options = _event_forbidden_zone_options()
+    except ValueError as exc:
+        print(f"\nCannot start bot: invalid event forbidden-zone configuration: {exc}")
+        return None
+
+    print("\n" + "=" * 60)
+    print("Event Forbidden-Zone Selection")
+    print("Choose how many Eatventure events are currently active.")
+    print(
+        "The bot will protect the matching top-right event-icon area "
+        "from all mouse interaction."
+    )
+    print()
+
+    option_map = dict(options)
+    for event_count, (x_min, x_max, y_min, y_max) in options:
+        event_label = "Event" if event_count == 1 else "Events"
+        print(
+            f"{event_count} - {event_count} {event_label} Active "
+            f"(protected area: x={x_min}-{x_max}, y={y_min}-{y_max})"
+        )
+
+    valid_choices = ", ".join(str(event_count) for event_count in option_map)
+    while True:
+        try:
+            raw_selection = input("\nType an option number and press Enter: ").strip()
+        except EOFError:
+            print("\nEvent selection cancelled. The bot remains stopped.")
+            return None
+
+        try:
+            event_count = int(raw_selection)
+        except ValueError:
+            event_count = 0
+
+        bounds = option_map.get(event_count)
+        if bounds is None:
+            print(f"Invalid selection. Enter one of: {valid_choices}.")
+            continue
+
+        x_min, x_max, y_min, y_max = bounds
+        event_label = "Event" if event_count == 1 else "Events"
+        print(
+            f"Selected: {event_count} {event_label} Active. "
+            f"Protected area: x={x_min}-{x_max}, y={y_min}-{y_max}. Starting bot..."
+        )
+        print("=" * 60)
+        return event_count, bounds
+
+
 def _toggle_bot_running(logger: logging.Logger) -> None:
     if bot_instance is None:
         return
@@ -45,12 +131,27 @@ def _toggle_bot_running(logger: logging.Logger) -> None:
         logger.info("[Z pressed] Bot STOPPED")
         return
 
+    selection = _select_event_forbidden_zone()
+    bot_toggle_requested.clear()
+    if selection is None or should_exit.is_set():
+        logger.warning("[Z pressed] Bot START cancelled")
+        return
+
+    event_count, bounds = selection
+    bot_instance.set_event_forbidden_zone(bounds)
+    logger.info("[Z pressed] Selected %s active event(s): %s", event_count, bounds)
+
     started = bot_instance.start()
     if started:
         bot_instance.telegram.notify_bot_started()
         logger.info("[Z pressed] Bot STARTED")
         return
     logger.warning("[Z pressed] Bot START failed")
+
+
+def _request_bot_toggle(logger: logging.Logger) -> None:
+    bot_toggle_requested.set()
+    logger.debug("[Z pressed] Bot toggle requested")
 
 
 def _request_program_exit(logger: logging.Logger) -> None:
@@ -67,7 +168,7 @@ def on_press(key: Any) -> None:
         logger = logging.getLogger(__name__)
         key_handlers = {
             "x": _log_window_relative_cursor_position,
-            "z": _toggle_bot_running,
+            "z": _request_bot_toggle,
             "p": _request_program_exit,
         }
         handler = key_handlers.get(character)
@@ -130,6 +231,10 @@ def _print_startup_banner() -> None:
 
 def _run_bot_event_loop() -> None:
     while not should_exit.is_set():
+        if bot_toggle_requested.is_set():
+            bot_toggle_requested.clear()
+            _toggle_bot_running(logging.getLogger(__name__))
+            continue
         if bot_instance is not None and bot_instance.running:
             bot_instance.step()
         should_exit.wait(0.1)
@@ -158,6 +263,7 @@ def main() -> int:
     try:
         setup_logging()
         should_exit.clear()
+        bot_toggle_requested.clear()
 
         listener = keyboard.Listener(on_press=on_press)
         listener.start()
