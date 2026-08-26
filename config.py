@@ -51,7 +51,7 @@ SCRCPY_ACTION_SETTLE_DELAY = 0.032
 MATCH_THRESHOLD = 0.98
 
 # Confidence threshold for regular red-icon detection.
-RED_ICON_THRESHOLD = 0.947
+RED_ICON_THRESHOLD = 0.92
 
 # Confidence threshold for the footer red icon that indicates a new level.
 NEW_LEVEL_RED_ICON_THRESHOLD = 0.942
