@@ -106,18 +106,18 @@ UPGRADE_STATION_HSV_MIN_MATCH_RATIO = 0.50
 
 # HSV ranges accepted as valid red-icon pixels.
 RED_ICON_HSV_RANGES = (
-    ((0, 85, 120), (12, 255, 255)),
-    ((166, 85, 120), (179, 255, 255)),
+    ((0, 40, 120), (12, 255, 255)),
+    ((166, 40, 120), (179, 255, 255)),
 )
 
 # Minimum active-template pixel ratio that must match RED_ICON_HSV_RANGES.
-RED_ICON_HSV_MIN_MATCH_RATIO = 0.50
+RED_ICON_HSV_MIN_MATCH_RATIO = 0.70
 
 # Minimum number of red-icon template variants required for consensus mode.
-RED_ICON_MIN_MATCHES = 3
+RED_ICON_MIN_MATCHES = 4
 
 # Enables fast red-icon detection using the configured fast template set.
-RED_ICON_FAST_MODE_ENABLED = True
+RED_ICON_FAST_MODE_ENABLED = False
 
 # Red-icon template names used when fast detection is enabled.
 RED_ICON_FAST_TEMPLATE_NAMES = ("RedIcon5",)
