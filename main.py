@@ -262,7 +262,7 @@ def _run_bot_event_loop() -> None:
             continue
         if bot_instance is not None and bot_instance.running:
             bot_instance.step()
-        should_exit.wait(0.1)
+        should_exit.wait(config.EVENT_LOOP_INTERVAL)
 
 
 def _cleanup_runtime(listener: keyboard.Listener | None) -> None:
