@@ -33,13 +33,13 @@ ShowForbiddenArea = False
 SCRCPY_MISS_RECOVERY_ENABLED = True
 
 # Delay before retrying a red-icon scan after an empty frame.
-SCRCPY_RED_ICON_MISS_RECOVERY_DELAY = 0.0
+SCRCPY_RED_ICON_MISS_RECOVERY_DELAY = 0.133333
 
 # Delay before retrying a box scan after an empty frame.
-SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.0
+SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.133333
 
 # Delay before retrying an upgrade-station scan after an empty frame.
-SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.0
+SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.133333
 
 # Minimum wait after a state-changing input before trusting the next scrcpy frame.
 SCRCPY_ACTION_SETTLE_DELAY = 0.0
@@ -135,20 +135,20 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.0
+CLICK_DELAY = 0.033333
 
 # Delay after moving the cursor before sending click input.
 MOUSE_MOVE_DELAY = 0.0
 
 # Duration to hold the left mouse button down for normal clicks.
-MOUSE_DOWN_DURATION = 0.0
+MOUSE_DOWN_DURATION = 0.133333
 
 # Delay after releasing the left mouse button for normal clicks.
-MOUSE_UP_DURATION = 0.0
+MOUSE_UP_DURATION = 0.133333
 
 # Attempts and delay used to confirm low-level cursor and button input.
 INPUT_RETRY_COUNT = 3
-INPUT_RETRY_DELAY = 0.0
+INPUT_RETRY_DELAY = 0.033333
 
 # Enables a short hover delay before click input.
 HOVER_ENABLED = False
@@ -157,7 +157,7 @@ HOVER_ENABLED = False
 HOVER_DURATION = 0.0
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.0
+UPGRADE_SEARCH_INTERVAL = 0.133333
 
 # Fresh-screen attempts used to locate an upgrade station.
 UPGRADE_SEARCH_ATTEMPTS = 5
@@ -169,7 +169,7 @@ FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL = 3
 UPGRADES_BEFORE_STATS = 2
 
 # Maximum time a handler may remain in the same state before flow recovery.
-STATE_STALL_TIMEOUT_SECONDS = 0.0
+STATE_STALL_TIMEOUT_SECONDS = 3.0
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.0
@@ -178,32 +178,32 @@ STATE_DELAY = 0.0
 FOCUS_SETTLE_DELAY = 0.0
 
 # Delay before visually confirming an upgrade-station candidate.
-UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.0
+UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.133333
 
 # Maximum fresh-screen searches allowed while locating the upgrade station for verification.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 4
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.0
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.133333
 
 # Consecutive missed upgrade-station frames required before releasing a hold.
 UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 1
 
 # Maximum duration for holding an upgrade station before releasing.
-CLICK_HOLD_MAX_DURATION = 0.0
+CLICK_HOLD_MAX_DURATION = 9.0
 
 # Lower and upper bounds for upgrade-station hold monitoring.
-UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.0
-UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.0
+UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.133333
+UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.133333
 
 # Absolute cap for the upgrade-station hold monitor.
 UPGRADE_HOLD_MAX_CHECKS = 400
 
 # Duration for generic spam-click loops.
-SPAM_CLICK_DURATION = 0.0
+SPAM_CLICK_DURATION = 1.5
 
 # Delay between clicks in generic spam-click loops.
-SPAM_CLICK_DELAY = 0.0
+SPAM_CLICK_DELAY = 0.016
 
 
 # --- Capture regions ---
@@ -245,7 +245,7 @@ LEVEL_TRANSITION_POS = (174, 520)
 NEW_LEVEL_SEARCH_ATTEMPTS = 5
 
 # Delay between new-level transition searches.
-NEW_LEVEL_SEARCH_INTERVAL = 0.0
+NEW_LEVEL_SEARCH_INTERVAL = 0.133333
 
 # Delay after a new-level button click before unlock confirmation starts.
 LEVEL_TRANSITION_SETTLE_DELAY = 0.0
@@ -260,7 +260,7 @@ LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY = 0.0
 UNLOCK_SEARCH_ATTEMPTS = 4
 
 # Delay between unlock-button searches.
-UNLOCK_SEARCH_INTERVAL = 0.0
+UNLOCK_SEARCH_INTERVAL = 0.133333
 
 # Delay after a confirmed unlock click.
 UNLOCK_SETTLE_DELAY = 0.0
@@ -311,22 +311,22 @@ SCROLL_INCREMENT_STEP = 1
 MAX_IDLE_PASS_ATTEMPTS = 1
 
 # Pause between repeated scroll attempts.
-SCROLL_INTERVAL_PAUSE = 0.0
+SCROLL_INTERVAL_PAUSE = 0.300
 
 # Settle delay after each completed scroll.
-POST_SCROLL_SETTLE = 0.0
+POST_SCROLL_SETTLE = 0.300
 
 # Drag duration used for scroll gestures.
-SCROLL_DURATION = 0.0
+SCROLL_DURATION = 0.300
 
 
 # --- Stats upgrades ---
 
 # Duration of the stats-upgrade spam-click action.
-STATS_UPGRADE_CLICK_DURATION = 0.0
+STATS_UPGRADE_CLICK_DURATION = 1.5
 
 # Delay between stats-upgrade clicks and the mouse down duration for that loop.
-STATS_UPGRADE_CLICK_DELAY = 0.0
+STATS_UPGRADE_CLICK_DELAY = 0.016
 
 
 # --- Telegram notifications ---
@@ -349,7 +349,7 @@ TELEGRAM_CHAT_ID = os.environ.get("EATVENTURE_TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_QUEUE_MAXSIZE = 100
 
 # Maximum time to wait for the Telegram worker to stop.
-TELEGRAM_CLOSE_TIMEOUT = 0.0
+TELEGRAM_CLOSE_TIMEOUT = 5.5
 
 
 # --- Forbidden click zones ---
