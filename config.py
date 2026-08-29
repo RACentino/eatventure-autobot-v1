@@ -24,7 +24,7 @@ WINDOW_HEIGHT = 780
 DEBUG = False
 
 # Shows the forbidden-area overlay when the bot starts.
-ShowForbiddenArea = True
+ShowForbiddenArea = False
 
 
 # --- SCRCPY frame recovery ---
