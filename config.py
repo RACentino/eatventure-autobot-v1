@@ -375,8 +375,8 @@ EVENT_FORBIDDEN_ZONE_OPTIONS: dict[int, tuple[int, int, int, int]] = {
 }
 
 NUMBERED_FORBIDDEN_ZONE_BOUNDS = (
-    (0, 60, 50, 280),
-    (0, 60, 600, 667),
-    (145, 200, 65, 110),
-    (55, 285, 660, 725),
+    (0, 55, 50, 255),
+    (0, 56, 610, 667),
+    (150, 193, 70, 109),
+    (55, 285, 670, 725),
 )
