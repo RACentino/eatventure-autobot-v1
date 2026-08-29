@@ -24,7 +24,7 @@ WINDOW_HEIGHT = 780
 DEBUG = False
 
 # Shows the forbidden-area overlay when the bot starts.
-ShowForbiddenArea = True
+ShowForbiddenArea = False
 
 
 # --- SCRCPY frame recovery ---
@@ -35,7 +35,7 @@ SCRCPY_MISS_RECOVERY_ENABLED = True
 # Delay before retrying a red-icon scan after an empty frame.
 SCRCPY_RED_ICON_MISS_RECOVERY_DELAY = 0.144
 
-# Delay before retryixx g a box scan after an empty frame.
+# Delay before retrying a box scan after an empty frame.
 SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.144
 
 # Delay before retrying an upgrade-station scan after an empty frame.
@@ -375,8 +375,8 @@ EVENT_FORBIDDEN_ZONE_OPTIONS: dict[int, tuple[int, int, int, int]] = {
 }
 
 NUMBERED_FORBIDDEN_ZONE_BOUNDS = (
-    (0, 60, 50, 270),
-    (0, 60, 640, 700),
-    (150, 205, 70, 115),
-    (65, 295, 700, 760),
+    (0, 60, 50, 280),
+    (0, 60, 600, 667),
+    (145, 200, 65, 110),
+    (55, 285, 660, 725),
 )
