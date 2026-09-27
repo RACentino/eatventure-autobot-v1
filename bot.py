@@ -556,6 +556,28 @@ class EatventureBot:
             return False
         return True
 
+    def _perform_new_level_verification_scroll(self) -> bool:
+        """Restored from v1 (73f5db0/eccd810): one down-drag used solely to force a fresh render
+        before re-scanning for the new-level red icon. Reuses the shared SCROLL_START_POS origin;
+        distance/duration/settle timing are dedicated to this step, independent of the oscillating
+        SCROLL_* config used by _perform_oscillating_scroll_step. Not part of the oscillation
+        cycle, so it does not touch _oscillation_cycle_index/_oscillation_leg_* progress."""
+        start_x, start_y = config.SCROLL_START_POS
+        target_y = start_y - config.NEW_LEVEL_VERIFICATION_SCROLL_DISTANCE
+        moved = self.mouse_controller.drag(
+            start_x,
+            start_y,
+            start_x,
+            target_y,
+            duration=config.NEW_LEVEL_VERIFICATION_SCROLL_DURATION,
+            relative=True,
+        )
+        if not moved:
+            return False
+        if not self._sleep(config.NEW_LEVEL_VERIFICATION_SCROLL_SETTLE_DELAY):
+            return False
+        return self._sleep(config.NEW_LEVEL_VERIFICATION_SCROLL_INTERVAL_PAUSE)
+
     def _find_upgrade_station_match(self, threshold: float) -> RedIcon | None:
         if "upgradeStation" not in self.templates:
             return None
@@ -1134,7 +1156,11 @@ class EatventureBot:
                 logger.info("Upgrade station found at (%s, %s) on attempt %s", x, y, attempt + 1)
                 self.upgrade_station_pos = (x, y)
                 self.upgrade_found_in_cycle = True
-                self.consecutive_failed_cycles = 0
+                # Deliberately NOT resetting consecutive_failed_cycles here (moved to
+                # handle_hold_upgrade_station's genuine-completion point, see comment there): a
+                # station that is found every cycle but never successfully held would otherwise
+                # re-zero this counter on every pass, before the hold below ever gets a chance to
+                # increment it past 1.
                 self.cycle_counter = 0
                 return State.HOLD_UPGRADE_STATION
 
@@ -1196,16 +1222,29 @@ class EatventureBot:
         return verified_match, base_threshold, relaxed_threshold
 
     def handle_hold_upgrade_station(self) -> State:
+        # Intentional deviation from literal v1 parity (this exact gap was unfixed): a red icon
+        # whose station is found every SEARCH but never actually holds/clicks successfully would
+        # otherwise loop FIND_RED_ICONS<->OPEN_BOXES forever, since nothing here used to touch
+        # consecutive_failed_cycles and the same-state watchdog never fires (the state keeps
+        # changing every tick). Every early exit below now increments the same counter that
+        # already feeds the OPEN_BOXES->SCROLL escape (FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL),
+        # without adding a new counter or config value; it only resets on a genuinely completed
+        # hold further down, not on handle_search_upgrade_station's "found" branch, so repeated
+        # hold failures accumulate across cycles instead of being re-zeroed by the very next
+        # search success.
         if not self.upgrade_station_pos:
+            self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
 
         x, y = self.upgrade_station_pos
         if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
             logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", x, y)
+            self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
 
         verified_target = self._verify_upgrade_station_hold_target(x, y)
         if verified_target is None:
+            self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
         (_, x, y), base_threshold, relaxed_threshold = verified_target
         if self.current_red_icon_index < len(self.red_icons):
@@ -1220,6 +1259,7 @@ class EatventureBot:
         with self.mouse_controller._input_lock:
             screen_position = self._position_cursor_for_upgrade_hold(x, y)
             if screen_position is None:
+                self.consecutive_failed_cycles += 1
                 return State.OPEN_BOXES
 
             logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
@@ -1233,8 +1273,12 @@ class EatventureBot:
                 )
             )
         if not hold_completed:
+            self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
 
+        # The hold actually completed: real progress, so clear the streak here rather than at
+        # handle_search_upgrade_station's "found" branch (see comment there).
+        self.consecutive_failed_cycles = 0
         self.holds_completed += 1
         self.box_only_passes = 0  # a purchase is progress: the dead-loop guard starts over
         self.idle_scrolls = 0
@@ -1388,6 +1432,10 @@ class EatventureBot:
         if not self._sleep(config.FOCUS_SETTLE_DELAY):
             return State.CHECK_NEW_LEVEL
         if not self._new_level_red_icon_verified:
+            if not self._perform_new_level_verification_scroll():
+                logger.warning("Failed to perform verification scroll for new level red icon")
+                return State.CHECK_NEW_LEVEL
+
             confirmed_icon = self._find_new_level_red_icon()
             if confirmed_icon is None:
                 logger.info("New level red icon disappeared before visual confirmation; resuming main flow")

@@ -255,6 +255,17 @@ NEW_LEVEL_SEARCH_ATTEMPTS = 5
 # Delay between new-level transition searches.
 NEW_LEVEL_SEARCH_INTERVAL = 0.080
 
+# One-shot down-drag performed before the first new-level red-icon rescan each cycle, forcing a
+# fresh render before trusting a miss. v1 originally had this (73f5db0/eccd810) but lost it as an
+# incidental bundle in 12e397a alongside an unrelated upgrade-station fix; restored per v2's port.
+# Reuses SCROLL_START_POS as its origin; kept separate from the SCROLL_* family (the oscillating
+# search scroll used by handle_scroll) since that config is independently tuned and must not be
+# conflated with this one-shot verification step.
+NEW_LEVEL_VERIFICATION_SCROLL_DISTANCE = 100
+NEW_LEVEL_VERIFICATION_SCROLL_DURATION = 0.300
+NEW_LEVEL_VERIFICATION_SCROLL_SETTLE_DELAY = 0.300
+NEW_LEVEL_VERIFICATION_SCROLL_INTERVAL_PAUSE = 0.300
+
 # Delay after a new-level button click before unlock confirmation starts.
 LEVEL_TRANSITION_SETTLE_DELAY = 0.300
 
