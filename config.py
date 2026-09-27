@@ -177,6 +177,11 @@ EVENT_LOOP_INTERVAL = 0.016
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.0
 
+# Period of the INFO "metrics" line (config fingerprint, per-state time share, levels, holds,
+# boxes, guard trips, idle scrolls) that makes levels/hour measurable from bot.log; 0 disables it,
+# including the closing line logged when the bot stops. 300 s keeps it to ~12 lines/hour.
+METRICS_LOG_INTERVAL = 300.0
+
 # Delay used after clearing focus before screen confirmation.
 FOCUS_SETTLE_DELAY = 0.016
 
@@ -312,6 +317,18 @@ SCROLL_INCREMENT_STEP = 1
 
 # Maximum consecutive no-work box cycles before the bot scrolls to a new area.
 MAX_IDLE_PASS_ATTEMPTS = 1
+
+# Dead-loop guard: after this many box-opening passes with no scroll and no completed upgrade
+# hold in between, OPEN_BOXES forces a SCROLL. v2's live logs (Sep 8-25) held streaks of hundreds
+# to thousands of consecutive box passes with zero level completions, where a stuck "box" was
+# re-clicked forever and the search never scrolled. Healthy runs peak at 3-4 box passes between
+# scrolls, so 8 leaves 2x headroom before it interleaves.
+MAX_BOX_ONLY_PASSES = 8
+
+# Stall alert: after this many completed scrolls in a row with no box opened, upgrade held,
+# stats upgrade or level completed, log a WARNING and probe box detection on the next scan.
+# Repeats every multiple. 0 disables.
+STALL_SCROLLS_BEFORE_ALERT = 150
 
 # Pause between repeated scroll attempts.
 SCROLL_INTERVAL_PAUSE = 0.300

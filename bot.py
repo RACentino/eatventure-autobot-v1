@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import math
 import threading
@@ -72,6 +73,7 @@ class EatventureBot:
         self._red_icon_max_width, self._red_icon_max_height = self._red_icon_template_span()
         self.ready = self._validate_required_templates()
         self._initialize_runtime_state()
+        self._config_fingerprint = self._compute_config_fingerprint()
 
         logger.info("Bot initialized successfully")
 
@@ -109,9 +111,45 @@ class EatventureBot:
         self._state_entered_at = time.monotonic()
         self.forbidden_zones = self._configured_forbidden_zones()
 
+        # Dead-loop guard + stall alert + metrics counters (see handle_open_boxes,
+        # _maybe_alert_stall, _log_metrics). Tallies (holds_completed, boxes_opened_total,
+        # box_guard_trips, stall_alerts) are never reset by _reset_search_cycle, only by stop()
+        # below, mirroring total_levels_completed's treatment.
+        self.box_only_passes = 0
+        self.idle_scrolls = 0
+        self.holds_completed = 0
+        self.boxes_opened_total = 0
+        self.box_guard_trips = 0
+        self.stall_alerts = 0
+        # Where the last few boxes were clicked, logged when the dead-loop guard trips so a
+        # UI-fixed stuck target (same coordinates every pass) is visible in bot.log.
+        self._recent_box_clicks: deque[tuple[int, int]] = deque(maxlen=8)
+        # Stall alert: when the idle streak began, and whether the next OPEN_BOXES scan should
+        # log what box detection actually saw.
+        self._idle_started_at = 0.0
+        self._stall_probe_pending = False
+        # ponytail: cumulative since process start, no rolling window; subtract consecutive
+        # metrics lines for a per-period rate. Upgrade path: a windowed deque if that gets tedious.
+        self._state_seconds: dict[State, float] = dict.fromkeys(State, 0.0)
+        self._last_metrics_at = 0.0
+
     @staticmethod
     def _configured_forbidden_zones() -> list[tuple[int, int, int, int]]:
         return list(config.NUMBERED_FORBIDDEN_ZONE_BOUNDS)
+
+    @staticmethod
+    def _compute_config_fingerprint() -> str:
+        """Short stable id of the tuning in effect, so a metrics line says which config produced
+        it. config.py is a flat module (no dataclass), so this hashes every public UPPERCASE
+        constant except paths (machine-specific) and Telegram fields (secret/env-derived)."""
+        excluded = {"ASSETS_DIR", "LOGS_DIR", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ENABLED"}
+        tuning = {
+            name: value
+            for name, value in vars(config).items()
+            if name.isupper() and name not in excluded
+        }
+        fingerprint = repr(sorted(tuning.items(), key=lambda item: item[0]))
+        return hashlib.sha1(fingerprint.encode(), usedforsecurity=False).hexdigest()[:8]
 
     def set_event_forbidden_zone(self, bounds: ForbiddenZoneBounds) -> None:
         self.forbidden_zones = [bounds, *self._configured_forbidden_zones()]
@@ -458,6 +496,7 @@ class EatventureBot:
 
     def _record_level_completion(self) -> float:
         self.total_levels_completed += 1
+        self.idle_scrolls = 0
         elapsed = 0.0
         completion_time = time.monotonic()
         if self.current_level_start_time is not None:
@@ -733,6 +772,7 @@ class EatventureBot:
                 continue
             if self.mouse_controller.click(x, y, relative=True):
                 boxes_found += 1
+                self._recent_box_clicks.append((x, y))
         return boxes_found
 
     def _next_state_after_box_cycle(self) -> State:
@@ -789,6 +829,7 @@ class EatventureBot:
             self._stop_requested.clear()
             self.running = True
             self._state_entered_at = time.monotonic()
+            self._last_metrics_at = time.monotonic()
             if self.current_level_start_time is None:
                 self.current_level_start_time = time.monotonic()
             if config.ShowForbiddenArea and self.overlay is None:
@@ -806,6 +847,7 @@ class EatventureBot:
         with self._state_operation_lock:
             if not self.running and self.overlay is None:
                 return
+            was_running = self.running
             self.running = False
             self.state_machine.transition(State.FIND_RED_ICONS)
             self._reset_search_cycle()
@@ -815,9 +857,13 @@ class EatventureBot:
             self.upgrade_found_in_cycle = False
             self.work_done = False
             self.consecutive_failed_cycles = 0
+            self.box_only_passes = 0
+            self.idle_scrolls = 0
             if self.overlay is not None:
                 self.overlay.stop()
                 self.overlay = None
+            if was_running and config.METRICS_LOG_INTERVAL > 0:
+                self._log_metrics()
 
     def step(self) -> bool:
         if not self._state_operation_lock.acquire(blocking=False):
@@ -833,7 +879,9 @@ class EatventureBot:
                 self.stop()
                 return False
             previous_state = self.state_machine.current_state
+            handler_started_at = time.monotonic()
             current_state = self.state_machine.update()
+            self._state_seconds[previous_state] += time.monotonic() - handler_started_at
             now = time.monotonic()
             if current_state != previous_state:
                 self._state_entered_at = now
@@ -842,6 +890,7 @@ class EatventureBot:
                 self._reset_search_cycle()
                 self.state_machine.transition(State.FIND_RED_ICONS)
                 self._state_entered_at = now
+            self._maybe_log_metrics()
             return True
         except (WindowNotAvailableError, WindowCaptureError) as exc:
             logger.error("Stopping bot: %s", exc)
@@ -857,6 +906,89 @@ class EatventureBot:
             return False
         finally:
             self._state_operation_lock.release()
+
+    def _maybe_log_metrics(self) -> None:
+        interval = config.METRICS_LOG_INTERVAL
+        now = time.monotonic()
+        if interval <= 0 or now - self._last_metrics_at < interval:
+            return
+        self._last_metrics_at = now
+        self._log_metrics()
+
+    def _log_metrics(self) -> None:
+        """One parseable line: run_s is time spent inside handlers (not the event-loop wake), and
+        each state's share of it - where the run actually went."""
+        total = sum(self._state_seconds.values())
+        shares = " ".join(
+            f"{state.name}={100 * seconds / total:.1f}%"
+            for state, seconds in self._state_seconds.items()
+            if seconds > 0
+        )
+        logger.info(
+            "metrics cfg=%s run_s=%.0f levels=%d holds=%d boxes=%d guard_trips=%d "
+            "idle_scrolls=%d stall_alerts=%d | %s",
+            self._config_fingerprint,
+            total,
+            self.total_levels_completed,
+            self.holds_completed,
+            self.boxes_opened_total,
+            self.box_guard_trips,
+            self.idle_scrolls,
+            self.stall_alerts,
+            shares or "-",
+        )
+
+    def _maybe_alert_stall(self) -> None:
+        """After every landed scroll: idle_scrolls says how long the search has produced nothing.
+        Every STALL_SCROLLS_BEFORE_ALERT scrolls, log a WARNING and arm a one-shot probe of box
+        detection on the next OPEN_BOXES frame, so a silent stall names its own cause."""
+        if self.idle_scrolls == 1:
+            self._idle_started_at = time.monotonic()
+        every = max(0, int(config.STALL_SCROLLS_BEFORE_ALERT))
+        if every <= 0 or self.idle_scrolls % every != 0:
+            return
+        self.stall_alerts += 1
+        self._stall_probe_pending = True
+        logger.warning(
+            "Stall: %d scrolls over %.0f min with no box opened, upgrade held, stats upgrade or "
+            "level completed (levels=%d holds=%d boxes=%d); probing box detection on the next scan",
+            self.idle_scrolls,
+            (time.monotonic() - self._idle_started_at) / 60,
+            self.total_levels_completed,
+            self.holds_completed,
+            self.boxes_opened_total,
+        )
+
+    def _log_box_near_misses(self, limited_screenshot: Any, detected: int) -> None:
+        """One text line: how many boxes passed detection on this frame, and for each box template
+        its best raw match with no threshold/gate applied (template score, HSV ratio) and whether
+        that spot is a forbidden zone. Tells a template/HSV miss from a zone block."""
+        parts = []
+        for box_name in self._box_template_names():
+            template, mask = self.templates[box_name]
+            explained = self.image_matcher.explain_template(
+                limited_screenshot,
+                template,
+                mask=mask,
+                template_name=box_name,
+                hsv_ranges=config.BOX_HSV_RANGES,
+            )
+            if explained is None:
+                continue
+            name, confidence, (center_x, center_y), ratio = explained
+            zone = " IN-FORBIDDEN-ZONE" if self.mouse_controller.is_in_forbidden_zone(
+                center_x, center_y, relative=True
+            ) else ""
+            ratio_text = "n/a" if ratio is None else f"{ratio:.2f}"
+            parts.append(f"{name} conf={confidence:.3f} at ({center_x}, {center_y}) hsv={ratio_text}{zone}")
+        logger.warning(
+            "Stall probe: %d box(es) passed detection on this scan. Best raw match per template "
+            "(a box needs conf>=%.3f and hsv>=%.2f, outside forbidden zones): %s",
+            detected,
+            config.BOX_THRESHOLD,
+            config.BOX_HSV_MIN_MATCH_RATIO,
+            "; ".join(parts) or "none",
+        )
 
     def _state_from_red_icon_scan(self, best_new_level_icon: RedIcon | None) -> State:
         if best_new_level_icon is not None:
@@ -1103,6 +1235,10 @@ class EatventureBot:
         if not hold_completed:
             return State.OPEN_BOXES
 
+        self.holds_completed += 1
+        self.box_only_passes = 0  # a purchase is progress: the dead-loop guard starts over
+        self.idle_scrolls = 0
+
         if hold_stopped_by_max_duration:
             logger.info("Upgrade station hold released by max duration fallback after %.2fs", hold_elapsed)
         else:
@@ -1147,6 +1283,7 @@ class EatventureBot:
             return State.SCROLL
 
         self.cycle_counter = 0
+        self.idle_scrolls = 0
         logger.info("Stats icon found, upgrading")
         opened = self.mouse_controller.click(
             config.STATS_UPGRADE_BUTTON_POS[0],
@@ -1198,12 +1335,38 @@ class EatventureBot:
             box_candidates = self._collect_box_candidates(limited_screenshot, box_threshold)
 
         merged_boxes = self.image_matcher.suppress_overlaps(box_candidates, 0.20)
+
+        if self._stall_probe_pending:
+            self._stall_probe_pending = False
+            self._log_box_near_misses(limited_screenshot, len(merged_boxes))
+
         boxes_found = self._click_box_candidates(merged_boxes)
 
         if boxes_found > 0:
             self.work_done = True
             self.cycle_counter = 0
+            self.idle_scrolls = 0
+            self.boxes_opened_total += boxes_found
             logger.info("Opened %s boxes", boxes_found)
+            # Deliberate deviation from v1 parity (v1 never scrolls while boxes keep opening):
+            # live v2 logs showed a stuck "box" re-clicked for hours, work_done re-arming every
+            # pass, so SCROLL (and with it every off-screen upgrade) was starved and the
+            # same-state watchdog never fired because the state changes each tick. Zero-box passes
+            # do not reset the count, so an alternating stuck target can't dodge it.
+            # ponytail: interleave only. A UI-fixed stuck target still burns (K-1)/K of passes;
+            # upgrade path: ignore a position clicked K times in a row (positions are logged on
+            # trip via _recent_box_clicks).
+            self.box_only_passes += 1
+            if self.box_only_passes >= max(2, int(config.MAX_BOX_ONLY_PASSES)):
+                self.box_only_passes = 0
+                self.box_guard_trips += 1
+                logger.warning(
+                    "Box loop guard: %s box passes without a scroll or upgrade; forcing a "
+                    "scroll. Last clicked positions: %s",
+                    config.MAX_BOX_ONLY_PASSES,
+                    list(self._recent_box_clicks),
+                )
+                return State.SCROLL
 
         return self._next_state_after_box_cycle()
 
@@ -1213,6 +1376,9 @@ class EatventureBot:
         if not self._perform_oscillating_scroll_step():
             return State.SCROLL
         self.cycle_counter = 0
+        self.box_only_passes = 0
+        self.idle_scrolls += 1
+        self._maybe_alert_stall()
         return State.FIND_RED_ICONS
 
     def handle_check_new_level(self) -> State:

@@ -11,6 +11,9 @@ MatchResult = tuple[bool, float, int, int]
 MatchCandidate = tuple[float, int, int, int, int]
 Point = tuple[int, int]
 HsvRange = tuple[np.ndarray, np.ndarray]
+# (template_name, confidence, center, hsv_ratio) - hsv_ratio is None when no gate was given or it
+# could not be measured. Diagnostics only; see ImageMatcher.explain_template.
+TemplateExplanation = tuple[str, float, Point, float | None]
 
 
 class ImageMatcher:
@@ -286,7 +289,82 @@ class ImageMatcher:
         matched_count = int(np.count_nonzero((combined > 0) & active_mask))
         match_ratio = matched_count / active_count
         return match_ratio >= hsv_match_threshold
-    
+
+    def _hsv_match_ratio(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        location: Point,
+        mask: np.ndarray | None,
+        hsv_ranges: list[HsvRange],
+    ) -> float | None:
+        """Share of the template's active pixels whose colour is inside hsv_ranges at `location`;
+        None when it can't be measured (window falls off the frame, conversion failed, no active
+        pixels, or no ranges given). Diagnostics only (explain_template); never used to decide a
+        click - _check_hsv_gate is the click-path gate and is untouched by this method."""
+        x, y = location
+        template_height, template_width = template.shape[:2]
+        region_of_interest = screenshot[y : y + template_height, x : x + template_width]
+        if region_of_interest.shape[:2] != template.shape[:2]:
+            return None
+
+        active_mask = np.ones((template_height, template_width), dtype=bool) if mask is None else mask > 0
+        active_count = int(np.count_nonzero(active_mask))
+        if active_count <= 0 or not hsv_ranges:
+            return None
+
+        try:
+            hsv_region = cv2.cvtColor(region_of_interest, cv2.COLOR_BGR2HSV)
+        except cv2.error as exc:
+            logger.debug("HSV ratio conversion failed: %s", exc)
+            return None
+
+        combined = np.zeros((template_height, template_width), dtype=np.uint8)
+        for lower, upper in hsv_ranges:
+            combined = cv2.bitwise_or(combined, self._apply_hsv_range_mask(hsv_region, lower, upper))
+
+        matched_count = int(np.count_nonzero((combined > 0) & active_mask))
+        return matched_count / active_count
+
+    def explain_template(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None = None,
+        template_name: str = "Unknown",
+        hsv_ranges: Any = None,
+    ) -> TemplateExplanation | None:
+        """The single best raw match of a template with no threshold or gate applied, plus how
+        much of it sits inside hsv_ranges - what the detector saw when it reported no match.
+        Diagnostics only (the stall probe); never used to decide a click."""
+        try:
+            screenshot = self._normalize_image(screenshot, "screenshot")
+            template = self._normalize_image(template, template_name)
+        except ValueError as exc:
+            logger.warning("[%s] Invalid explain input: %s", template_name, exc)
+            return None
+        mask = self._normalize_mask(mask, template.shape, template_name)
+        if not self._template_fits_screenshot(screenshot, template, template_name):
+            return None
+
+        result = self._safe_match_template(screenshot, template, mask, template_name)
+        if result is None:
+            return None
+
+        min_value, _, min_location, _ = cv2.minMaxLoc(result)
+        confidence = float(1.0 - min_value)
+        if not np.isfinite(confidence):
+            return None
+
+        normalized_hsv_ranges = self._normalize_hsv_ranges(hsv_ranges) if hsv_ranges is not None else None
+        ratio = (
+            None
+            if normalized_hsv_ranges is None
+            else self._hsv_match_ratio(screenshot, template, min_location, mask, normalized_hsv_ranges)
+        )
+        center_x, center_y = self._center_from_location(min_location, template)
+        return template_name, confidence, (center_x, center_y), ratio
+
     def find_all_templates(
         self,
         screenshot: np.ndarray,
