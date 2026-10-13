@@ -33,16 +33,16 @@ ShowForbiddenArea = False
 SCRCPY_MISS_RECOVERY_ENABLED = True
 
 # Delay before retrying a red-icon scan after an empty frame.
-SCRCPY_RED_ICON_MISS_RECOVERY_DELAY = 0.144
+SCRCPY_RED_ICON_MISS_RECOVERY_DELAY = 0.115
 
 # Delay before retrying a box scan after an empty frame.
-SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.144
+SCRCPY_BOX_MISS_RECOVERY_DELAY = 0.035
 
 # Delay before retrying an upgrade-station scan after an empty frame.
-SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.144
+SCRCPY_UPGRADE_MISS_RECOVERY_DELAY = 0.140
 
 # Minimum wait after a state-changing input before trusting the next scrcpy frame.
-SCRCPY_ACTION_SETTLE_DELAY = 0.016
+SCRCPY_ACTION_SETTLE_DELAY = 0.800
 
 
 # --- Template matching thresholds ---
@@ -135,29 +135,29 @@ RED_ICON_OFFSET_Y = 10
 # --- Mouse input timing ---
 
 # Post-click delay applied after mouse click operations.
-CLICK_DELAY = 0.175
+CLICK_DELAY = 0.032
 
 # Delay after moving the cursor before sending click input.
-MOUSE_MOVE_DELAY = 0.016
+MOUSE_MOVE_DELAY = 0.017
 
 # Duration to hold the left mouse button down for normal clicks.
-MOUSE_DOWN_DURATION = 0.125
+MOUSE_DOWN_DURATION = 0.117
 
 # Delay after releasing the left mouse button for normal clicks.
-MOUSE_UP_DURATION = 0.125
+MOUSE_UP_DURATION = 0.117
 
 # Attempts and delay used to confirm low-level cursor and button input.
 INPUT_RETRY_COUNT = 3
-INPUT_RETRY_DELAY = 0.016
+INPUT_RETRY_DELAY = 0.017
 
 # Enables a short hover delay before click input.
-HOVER_ENABLED = False
+HOVER_ENABLED = True
 
 # Hover delay used before click input when hover is enabled.
-HOVER_DURATION = 0.0
+HOVER_DURATION = 0.117
 
 # Delay between upgrade-station search attempts.
-UPGRADE_SEARCH_INTERVAL = 0.080
+UPGRADE_SEARCH_INTERVAL = 0.075
 
 # Fresh-screen attempts used to locate an upgrade station.
 UPGRADE_SEARCH_ATTEMPTS = 5
@@ -172,7 +172,7 @@ UPGRADES_BEFORE_STATS = 2
 STATE_STALL_TIMEOUT_SECONDS = 9.0
 
 # Pause between state-machine steps in the main event loop.
-EVENT_LOOP_INTERVAL = 0.016
+EVENT_LOOP_INTERVAL = 0.005
 
 # General state-settle delay after selected UI actions.
 STATE_DELAY = 0.0
@@ -183,16 +183,16 @@ STATE_DELAY = 0.0
 METRICS_LOG_INTERVAL = 300.0
 
 # Delay used after clearing focus before screen confirmation.
-FOCUS_SETTLE_DELAY = 0.016
+FOCUS_SETTLE_DELAY = 0.800
 
 # Delay before visually confirming an upgrade-station candidate.
-UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.144
+UPGRADE_STATION_VERIFY_SETTLE_DELAY = 0.160
 
 # Maximum fresh-screen searches allowed while locating the upgrade station for verification.
 UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS = 4
 
 # Delay between upgrade-station verification searches.
-UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.080
+UPGRADE_STATION_VERIFY_SEARCH_INTERVAL = 0.075
 
 # Consecutive missed upgrade-station frames required before releasing a hold.
 UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 1
@@ -201,8 +201,8 @@ UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT = 1
 CLICK_HOLD_MAX_DURATION = 9.0
 
 # Lower and upper bounds for upgrade-station hold monitoring.
-UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.080
-UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.144
+UPGRADE_HOLD_CHECK_INTERVAL_MIN = 0.035
+UPGRADE_HOLD_CHECK_INTERVAL_MAX = 0.100
 
 # Absolute cap for the upgrade-station hold monitor.
 UPGRADE_HOLD_MAX_CHECKS = 400
@@ -253,7 +253,7 @@ LEVEL_TRANSITION_POS = (174, 520)
 NEW_LEVEL_SEARCH_ATTEMPTS = 5
 
 # Delay between new-level transition searches.
-NEW_LEVEL_SEARCH_INTERVAL = 0.080
+NEW_LEVEL_SEARCH_INTERVAL = 0.075
 
 # One-shot down-drag performed before the first new-level red-icon rescan each cycle, forcing a
 # fresh render before trusting a miss. v1 originally had this (73f5db0/eccd810) but lost it as an
@@ -263,26 +263,26 @@ NEW_LEVEL_SEARCH_INTERVAL = 0.080
 # conflated with this one-shot verification step.
 NEW_LEVEL_VERIFICATION_SCROLL_DISTANCE = 100
 NEW_LEVEL_VERIFICATION_SCROLL_DURATION = 0.300
-NEW_LEVEL_VERIFICATION_SCROLL_SETTLE_DELAY = 0.300
+NEW_LEVEL_VERIFICATION_SCROLL_SETTLE_DELAY = 0.800
 NEW_LEVEL_VERIFICATION_SCROLL_INTERVAL_PAUSE = 0.300
 
 # Delay after a new-level button click before unlock confirmation starts.
-LEVEL_TRANSITION_SETTLE_DELAY = 0.300
+LEVEL_TRANSITION_SETTLE_DELAY = 0.800
 
 # Delay between the verified footer action and its secondary transition click.
-NEW_LEVEL_CONFIRMATION_DELAY = 0.300
+NEW_LEVEL_CONFIRMATION_DELAY = 0.800
 
 # Delay after the verified secondary transition click.
-LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY = 0.300
+LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY = 0.800
 
 # Number of visual searches used to confirm the next-level unlock button.
 UNLOCK_SEARCH_ATTEMPTS = 4
 
 # Delay between unlock-button searches.
-UNLOCK_SEARCH_INTERVAL = 0.300
+UNLOCK_SEARCH_INTERVAL = 0.075
 
 # Delay after a confirmed unlock click.
-UNLOCK_SETTLE_DELAY = 0.016
+UNLOCK_SETTLE_DELAY = 0.800
 
 
 # --- Red-icon target zones ---
@@ -354,10 +354,10 @@ SCROLL_DURATION = 0.300
 # --- Stats upgrades ---
 
 # Duration of the stats-upgrade spam-click action.
-STATS_UPGRADE_CLICK_DURATION = 1.5
+STATS_UPGRADE_CLICK_DURATION = 2.0
 
 # Delay between stats-upgrade clicks and the mouse down duration for that loop.
-STATS_UPGRADE_CLICK_DELAY = 0.016
+STATS_UPGRADE_CLICK_DELAY = 0.032
 
 
 # --- Telegram notifications ---
@@ -380,7 +380,7 @@ TELEGRAM_CHAT_ID = os.environ.get("EATVENTURE_TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_QUEUE_MAXSIZE = 100
 
 # Maximum time to wait for the Telegram worker to stop.
-TELEGRAM_CLOSE_TIMEOUT = 5.5
+TELEGRAM_CLOSE_TIMEOUT = 5.0
 
 
 # --- Forbidden click zones ---
