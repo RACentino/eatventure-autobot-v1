@@ -265,6 +265,50 @@ class WindowCapture:
             self.hwnd = self._find_window_handle()
             return bool(self.hwnd)
 
+    def describe_environment(self) -> str:
+        """One line of facts for a self-stop log: is the window there, at what size and state, and is
+        it in the foreground (the foreground window's class name only, never its title: titles can
+        carry tab or document names). Read-only and never raises: it asks Windows directly and does
+        not go through ensure_window(), which would resize the window."""
+        try:
+            with self._lock:
+                hwnd = self._find_window_handle()
+                facts = [f"window={'found' if hwnd else 'missing'}"]
+                if hwnd:
+                    try:
+                        _, width, height = self._get_client_size(hwnd)
+                        facts.append(f"client={width}x{height}")
+                    except WindowCaptureError:
+                        facts.append("client=?")
+                    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                    facts.append(f"outer={right - left}x{bottom - top}")
+                    facts.append(f"minimized={bool(win32gui.IsIconic(hwnd))}")
+                    facts.append(f"maximized={bool(win32gui.IsZoomed(hwnd))}")
+                foreground = int(win32gui.GetForegroundWindow() or 0)
+                facts.append(f"foreground={bool(hwnd) and foreground == int(hwnd)}")
+                facts.append(f"foreground_class={win32gui.GetClassName(foreground) if foreground else 'none'}")
+        except Exception as exc:
+            return f"unavailable ({type(exc).__name__})"
+        return " ".join(facts)
+
+    def environment_ready(self) -> bool:
+        """True only when start() would leave the window completely alone: it exists, is neither
+        minimized nor maximized, already has the exact target size and is already the foreground
+        window. start() resizes (ensure_window(resize=True)) any window that is not, and a resize can
+        move a person's window or take their focus. Read-only for the same reasons as
+        describe_environment(); any doubt reads as not ready."""
+        try:
+            with self._lock:
+                hwnd = self._find_window_handle()
+                if not hwnd or win32gui.IsIconic(hwnd) or win32gui.IsZoomed(hwnd):
+                    return False
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                if (right - left, bottom - top) != (self.target_width, self.target_height):
+                    return False
+                return int(win32gui.GetForegroundWindow() or 0) == int(hwnd)
+        except Exception:
+            return False
+
 
 class ForbiddenAreaOverlay:
     def __init__(self, target_hwnd: int, forbidden_zones: list[ForbiddenZone]) -> None:

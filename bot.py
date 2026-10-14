@@ -1,19 +1,21 @@
 import hashlib
 import logging
-import math
+import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+import numpy as np
 import pywintypes
 
 import config
 from image_matcher import ImageMatcher
 from mouse_controller import MouseController
-from state_machine import State, StateMachine
+from state_machine import X_LOCKED_STATES, State, StateMachine
 from telegram_notifier import TelegramNotifier
 from window_capture import (
     ForbiddenAreaOverlay,
@@ -28,6 +30,138 @@ TemplatePair = tuple[Any, Any]
 BoxCandidate = tuple[float, int, int, int, int, str]
 RedIcon = tuple[float, int, int]
 ForbiddenZoneBounds = tuple[int, int, int, int]
+AdbRunner = Callable[[Sequence[str], float], tuple[int, str]]
+Point = tuple[int, int]
+
+# The recovery window judges "is the screen alive" from its last few seconds.
+_RECOVERY_TAIL_SECONDS = 5.0
+
+# Auto-resume (see EatventureBot.poll_resume): how often the cursor is sampled for movement, how often an
+# unchanged check is logged anyway, and the longest wait between failed live attempts.
+_RESUME_SAMPLE_SECONDS = 1.0
+_RESUME_HEARTBEAT_SECONDS = 600.0
+_RESUME_MAX_BACKOFF_SECONDS = 900.0
+
+
+class LevelMark(NamedTuple):
+    """Cumulative tallies at one instant. run_s is time spent inside handlers, so unlike wall-clock it
+    does not count the time the bot sat stopped. Two marks bracket a level."""
+
+    run_s: float = 0.0
+    holds: int = 0
+    boxes: int = 0
+    unlock_miss: int = 0
+
+
+@dataclass
+class _ResumeWatch:
+    """One auto-resume episode, created when the bot stops itself on a window or focus error."""
+
+    reason: str
+    since: float  # when the bot stopped itself
+    activity_at: float  # the last key press or cursor movement seen
+    sample_at: float  # next cursor sample
+    check_at: float  # next readiness check
+    cursor: Point | None = None
+    attempts: int = 0
+    logged: tuple[bool, bool] | None = None  # (ready, quiet) of the last logged check
+    logged_at: float = 0.0
+
+
+def _top_close_position(positions: dict[Point, int]) -> str:
+    """The most-tapped X position as 'x,yxCOUNT' text (e.g. 308,250x3698), or 'none': the unattended
+    logs' only clue to which popup keeps coming back."""
+    if not positions:
+        return "none"
+    (x, y), count = max(positions.items(), key=lambda item: item[1])
+    return f"{x},{y}x{count}"
+
+
+def _frame_thumbnail(frame: np.ndarray) -> np.ndarray:
+    """64x36 grayscale subsample, enough to tell a frozen or dimmed view from a live one.
+    ponytail: nearest-pixel sampling, not an area average; it only has to distinguish an identical
+    frame (delta 0) from an animated one, so no cv2 call and any frame size works."""
+    gray = frame.mean(axis=2) if frame.ndim == 3 else frame.astype(np.float64)
+    rows = np.linspace(0, gray.shape[0] - 1, 36).astype(int)
+    cols = np.linspace(0, gray.shape[1] - 1, 64).astype(int)
+    return np.asarray(gray[rows][:, cols])
+
+
+def _format_near_misses(seen: list[Any], clickable: Callable[[Point], bool] | None = None) -> str:
+    """Text for the early probe: per template its best raw match, how much of it sits inside the HSV
+    gate, the median colour it had (H,S,V: judge the gate in numbers, not images) and, when a zone check
+    is given, whether that spot is a forbidden zone. `seen` holds explain_template_detailed tuples."""
+    parts = []
+    for name, confidence, center, ratio, median in seen:
+        ratio_text = "n/a" if ratio is None else f"{ratio:.2f}"
+        median_text = "" if median is None else f" med_hsv={median[0]},{median[1]},{median[2]}"
+        zone = " IN-FORBIDDEN-ZONE" if clickable and not clickable(center) else ""
+        parts.append(f"{name} conf={confidence:.3f} at {center} hsv={ratio_text}{median_text}{zone}")
+    return "; ".join(parts) or "none"
+
+
+def run_adb(argv: Sequence[str], timeout: float) -> tuple[int, str]:
+    """Runs one adb command as a fixed argv list (never a shell) with a timeout. Never raises: a
+    missing adb, a timeout or no device comes back as (127, reason)."""
+    try:
+        done = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, str(exc)
+    return done.returncode, done.stdout + done.stderr
+
+
+class GameLauncher:
+    """Revives a dead game over adb. The runner is injectable so tests never touch a phone."""
+
+    def __init__(self, runner: AdbRunner = run_adb) -> None:
+        self._run = runner
+        self.package: str | None = None
+
+    def detect_package(self) -> bool:
+        """Picks the one installed package whose id contains GAME_RECOVERY_PACKAGE_HINT. Zero or
+        several matches disable relaunch rather than guess."""
+        code, output = self._run(
+            [config.GAME_RECOVERY_ADB_PATH, "shell", "pm", "list", "packages"],
+            config.GAME_RECOVERY_COMMAND_TIMEOUT,
+        )
+        if code != 0:
+            logger.error("Game relaunch unavailable: 'adb shell pm list packages' failed: %s", output.strip())
+            return False
+        hint = str(config.GAME_RECOVERY_PACKAGE_HINT).lower()
+        found = sorted(
+            {
+                line.removeprefix("package:").strip()
+                for line in output.splitlines()
+                if line.startswith("package:") and hint in line.lower()
+            }
+        )
+        if len(found) != 1:
+            logger.error(
+                "Game relaunch disabled: %d packages match '%s': %s",
+                len(found),
+                config.GAME_RECOVERY_PACKAGE_HINT,
+                ", ".join(found) or "none",
+            )
+            return False
+        self.package = found[0]
+        logger.info("Game relaunch armed for package %s", self.package)
+        return True
+
+    def relaunch(self) -> bool:
+        """Force-stops then launches the game. A frozen app needs the stop; a crashed one ignores it."""
+        if self.package is None:
+            return False
+        adb, timeout = config.GAME_RECOVERY_ADB_PATH, config.GAME_RECOVERY_COMMAND_TIMEOUT
+        steps = (
+            [adb, "shell", "am", "force-stop", self.package],
+            [adb, "shell", "monkey", "-p", self.package, "-c", "android.intent.category.LAUNCHER", "1"],
+        )
+        for argv in steps:
+            code, output = self._run(argv, timeout)
+            if code != 0:
+                logger.error("Game relaunch step failed (%s): %s", " ".join(argv[1:]), output.strip())
+                return False
+        return True
 
 
 class EatventureBot:
@@ -67,10 +201,14 @@ class EatventureBot:
             config.TELEGRAM_ENABLED,
         )
 
+        # Fast/Normal red-icon matching, toggled at runtime by the M hotkey (only while stopped).
+        self.red_icon_fast_mode = bool(config.RED_ICON_FAST_MODE_ENABLED)
+        # adb relaunch of a dead game; None = recovery off (config) and the dead-game check never runs.
+        self._launcher: GameLauncher | None = GameLauncher() if config.GAME_RECOVERY_ENABLED else None
+        # Clock for the recovery window and auto-resume (tests advance it); the rest uses time.monotonic.
+        self._clock: Callable[[], float] = time.monotonic
+
         self.templates = self.load_templates()
-        self._red_icon_template_names_cache: list[str] | None = None
-        self._red_icon_template_names_cache = self._red_icon_template_names()
-        self._red_icon_max_width, self._red_icon_max_height = self._red_icon_template_span()
         self.ready = self._validate_required_templates()
         self._initialize_runtime_state()
         self._config_fingerprint = self._compute_config_fingerprint()
@@ -108,7 +246,7 @@ class EatventureBot:
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
         self._new_level_red_icon_verified = False
-        self._state_entered_at = time.monotonic()
+        self._state_entered_at: float | None = time.monotonic()
         self.forbidden_zones = self._configured_forbidden_zones()
 
         # Dead-loop guard + stall alert + metrics counters (see handle_open_boxes,
@@ -123,11 +261,64 @@ class EatventureBot:
         self.stall_alerts = 0
         # Where the last few boxes were clicked, logged when the dead-loop guard trips so a
         # UI-fixed stuck target (same coordinates every pass) is visible in bot.log.
-        self._recent_box_clicks: deque[tuple[int, int]] = deque(maxlen=8)
+        self._recent_box_clicks: deque[tuple[int, int, float]] = deque(maxlen=8)
         # Stall alert: when the idle streak began, and whether the next OPEN_BOXES scan should
         # log what box detection actually saw.
         self._idle_started_at = 0.0
         self._stall_probe_pending = False
+
+        # How many consecutive steps the flow has been in the current state. Owned by step(); read by
+        # the attempt-loop states (SEARCH_UPGRADE_STATION, TRANSITION_LEVEL).
+        self.state_attempt = 1
+        # No-work loop FIND -> UPGRADE_STATS -> OPEN -> SCROLL -> OPEN -> FIND. Both flags live for ONE
+        # step: FIND sets stats_from_find (so a stats miss goes to OPEN, not SCROLL as after a hold), a
+        # landed scroll sets scan_boxes_after_scroll (so that OPEN pass hands back to FIND instead of
+        # counting another idle pass and scrolling forever). Each is consumed by its handler.
+        self.stats_from_find = False
+        self.scan_boxes_after_scroll = False
+        # Tallies for the metrics line; like total_levels_completed they are never reset by a search reset.
+        self.stats_checks = 0
+        self.stats_hits = 0
+        self.post_scroll_boxes = 0  # crates only the post-scroll scan opened
+        self.box_zone_skips = 0  # boxes that passed detection but sit in a forbidden zone
+        self.box_click_fails = 0  # boxes whose click failed
+        self.holds_capped = 0  # holds that ran to CLICK_HOLD_MAX_DURATION (cash was not the limit)
+        self.hold_seconds_total = 0.0
+        self.nl_unlock_miss = 0  # new-level attempts that exhausted WAIT_FOR_UNLOCK
+        self.level_start_mark = LevelMark()
+        self.nl_first_mark: LevelMark | None = None  # tallies at the level's first New Level sighting
+        self.relaunches = 0
+        self.relaunch_failures = 0
+        self.close_clicks = 0
+        self.close_suppressed = 0
+        self.recovery_taps = 0
+        self.close_positions: dict[Point, int] = {}  # taps per X position
+        # Red-X rule (see _dismiss_popup): where the last X was tapped and how many times in a row, when
+        # the rule may act again after standing down, when the post-level lock ends, and what the
+        # pre-check cost in capture + match seconds.
+        self._close_last_pos: Point | None = None
+        self._close_streak = 0
+        self._close_suppressed_until = 0.0
+        self._close_level_lock_until = 0.0
+        self._close_check_seconds = 0.0
+        # The state whose handler ran last step (self.state is already the NEXT one by the time the popup
+        # pre-check runs) and when this run started, for the self-stop line.
+        self._last_handled_state: State | None = None
+        self._started_at = 0.0
+        # Stall probes and dead-game detection: thumbnails of the first scan of an idle streak, the latest
+        # scan and the one at the previous metrics line; how far the last drag moved the picture.
+        self._early_probe_pending = False
+        self._scan_delta: float | None = None
+        self._package_probed = False
+        self._streak_thumb: np.ndarray | None = None
+        self._streak_anchor_pending = False
+        self._latest_thumb: np.ndarray | None = None
+        self._metrics_thumb: np.ndarray | None = None
+        self._last_probe_thumb: np.ndarray | None = None
+        self._relaunch_progress: tuple[int, int] | None = None
+        # Armed (not None) only while the bot is stopped after an environment self-stop and nobody has
+        # restarted it since; see poll_resume.
+        self._resume: _ResumeWatch | None = None
         # ponytail: cumulative since process start, no rolling window; subtract consecutive
         # metrics lines for a per-period rate. Upgrade path: a windowed deque if that gets tedious.
         self._state_seconds: dict[State, float] = dict.fromkeys(State, 0.0)
@@ -173,49 +364,19 @@ class EatventureBot:
 
         return templates
 
-    def _available_red_icon_template_count(self) -> int:
-        return sum(1 for name in self.templates if name.startswith("RedIcon"))
-
-    def _red_icon_min_matches(self) -> int:
-        if config.RED_ICON_FAST_MODE_ENABLED:
-            return 1
-        available = self._available_red_icon_template_count()
-        if available <= 0:
-            return 1
-        configured = max(1, int(config.RED_ICON_MIN_MATCHES))
-        return min(configured, available)
-
-    @staticmethod
-    def _configured_fast_red_icon_template_names() -> tuple[str, ...]:
-        configured_names = config.RED_ICON_FAST_TEMPLATE_NAMES
-        if not isinstance(configured_names, tuple) or not configured_names:
-            return ()
-        if any(not isinstance(name, str) or not name for name in configured_names):
-            return ()
-        if len(set(configured_names)) != len(configured_names):
-            return ()
-        return tuple(configured_names)
+    def _active_red_icon_template_names(self) -> tuple[str, ...]:
+        names = config.RED_ICON_FAST_TEMPLATE_NAMES if self.red_icon_fast_mode else config.RED_ICON_NORMAL_TEMPLATE_NAMES
+        return tuple(name for name in names if name in self.templates)
 
     def _validate_required_templates(self) -> bool:
+        """The start gate: refuse to run with assets missing rather than silently degrade into a bot
+        that can never see what it is waiting for. A missing redX only switches the popup rule off."""
         missing = [name for name in ("newLevel", "unlock", "upgradeStation") if name not in self.templates]
-        red_icon_count = self._available_red_icon_template_count()
-        if red_icon_count <= 0:
+        if not self._active_red_icon_template_names():
             missing.append("RedIcon*")
-        if config.RED_ICON_FAST_MODE_ENABLED:
-            fast_template_names = self._configured_fast_red_icon_template_names()
-            if not fast_template_names:
-                missing.append("RED_ICON_FAST_TEMPLATE_NAMES")
-            else:
-                missing.extend(name for name in fast_template_names if name not in self.templates)
         if missing:
             logger.error("Missing required templates: %s", ", ".join(missing))
             return False
-        if red_icon_count < int(config.RED_ICON_MIN_MATCHES):
-            logger.warning(
-                "Only %s red-icon templates are available; consensus requirement reduced from %s",
-                red_icon_count,
-                config.RED_ICON_MIN_MATCHES,
-            )
         return True
 
     def _sleep(self, duration: Any) -> bool:
@@ -242,22 +403,6 @@ class EatventureBot:
             return True
         return self._sleep(delay)
 
-    def _scan_red_icon_frame(
-        self,
-        screenshot: Any,
-        limited_screenshot: Any,
-        scan_threshold: float,
-        min_matches: int,
-    ) -> tuple[list[RedIcon], RedIcon | None]:
-        all_detections = self._collect_red_icon_detections(
-            limited_screenshot,
-            scan_threshold,
-            min_distance=80,
-        )
-        red_icons = self._icons_from_detections(all_detections, min_matches)
-        best_new_level_icon = self._find_new_level_red_icon(screenshot, scan_threshold, min_matches)
-        return red_icons, best_new_level_icon
-
     def _find_new_level_button(self, screenshot: Any) -> tuple[bool, float, int, int]:
         template_pair = self._template("newLevel")
         if template_pair is None:
@@ -271,221 +416,194 @@ class EatventureBot:
             template_name="newLevel",
         )
 
-    def _red_icon_template_names(self) -> list[str]:
-        cached = self._red_icon_template_names_cache
-        if cached is not None:
-            return cached
-        template_names = [name for name in self.templates if name.startswith("RedIcon")]
-        if not template_names:
-            return ["RedIcon"]
+    def find_unlock_button(self, screenshot: Any) -> tuple[bool, float, int, int]:
+        template_pair = self._template("unlock")
+        if template_pair is None:
+            return False, 0.0, 0, 0
+        template, mask = template_pair
+        return self.image_matcher.find_template(
+            screenshot,
+            template,
+            mask=mask,
+            threshold=config.UNLOCK_THRESHOLD,
+            template_name="unlock",
+        )
 
-        def sort_key(name: str) -> tuple[int, Any]:
-            if name == "RedIcon":
-                return (0, 0)
-            if name == "RedIconNoBG":
-                return (2, 0)
-            suffix = name.replace("RedIcon", "", 1)
-            if suffix.isdigit():
-                return (1, int(suffix))
-            return (3, suffix)
-
-        return sorted(template_names, key=sort_key)
-
-    def _red_icon_template_span(self) -> tuple[int, int]:
-        max_width = 0
-        max_height = 0
-        for template_name in self._red_icon_template_names():
-            if template_name not in self.templates:
-                continue
-            template, _ = self.templates[template_name]
-            max_height = max(max_height, int(template.shape[0]))
-            max_width = max(max_width, int(template.shape[1]))
-        return max_width, max_height
-
-    @staticmethod
-    def _extract_region(
-        screenshot: Any,
-        x_min: Any,
-        x_max: Any,
-        y_min: Any,
-        y_max: Any,
-        pad_x: Any = 0,
-        pad_y: Any = 0,
-    ) -> tuple[Any, int, int]:
-        height, width = screenshot.shape[:2]
-        left = max(0, int(x_min) - int(pad_x))
-        right = min(width, int(x_max) + int(pad_x))
-        top = max(0, int(y_min) - int(pad_y))
-        bottom = min(height, int(y_max) + int(pad_y))
-        if left >= right or top >= bottom:
-            return screenshot[0:0, 0:0], 0, 0
-        return screenshot[top:bottom, left:right], left, top
-    @staticmethod
-    def _merge_icon_detection(
-        detections: dict[tuple[int, int], list[tuple[str, float]]],
-        x: int,
-        y: int,
-        template_name: str,
-        confidence: float,
-    ) -> None:
-        for existing_x, existing_y in list(detections.keys()):
-            if abs(x - existing_x) < 10 and abs(y - existing_y) < 10:
-                detections[(existing_x, existing_y)].append((template_name, confidence))
-                return
-        detections[(x, y)] = [(template_name, confidence)]
-
-    def _collect_red_icon_detections(
+    def _gather(
         self,
-        screenshot: Any,
+        frame: Any,
+        template_names: tuple[str, ...],
         threshold: float,
-        min_distance: int = 80,
-        offset_x: int = 0,
-        offset_y: int = 0,
-    ) -> dict[tuple[int, int], list[tuple[str, float]]]:
-        detections: dict[tuple[int, int], list[tuple[str, float]]] = {}
-        if screenshot.size == 0:
-            return detections
-        template_names = self._red_icon_template_names()
-        if config.RED_ICON_FAST_MODE_ENABLED:
-            configured_fast_names = self._configured_fast_red_icon_template_names()
-            fast_names = [name for name in configured_fast_names if name in self.templates]
-            if not fast_names:
-                logger.error("No configured Fast Mode red-icon template is loaded")
-                return detections
-            template_names = fast_names
-            min_distance = int(config.RED_ICON_FAST_MIN_DISTANCE)
-        for template_name in template_names:
-            if template_name not in self.templates:
-                continue
-            template, mask = self.templates[template_name]
-            icons = self.image_matcher.find_all_templates(
-                screenshot,
-                template,
-                mask=mask,
-                threshold=threshold,
-                min_distance=min_distance,
-                template_name=template_name,
-                hsv_ranges=config.RED_ICON_HSV_RANGES,
-                hsv_match_threshold=config.RED_ICON_HSV_MIN_MATCH_RATIO,
-            )
-            for confidence, x, y in icons:
-                self._merge_icon_detection(
-                    detections,
-                    x + offset_x,
-                    y + offset_y,
-                    template_name,
-                    confidence,
-                )
-        return detections
-
-    @staticmethod
-    def _best_confidence_by_template(matches: list[tuple[str, float]]) -> dict[str, float]:
-        by_template: dict[str, float] = {}
-        for template_name, confidence in matches:
-            existing = by_template.get(template_name)
-            if existing is None or confidence > existing:
-                by_template[template_name] = confidence
-        return by_template
-
-    @classmethod
-    def _icons_from_detections(
-        cls: type["EatventureBot"],
-        detections: dict[tuple[int, int], list[tuple[str, float]]],
+        min_distance: int,
+        hsv_ranges: Any,
+        hsv_ratio: float,
         min_matches: int,
-    ) -> list[RedIcon]:
-        icons: list[RedIcon] = []
-        for (x, y), matches in detections.items():
-            by_template = cls._best_confidence_by_template(matches)
-            if len(by_template) < min_matches:
-                continue
-            max_confidence = max(by_template.values())
-            icons.append((max_confidence, x, y))
-        return icons
-
-    def _find_best_zone_red_icon(
-        self,
-        screenshot: Any,
-        threshold: float,
-        x_min: int,
-        x_max: int,
-        y_min: int,
-        y_max: int,
-        min_distance: int = 80,
-    ) -> RedIcon | None:
-        region, offset_x, offset_y = self._extract_region(
-            screenshot,
-            x_min,
-            x_max,
-            y_min,
-            y_max,
-            pad_x=self._red_icon_max_width,
-            pad_y=self._red_icon_max_height,
-        )
-        if region.size == 0:
-            return None
-
-        detections = self._collect_red_icon_detections(
-            region,
-            threshold,
+        iou_threshold: float,
+    ) -> list[BoxCandidate]:
+        """Candidates of several templates over one frame. With min_matches > 1 only spots where that
+        many DISTINCT templates agree survive; otherwise overlapping matches are merged, best first."""
+        templates = [(name, *self.templates[name]) for name in template_names if name in self.templates]
+        raw = self.image_matcher.find_candidates_across_templates(
+            frame,
+            templates,
+            threshold=threshold,
             min_distance=min_distance,
-            offset_x=offset_x,
-            offset_y=offset_y,
+            hsv_ranges=hsv_ranges,
+            hsv_match_threshold=hsv_ratio,
         )
-        min_matches = self._red_icon_min_matches()
-        icons = self._icons_from_detections(detections, min_matches)
-        best_match = None
+        if min_matches > 1:
+            return self.image_matcher.filter_by_template_consensus(raw, min_matches, iou_threshold)
+        return self.image_matcher.suppress_overlaps(raw, iou_threshold)
+
+    def find_red_icons(self, frame: Any) -> list[RedIcon]:
+        names = self._active_red_icon_template_names()
+        if not names:
+            return []
+        # Fast mode scans a single template, so consensus is trivially satisfied; normal mode requires
+        # several template variants to agree on the same spot.
+        min_matches = 1 if self.red_icon_fast_mode else min(max(1, int(config.RED_ICON_MIN_MATCHES)), len(names))
+        found = self._gather(
+            frame,
+            names,
+            config.RED_ICON_THRESHOLD,
+            int(config.RED_ICON_FAST_MIN_DISTANCE),
+            config.RED_ICON_HSV_RANGES,
+            config.RED_ICON_HSV_MIN_MATCH_RATIO,
+            min_matches,
+            config.RED_ICON_NMS_IOU_THRESHOLD,
+        )
+        return [(confidence, x, y) for confidence, x, y, _, _, _ in found]
+
+    @staticmethod
+    def split_red_icons(icons: Iterable[RedIcon]) -> tuple[list[RedIcon], bool, bool]:
+        """Partitions a red-icon scan into (actionable icons, new-level footer icon seen, stats icon
+        seen). Footer icons live in dedicated zones and are signals, not click targets. A footer badge
+        must clear its own, stricter confidence floor; one below it is dropped outright, never
+        reclassified as an actionable icon."""
+        actionable: list[RedIcon] = []
+        new_level_seen = False
+        stats_seen = False
         for confidence, x, y in icons:
-            if not (x_min <= x <= x_max and y_min <= y <= y_max):
-                continue
-            if best_match is None or confidence > best_match[0]:
-                best_match = (confidence, x, y)
-        return best_match
-
-    def _find_new_level_red_icon(
-        self,
-        screenshot: Any = None,
-        scan_threshold: float | None = None,
-        min_matches: int | None = None,
-    ) -> RedIcon | None:
-        if screenshot is None:
-            screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
-        if scan_threshold is None:
-            scan_threshold = config.NEW_LEVEL_RED_ICON_THRESHOLD
-        else:
-            scan_threshold = min(float(scan_threshold), float(config.NEW_LEVEL_RED_ICON_THRESHOLD))
-        if min_matches is None:
-            min_matches = self._red_icon_min_matches()
-
-        footer_region, offset_x, offset_y = self._extract_region(
-            screenshot,
-            config.NEW_LEVEL_RED_ICON_X_MIN,
-            config.NEW_LEVEL_RED_ICON_X_MAX,
-            config.NEW_LEVEL_RED_ICON_Y_MIN,
-            config.NEW_LEVEL_RED_ICON_Y_MAX,
-            pad_x=self._red_icon_max_width,
-            pad_y=self._red_icon_max_height,
-        )
-        footer_detections = self._collect_red_icon_detections(
-            footer_region,
-            scan_threshold,
-            min_distance=80,
-            offset_x=offset_x,
-            offset_y=offset_y,
-        )
-        all_red_icons_extended = self._icons_from_detections(footer_detections, min_matches)
-
-        best_new_level_icon = None
-        for confidence, x, y in all_red_icons_extended:
-            if not (
+            if (
                 config.NEW_LEVEL_RED_ICON_X_MIN <= x <= config.NEW_LEVEL_RED_ICON_X_MAX
                 and config.NEW_LEVEL_RED_ICON_Y_MIN <= y <= config.NEW_LEVEL_RED_ICON_Y_MAX
             ):
-                continue
-            if confidence < config.NEW_LEVEL_RED_ICON_THRESHOLD:
-                continue
-            if best_new_level_icon is None or confidence > best_new_level_icon[0]:
-                best_new_level_icon = (confidence, x, y)
-        return best_new_level_icon
+                new_level_seen = new_level_seen or confidence >= config.NEW_LEVEL_RED_ICON_THRESHOLD
+            elif (
+                config.UPGRADE_RED_ICON_X_MIN <= x <= config.UPGRADE_RED_ICON_X_MAX
+                and config.UPGRADE_RED_ICON_Y_MIN <= y <= config.UPGRADE_RED_ICON_Y_MAX
+            ):
+                stats_seen = stats_seen or confidence >= config.STATS_RED_ICON_THRESHOLD
+            elif y < config.MAX_SEARCH_Y:
+                actionable.append((confidence, x, y))
+        return actionable, new_level_seen, stats_seen
+
+    def find_boxes(self, frame: Any) -> list[BoxCandidate]:
+        names = tuple(name for name in config.BOX_TEMPLATE_NAMES if name in self.templates)
+        if not names:
+            return []
+        return self._gather(
+            frame,
+            names,
+            config.BOX_THRESHOLD,
+            int(config.BOX_MIN_DISTANCE),
+            config.BOX_HSV_RANGES,
+            config.BOX_HSV_MIN_MATCH_RATIO,
+            min(max(1, int(config.BOX_MIN_MATCHES)), len(names)),
+            config.BOX_NMS_IOU_THRESHOLD,
+        )
+
+    def find_upgrade_station_candidates(self, frame: Any, threshold: float) -> list[BoxCandidate]:
+        """Every station match so a caller can skip a forbidden-zone best match in favour of the next
+        one. Only one template exists for this target, so there is no cross-template consensus."""
+        if "upgradeStation" not in self.templates:
+            return []
+        return self._gather(
+            frame,
+            ("upgradeStation",),
+            threshold,
+            int(config.UPGRADE_STATION_CANDIDATE_MIN_DISTANCE),
+            config.UPGRADE_STATION_HSV_RANGES,
+            config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
+            1,
+            config.UPGRADE_STATION_CANDIDATE_NMS_IOU_THRESHOLD,
+        )
+
+    def find_upgrade_station(self, frame: Any, threshold: float) -> tuple[bool, float, int, int]:
+        """The single best station match, HSV-gated."""
+        template_pair = self._template("upgradeStation")
+        if template_pair is None:
+            return False, 0.0, 0, 0
+        template, mask = template_pair
+        return self.image_matcher.find_template(
+            frame,
+            template,
+            mask=mask,
+            threshold=threshold,
+            template_name="upgradeStation",
+            hsv_ranges=config.UPGRADE_STATION_HSV_RANGES,
+            hsv_match_threshold=config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
+        )
+
+    def find_close_buttons(self, frame: Any) -> list[BoxCandidate]:
+        """The red X of a popup, found the way boxes are (masked template match plus the per-asset HSV
+        gate) behind a cheap prefilter: only a frame holding a solid red block the size of the X, and
+        only the area around it, is handed to the full match. A missing asset turns the rule off."""
+        names = tuple(name for name in config.CLOSE_BUTTON_TEMPLATE_NAMES if name in self.templates)
+        if not names:
+            return []
+        area = self.image_matcher.red_block_area(
+            frame,
+            config.CLOSE_BUTTON_BLOCK_HSV_RANGES,
+            config.CLOSE_BUTTON_BLOCK_WINDOW,
+            config.CLOSE_BUTTON_BLOCK_MIN_FRACTION,
+        )
+        if area is None:
+            return []
+        left, top, right, bottom = area
+        found = self._gather(
+            frame[top:bottom, left:right],
+            names,
+            config.CLOSE_BUTTON_THRESHOLD,
+            int(config.CLOSE_BUTTON_MIN_DISTANCE),
+            config.CLOSE_BUTTON_HSV_RANGES,
+            config.CLOSE_BUTTON_HSV_MIN_MATCH_RATIO,
+            1,
+            config.CLOSE_BUTTON_NMS_IOU_THRESHOLD,
+        )
+        return [(confidence, x + left, y + top, w, h, name) for confidence, x, y, w, h, name in found]
+
+    def _explain_templates(self, frame: Any, names: Iterable[str], hsv_ranges: Any) -> list[Any]:
+        explained = (
+            self.image_matcher.explain_template_detailed(
+                frame, *self.templates[name], template_name=name, hsv_ranges=hsv_ranges
+            )
+            for name in names
+            if name in self.templates
+        )
+        return [item for item in explained if item is not None]
+
+    def box_near_misses(self, frame: Any) -> list[Any]:
+        """Best raw match per box template with the threshold and HSV gate NOT applied: what the
+        detector saw when find_boxes reported nothing. Diagnostics only (the stall probes)."""
+        return self._explain_templates(frame, config.BOX_TEMPLATE_NAMES, config.BOX_HSV_RANGES)
+
+    def red_icon_near_misses(self, frame: Any) -> list[Any]:
+        """box_near_misses for the red-icon templates the current mode really matches. Set against the
+        box line it tells a crate-only miss from a miss of everything on screen."""
+        return self._explain_templates(frame, self._active_red_icon_template_names(), config.RED_ICON_HSV_RANGES)
+
+    def unlock_near_miss(self, frame: Any) -> Any:
+        """Best raw `unlock` match with the threshold NOT applied: a greyed-out button reads low, a
+        near-miss reads close to the threshold. Diagnostics only (the unlock-miss log line)."""
+        template_pair = self._template("unlock")
+        if template_pair is None:
+            return None
+        template, mask = template_pair
+        return self.image_matcher.explain_template(frame, template, mask=mask, template_name="unlock")
+
+    def _is_clickable(self, point: Point) -> bool:
+        return not self.mouse_controller.is_in_forbidden_zone(point[0], point[1], relative=True)
 
     def _remember_successful_red_icon_position(self, y_value: Any) -> None:
         y_value = int(y_value)
@@ -494,18 +612,6 @@ class EatventureBot:
                 return
         self.successful_red_icon_positions.append(y_value)
 
-    def _record_level_completion(self) -> float:
-        self.total_levels_completed += 1
-        self.idle_scrolls = 0
-        elapsed = 0.0
-        completion_time = time.monotonic()
-        if self.current_level_start_time is not None:
-            elapsed = max(0.0, completion_time - self.current_level_start_time)
-        self.current_level_start_time = completion_time
-        self._reset_search_cycle()
-        self.telegram.notify_new_level(self.total_levels_completed, elapsed)
-        return elapsed
-
     def _reset_search_cycle(self) -> None:
         self.cycle_counter = 0
         self.wait_for_unlock_attempts = 0
@@ -513,6 +619,9 @@ class EatventureBot:
         self._oscillation_leg_direction = 1
         self._oscillation_leg_progress = 0
         self._new_level_red_icon_verified = False
+        self.box_only_passes = 0
+        self.stats_from_find = False
+        self.scan_boxes_after_scroll = False
 
     def _advance_oscillation_progress(self) -> None:
         target_steps = max(1, int(self._oscillation_cycle_index) * int(config.SCROLL_INCREMENT_STEP))
@@ -578,43 +687,14 @@ class EatventureBot:
             return False
         return self._sleep(config.NEW_LEVEL_VERIFICATION_SCROLL_INTERVAL_PAUSE)
 
-    def _find_upgrade_station_match(self, threshold: float) -> RedIcon | None:
-        if "upgradeStation" not in self.templates:
-            return None
-
-        limited_screenshot = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
-        template, mask = self.templates["upgradeStation"]
-        candidates = self.image_matcher.find_all_templates(
-            limited_screenshot,
-            template,
-            mask=mask,
-            threshold=threshold,
-            min_distance=15,
-            template_name="upgradeStation",
-            hsv_ranges=config.UPGRADE_STATION_HSV_RANGES,
-            hsv_match_threshold=config.UPGRADE_STATION_HSV_MIN_MATCH_RATIO,
-        )
-        if not candidates:
-            return None
-
-        for confidence, x, y in candidates:
-            x = int(x)
-            y = int(y)
-            if not self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-                return float(confidence), x, y
-
+    def _find_upgrade_station_position(self, threshold: float) -> Point | None:
+        """The first station candidate outside a forbidden zone, not necessarily the best one, so a
+        blocked best match does not hide a usable second one."""
+        frame = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
+        for _, x, y, _, _, _ in self.find_upgrade_station_candidates(frame, threshold):
+            if self._is_clickable((x, y)):
+                return x, y
         return None
-
-    def _clickable_red_icons(self, red_icons: Iterable[RedIcon]) -> list[RedIcon]:
-        return [
-            (confidence, x, y)
-            for confidence, x, y in red_icons
-            if not self.mouse_controller.is_in_forbidden_zone(
-                x + config.RED_ICON_OFFSET_X,
-                y + config.RED_ICON_OFFSET_Y,
-                relative=True,
-            )
-        ]
 
     def _red_icon_priority_key(self, icon: RedIcon) -> tuple[int, int, float]:
         confidence, _, y = icon
@@ -623,181 +703,126 @@ class EatventureBot:
                 return (0, y, -confidence)
         return (1, y, -confidence)
 
-    def _find_verified_upgrade_station_match(
-        self,
-        base_threshold: float,
-        relaxed_threshold: float,
-    ) -> tuple[RedIcon | None, bool]:
-        verify_attempts = max(1, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
-        for attempt in range(verify_attempts):
-            current_threshold = base_threshold if attempt == 0 else relaxed_threshold
-            verified_match = self._find_upgrade_station_match(current_threshold)
-            if verified_match is not None:
-                return verified_match, True
-            if attempt < verify_attempts - 1 and not self._sleep(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL):
-                return None, False
-        return None, True
+    def _relaxed_station_threshold(self) -> float:
+        return max(0.0, config.UPGRADE_STATION_THRESHOLD - config.UPGRADE_STATION_THRESHOLD_RELAXATION)
 
-    @staticmethod
-    def _hold_max_duration() -> float:
-        hold_max_duration = float(config.CLICK_HOLD_MAX_DURATION)
-        if not math.isfinite(hold_max_duration):
-            return 0.0
-        return max(0.0, hold_max_duration)
-
-    def _position_cursor_for_upgrade_hold(self, x: int, y: int) -> tuple[int, int] | None:
-        screen_pos = self.mouse_controller._resolve_screen_position(x, y, relative=True)
-        if screen_pos is None:
-            logger.warning("Upgrade station hold position could not be resolved at (%s, %s)", x, y)
-            return None
-
-        screen_x, screen_y = screen_pos
-        if self.mouse_controller._set_cursor_pos(screen_x, screen_y):
-            if self.mouse_controller.move_delay > 0 and not self._sleep(self.mouse_controller.move_delay):
+    def _verify_upgrade_station_round(self) -> tuple[Point, float] | None:
+        """One full verify-attempts retry loop: base threshold on the first attempt, relaxed afterwards.
+        Returns the verified position and the relaxed threshold the hold will monitor with."""
+        base = config.UPGRADE_STATION_THRESHOLD
+        relaxed = self._relaxed_station_threshold()
+        attempts = max(1, int(config.UPGRADE_STATION_VERIFY_SEARCH_ATTEMPTS))
+        for attempt in range(attempts):
+            threshold = base if attempt == 0 else relaxed
+            frame = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
+            found, _, x, y = self.find_upgrade_station(frame, threshold)
+            if found and self._is_clickable((x, y)):
+                return (x, y), relaxed
+            # No sleep before giving up on the last attempt.
+            if attempt < attempts - 1 and not self._sleep(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL):
                 return None
-            return screen_x, screen_y
-
-        logger.warning("Failed to position cursor for Upgrade Station hold at (%s, %s)", x, y)
         return None
 
-    def _find_current_upgrade_hold_match(
-        self,
-        base_threshold: float,
-        relaxed_threshold: float,
-    ) -> RedIcon | None:
-        current_match = self._find_upgrade_station_match(base_threshold)
-        if current_match is not None:
-            return current_match
-        current_match = self._find_upgrade_station_match(relaxed_threshold)
-        if current_match is not None:
-            return current_match
-        if self._scrcpy_miss_recovery_sleep(config.SCRCPY_UPGRADE_MISS_RECOVERY_DELAY):
-            return self._find_upgrade_station_match(relaxed_threshold)
-        return None
+    def _verify_upgrade_station(self) -> tuple[Point, float] | None:
+        """Two-round pre-hold verification: a settle delay, then round one checks the current screen with
+        no click at all; only if the station is still there does a priming click fire on the
+        freshly-verified position (not the stale stored one), followed by another settle delay and a
+        second round that must also confirm it before committing to a hold."""
+        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
+            return None
+        first = self._verify_upgrade_station_round()
+        if first is None:
+            logger.info("Upgrade station was not visible during verification")
+            return None
+        target, _ = first
+        if not self.mouse_controller.precise_click(target[0], target[1], relative=True):
+            logger.info("Upgrade station verification click failed at (%s, %s)", *target)
+            return None
+        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
+            return None
+        second = self._verify_upgrade_station_round()
+        if second is None:
+            logger.info("Upgrade station was not visible during verification")
+            return None
+        return second
 
-    @staticmethod
-    def _hold_duration_reached(hold_max_duration: float, hold_elapsed: float) -> bool:
-        return hold_elapsed >= hold_max_duration
+    def _station_seen_near(self, threshold: float, position: Point) -> bool:
+        """One capture and match at the relaxed threshold, accepted only near `position`, the spot being
+        held. At the relaxed threshold, once the real station's popup turns to its MAX state late in a
+        hold, the template can false-positive on an unrelated button elsewhere on screen at a
+        confidence at or above the base threshold, so threshold tuning alone cannot exclude it. A match
+        far from the held spot is rejected wherever on screen it appears."""
+        frame = self.window_capture.capture(max_y=config.UPGRADE_STATION_SEARCH_Y)
+        found, _, x, y = self.find_upgrade_station(frame, threshold)
+        if not found:
+            return False
+        tolerance = config.UPGRADE_STATION_DISAPPEAR_POSITION_TOLERANCE_PX
+        return abs(x - position[0]) <= tolerance and abs(y - position[1]) <= tolerance
 
-    def _monitor_upgrade_station_hold(
-        self,
-        base_threshold: float,
-        relaxed_threshold: float,
-        hold_check_interval: float,
-        hold_max_duration: float,
-        hold_started_at: float,
-    ) -> tuple[bool, bool, float]:
-        maximum_checks = max(1, int(config.UPGRADE_HOLD_MAX_CHECKS))
-        disappearance_confirmations = max(1, int(config.UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT))
-        consecutive_misses = 0
-        for _ in range(maximum_checks):
-            hold_elapsed = time.monotonic() - hold_started_at
-            if self._stop_requested.is_set():
-                logger.warning("Upgrade station hold interrupted after %.2fs", hold_elapsed)
-                return False, False, hold_elapsed
-            if self._hold_duration_reached(hold_max_duration, hold_elapsed):
+    def _station_disappeared(self, threshold: float, position: Point) -> bool:
+        """One poll tick's verdict. A first miss is only believed after one delayed scrcpy-recovery
+        re-check, so a single dropped frame does not end the hold. Recovery disabled or its sleep
+        interrupted means gone. Debouncing across ticks is _make_disappearance_check's job."""
+        if self._station_seen_near(threshold, position):
+            return False
+        if not self._scrcpy_miss_recovery_sleep(config.SCRCPY_UPGRADE_MISS_RECOVERY_DELAY):
+            return True
+        return not self._station_seen_near(threshold, position)
+
+    def _make_disappearance_check(self, threshold: float, position: Point, required_misses: int) -> Callable[[], bool]:
+        """Requires `required_misses` CONSECUTIVE misses before treating the station as gone, which
+        debounces a single flaky miss so a real hold is not cut short by one bad frame."""
+        misses = 0
+
+        def check() -> bool:
+            nonlocal misses
+            misses = misses + 1 if self._station_disappeared(threshold, position) else 0
+            return misses >= max(1, required_misses)
+
+        return check
+
+    def _record_hold(self, seconds: float) -> None:
+        self.hold_seconds_total += seconds
+        # Within one poll gap of the cap = the clock ran out, not the popup vanishing.
+        if seconds >= config.CLICK_HOLD_MAX_DURATION - 0.1:
+            self.holds_capped += 1
+
+    def _next_state_after_box_cycle(self, opened: int, after_scroll: bool) -> State:
+        if opened > 0:
+            self.work_done = True
+            self.cycle_counter = 0
+            self.idle_scrolls = 0
+            self.boxes_opened_total += opened
+            # Deliberate v2 deviation from the old v1 flow (v1 never scrolled while boxes kept opening): live logs
+            # showed a stuck "box" re-clicked for hours, work_done re-arming every pass, so SCROLL (and
+            # with it every off-screen upgrade) was starved and the same-state watchdog never fired
+            # because the state changes each tick. Zero-box passes do not reset the count, so an
+            # alternating stuck target can't dodge it.
+            # ponytail: interleave only. A UI-fixed stuck target still burns (K-1)/K of passes;
+            # upgrade path: ignore a position clicked K times in a row (positions are logged on trip).
+            self.box_only_passes += 1
+            if after_scroll:
+                self.post_scroll_boxes += opened
+            # The post-scroll pass never trips the guard: it must never answer SCROLL (see below).
+            if self.box_only_passes >= max(2, int(config.MAX_BOX_ONLY_PASSES)) and not after_scroll:
+                self.box_only_passes = 0
+                self.box_guard_trips += 1
                 logger.warning(
-                    "Upgrade station hold max duration %.2fs reached after %.2fs; releasing hold",
-                    hold_max_duration,
-                    hold_elapsed,
+                    "Box loop guard: %s box passes without a scroll or upgrade; forcing a scroll. "
+                    "Last clicked positions: %s",
+                    config.MAX_BOX_ONLY_PASSES,
+                    [(x, y, round(confidence, 3)) for x, y, confidence in self._recent_box_clicks],
                 )
-                return True, True, hold_elapsed
-            if not self._sleep(hold_check_interval):
-                return False, False, hold_elapsed
-            if not self.mouse_controller.is_target_foreground():
-                logger.warning("Upgrade station hold interrupted because target lost foreground")
-                return False, False, time.monotonic() - hold_started_at
+                return State.SCROLL
 
-            current_match = self._find_current_upgrade_hold_match(base_threshold, relaxed_threshold)
-            if current_match is None:
-                consecutive_misses += 1
-                if consecutive_misses >= disappearance_confirmations:
-                    return True, False, time.monotonic() - hold_started_at
-                continue
+        if after_scroll:
+            # The scan right after a landed scroll is not an idle pass. Run through the ladder below it
+            # would count one, answer SCROLL again, and FIND_RED_ICONS would never run (scroll forever);
+            # so it always hands back to the red-icon scan, leaving work_done and the failed-search and
+            # upgrade-found triggers for the next ordinary OPEN_BOXES pass.
+            self.cycle_counter = 0
+            return State.FIND_RED_ICONS
 
-            consecutive_misses = 0
-
-            _, x, y = current_match
-            self.upgrade_station_pos = (x, y)
-
-        logger.warning("Upgrade station hold safety limit of %s checks reached", maximum_checks)
-        return True, True, time.monotonic() - hold_started_at
-
-    def _hold_upgrade_station_until_complete(
-        self,
-        screen_position: tuple[int, int],
-        base_threshold: float,
-        relaxed_threshold: float,
-        hold_check_interval: float,
-        hold_max_duration: float,
-    ) -> tuple[bool, bool, float]:
-        screen_x, screen_y = screen_position
-        hold_started_at = time.monotonic()
-        if hold_max_duration <= 0.0:
-            logger.error("Upgrade station hold rejected because its maximum duration is not positive")
-            return False, True, 0.0
-
-        with self.mouse_controller._input_lock:
-            if not self.mouse_controller._left_down_at_screen(screen_x, screen_y):
-                logger.warning("Upgrade station hold press failed at (%s, %s)", screen_x, screen_y)
-                return False, False, time.monotonic() - hold_started_at
-            released = False
-            try:
-                hold_result = self._monitor_upgrade_station_hold(
-                    base_threshold,
-                    relaxed_threshold,
-                    hold_check_interval,
-                    hold_max_duration,
-                    hold_started_at,
-                )
-            finally:
-                try:
-                    released = self.mouse_controller._left_up_at_screen(screen_x, screen_y)
-                finally:
-                    if not released:
-                        self.mouse_controller._best_effort_left_up(screen_x, screen_y)
-                if not released:
-                    logger.critical("Upgrade station hold release could not be confirmed")
-
-            if not released:
-                return False, False, time.monotonic() - hold_started_at
-            return hold_result
-
-    def _box_template_names(self) -> list[str]:
-        return [box_name for box_name in ("box1", "box2", "box3", "box4") if box_name in self.templates]
-
-    def _collect_box_candidates(self, limited_screenshot: Any, box_threshold: float) -> list[BoxCandidate]:
-        box_candidates: list[BoxCandidate] = []
-        for box_name in self._box_template_names():
-            template, mask = self.templates[box_name]
-            candidates = self.image_matcher.find_template_candidates(
-                limited_screenshot,
-                template,
-                mask=mask,
-                threshold=box_threshold,
-                min_distance=12,
-                template_name=box_name,
-                hsv_ranges=config.BOX_HSV_RANGES,
-                hsv_match_threshold=config.BOX_HSV_MIN_MATCH_RATIO,
-            )
-            for confidence, x, y, candidate_width, candidate_height in candidates:
-                candidate_width = int(candidate_width)
-                candidate_height = int(candidate_height)
-                box_candidates.append((confidence, int(x), int(y), candidate_width, candidate_height, box_name))
-        return box_candidates
-
-    def _click_box_candidates(self, merged_boxes: list[BoxCandidate]) -> int:
-        boxes_found = 0
-        for _, x, y, _, _, _ in merged_boxes:
-            if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-                logger.debug("Box candidate is in a forbidden zone")
-                continue
-            if self.mouse_controller.click(x, y, relative=True):
-                boxes_found += 1
-                self._recent_box_clicks.append((x, y))
-        return boxes_found
-
-    def _next_state_after_box_cycle(self) -> State:
         if self.consecutive_failed_cycles >= config.FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL:
             self.consecutive_failed_cycles = 0
             self.cycle_counter = 0
@@ -828,13 +853,15 @@ class EatventureBot:
 
         return State.FIND_RED_ICONS
 
-    def start(self) -> bool:
+    def start(self, *, report: bool = True) -> bool:
+        """report=False is for the auto-resume retries, which must not alert on every failed try."""
         if not self._state_operation_lock.acquire(blocking=False):
             logger.warning("Cannot start bot while a state operation is active")
             return False
         try:
             if self.running:
                 return True
+            self.ready = self._validate_required_templates()
             if not self.ready:
                 logger.error("Cannot start bot because required templates are missing")
                 return False
@@ -842,21 +869,33 @@ class EatventureBot:
                 self.window_capture.ensure_window(resize=True)
             except WindowCaptureError as exc:
                 logger.error("Cannot start bot: %s", exc)
+                if report:
+                    self._report_self_stop(f"cannot start: {exc}")
                 self.running = False
                 return False
             if not self.mouse_controller.is_target_foreground():
                 logger.error("Cannot start bot because '%s' is not the foreground window", config.WINDOW_TITLE)
+                if report:
+                    self._report_self_stop("cannot start: target window is not foreground")
                 self.running = False
                 return False
+            if self._launcher is not None and not self._package_probed:
+                self._package_probed = True  # once per process: adb is only touched at start
+                self._launcher.detect_package()
             self._stop_requested.clear()
             self.running = True
-            self._state_entered_at = time.monotonic()
-            self._last_metrics_at = time.monotonic()
+            self._resume = None  # running again, by a person or by poll_resume
+            self.state_attempt = 1
+            # The stall clock is armed by the first handled step, not by start(): popup taps right after
+            # a start (they skip the watchdog) must not eat into the first handler's budget.
+            self._state_entered_at = None
+            self._started_at = self._last_metrics_at = time.monotonic()
             if self.current_level_start_time is None:
                 self.current_level_start_time = time.monotonic()
             if config.ShowForbiddenArea and self.overlay is None:
                 self.overlay = ForbiddenAreaOverlay(self.window_capture.get_hwnd(), self.forbidden_zones)
                 self.overlay.start()
+            self.telegram.notify_bot_started()
             return True
         finally:
             self._state_operation_lock.release()
@@ -864,13 +903,12 @@ class EatventureBot:
     def request_stop(self) -> None:
         self._stop_requested.set()
 
-    def stop(self) -> None:
+    def stop(self, *, manual: bool = False) -> None:
         self.request_stop()
         with self._state_operation_lock:
-            if not self.running and self.overlay is None:
-                return
             was_running = self.running
             self.running = False
+            self.mouse_controller.release_left_button()
             self.state_machine.transition(State.FIND_RED_ICONS)
             self._reset_search_cycle()
             self.red_icons.clear()
@@ -879,55 +917,370 @@ class EatventureBot:
             self.upgrade_found_in_cycle = False
             self.work_done = False
             self.consecutive_failed_cycles = 0
-            self.box_only_passes = 0
             self.idle_scrolls = 0
+            self.state_attempt = 1
             if self.overlay is not None:
                 self.overlay.stop()
                 self.overlay = None
             if was_running and config.METRICS_LOG_INTERVAL > 0:
                 self._log_metrics()
+        # Only the manual Z-toggle says "Bot Stopped". An internal auto-stop (stop-requested race, lost
+        # foreground, an unhandled handler exception, or close()'s own cleanup call) is reported by
+        # _report_self_stop where it applies, never here.
+        if was_running and manual:
+            self.telegram.notify_bot_stopped()
+
+    def close(self) -> None:
+        self.stop()
+        self.telegram.close()
+
+    def toggle_red_icon_mode(self) -> str:
+        self.red_icon_fast_mode = not self.red_icon_fast_mode
+        return "Fast" if self.red_icon_fast_mode else "Normal"
+
+    def cursor_position_in_window(self) -> Point | None:
+        """Window-relative cursor readout for the 'X' debug hotkey."""
+        try:
+            screen_x, screen_y = self.mouse_controller.get_cursor_position()
+            left, top, _, _ = self.window_capture.get_window_rect()
+        except Exception:
+            return None
+        return screen_x - left, screen_y - top
 
     def step(self) -> bool:
         if not self._state_operation_lock.acquire(blocking=False):
             logger.warning("Ignoring reentrant bot step")
             return False
         try:
+            if not self.running:
+                return False
             if self._stop_requested.is_set():
                 self.stop()
                 return False
             self.window_capture.ensure_window(resize=True)
             if not self.mouse_controller.is_target_foreground():
                 logger.error("Window '%s' lost foreground ownership; stopping bot", config.WINDOW_TITLE)
+                self._report_self_stop("target lost foreground")
                 self.stop()
+                self._arm_resume("target lost foreground")
                 return False
+
+            if self._dismiss_popup():
+                return True  # a popup was closed this step; the handler runs on the next one
+
             previous_state = self.state_machine.current_state
             handler_started_at = time.monotonic()
             current_state = self.state_machine.update()
-            self._state_seconds[previous_state] += time.monotonic() - handler_started_at
             now = time.monotonic()
-            if current_state != previous_state:
+            self._state_seconds[previous_state] += now - handler_started_at
+            self._last_handled_state = previous_state
+            if previous_state in X_LOCKED_STATES:
+                # Hard-lock layer 2: any New Level step (attempt, miss or completion) keeps the X rule off
+                # afterwards, so a dialog still open when control returns is left to that flow.
+                self._close_level_lock_until = max(
+                    self._close_level_lock_until, now + config.CLOSE_BUTTON_NEW_LEVEL_LOCK_SECONDS
+                )
+            if not self.running:
+                return False
+            self.state_attempt = self.state_attempt + 1 if current_state == previous_state else 1
+            if self._state_entered_at is None or current_state != previous_state:
                 self._state_entered_at = now
             elif now - self._state_entered_at >= config.STATE_STALL_TIMEOUT_SECONDS:
                 logger.warning("State %s stalled; resetting search flow", current_state.name)
                 self._reset_search_cycle()
                 self.state_machine.transition(State.FIND_RED_ICONS)
+                self.state_attempt = 1
                 self._state_entered_at = now
             self._maybe_log_metrics()
             return True
         except (WindowNotAvailableError, WindowCaptureError) as exc:
             logger.error("Stopping bot: %s", exc)
+            self._report_self_stop(str(exc))
             self.stop()
+            self._arm_resume(str(exc))
             return False
         except pywintypes.error as exc:
             logger.error("Stopping bot due to Windows input failure: %s", exc)
+            self._report_self_stop(f"Windows input failure: {exc}")
             self.stop()
             return False
         except Exception:
             logger.exception("Stopping bot due to unexpected state-handler failure")
+            self._report_self_stop("unexpected handler failure")
             self.stop()
             return False
         finally:
             self._state_operation_lock.release()
+
+    # --- auto-resume after an environment self-stop -----------------------------------------
+
+    def _arm_resume(self, reason: str) -> None:
+        """Only the two environment self-stops (window gone, focus lost) call this. A Z press, a stop
+        request and a handler bug leave the decision to a person or a code fix, so they never arm it:
+        the stopped-but-primed state alone cannot tell those apart."""
+        now = self._clock()
+        self._resume = _ResumeWatch(reason, now, now, now, now + config.RESUME_CHECK_SECONDS)
+
+    def poll_resume(self, last_key_at: float) -> None:
+        """Called on every pass of the main loop while the bot is stopped; a no-op unless armed.
+        last_key_at is the latest key press on this PC, on the same clock as self._clock.
+
+        Shadow mode (RESUME_ENABLED False, the default): each check only logs whether it WOULD start the
+        bot, so the share of downtime it could recover is measured first. Live mode: when the window is
+        already in a state start() will not touch (WindowCapture.environment_ready: no resize, no focus
+        change) and nobody has pressed a key or moved the mouse for RESUME_IDLE_SECONDS, it calls
+        start(). A failed attempt backs off exponentially, and RESUME_MAX_ATTEMPTS failures in one stop
+        make it give up and wait for a person. Never raises: the main loop must survive whatever
+        happens in here."""
+        watch = self._resume
+        if watch is None or self.running:
+            return
+        now = self._clock()
+        if now < watch.sample_at:
+            return
+        watch.sample_at = now + _RESUME_SAMPLE_SECONDS
+        try:
+            cursor = self.mouse_controller.get_cursor_position()
+            # The first sample is only a baseline; a later change means a person moved the mouse.
+            if watch.cursor is not None and cursor != watch.cursor:
+                watch.activity_at = now
+            watch.cursor = cursor
+            if now >= watch.check_at:
+                self._check_resume(watch, now, last_key_at)
+        except Exception:
+            logger.exception("Resume check failed")
+            watch.check_at = now + config.RESUME_CHECK_SECONDS
+
+    def _check_resume(self, watch: _ResumeWatch, now: float, last_key_at: float) -> None:
+        idle = now - max(watch.activity_at, last_key_at)
+        ready = self.window_capture.environment_ready()
+        quiet = idle >= config.RESUME_IDLE_SECONDS
+        watch.check_at = now + config.RESUME_CHECK_SECONDS
+        # One line per change plus a heartbeat, not one per minute of a 20 h stop.
+        if (ready, quiet) != watch.logged or now - watch.logged_at >= _RESUME_HEARTBEAT_SECONDS:
+            watch.logged, watch.logged_at = (ready, quiet), now
+            logger.info(
+                "Resume check (%s): ready=%s idle_s=%.0f/%.0f down_min=%.0f -> %s | %s",
+                "live" if config.RESUME_ENABLED else "shadow",
+                ready,
+                idle,
+                config.RESUME_IDLE_SECONDS,
+                (now - watch.since) / 60,
+                ("resuming" if config.RESUME_ENABLED else "would resume") if ready and quiet else "waiting",
+                self.window_capture.describe_environment(),
+            )
+        if not (config.RESUME_ENABLED and ready and quiet):
+            return
+        watch.attempts += 1
+        if self.start(report=False):
+            logger.info(
+                "Auto-resumed after %.0f min (attempt %d): %s",
+                (now - watch.since) / 60,
+                watch.attempts,
+                watch.reason,
+            )
+            return
+        if watch.attempts >= config.RESUME_MAX_ATTEMPTS:
+            logger.warning("Auto-resume gave up after %d attempts: %s", watch.attempts, watch.reason)
+            self._resume = None
+            return
+        watch.check_at = now + min(_RESUME_MAX_BACKOFF_SECONDS, config.RESUME_CHECK_SECONDS * 2**watch.attempts)
+
+    def _report_self_stop(self, reason: str) -> None:
+        """Whenever the bot stops itself (not a Z press) it stays stopped until a person comes back, so
+        log the facts that may explain why and alert once. Diagnostics only: never raises, never changes
+        what the caller does next. ran_min is "-" for a start that failed, since there was no run."""
+        try:
+            ran = f"{(time.monotonic() - self._started_at) / 60:.0f}" if self.running else "-"
+            logger.warning(
+                "Self-stop: %s | ran_min=%s | %s", reason, ran, self.window_capture.describe_environment()
+            )
+            self.telegram.notify_bot_self_stopped(reason, 0.0 if ran == "-" else float(ran))
+        except Exception:
+            logger.exception("Self-stop report failed")
+
+    # --- red-X popup rule and dead-game recovery ----------------------------------------------
+
+    def _dismiss_popup(self) -> bool:
+        """Red-X priority: runs before the state handler, so it outranks every handler and asset. True
+        when it tapped an X (the step is then spent on that).
+
+        Hard lock for the New Level dialog (its X looks exactly like this one), two layers, either of
+        which blocks the tap:
+        1. state: while CHECK_NEW_LEVEL / TRANSITION_LEVEL / WAIT_FOR_UNLOCK owns the screen, return
+           before any capture;
+        2. afterwards: for CLOSE_BUTTON_NEW_LEVEL_LOCK_SECONDS after any step in those states (attempt,
+           miss or completion), leave the screen alone so a dialog still open is left to the flow.
+        Deliberately NOT a lock on seeing the `unlock` button: that template also matches the blue
+        "Collect x2" button of the Offline Earnings popup (0.935 against a 0.905 threshold), which would
+        lock out the very popup this rule exists for.
+        Stand-down guard: the same spot tapped CLOSE_BUTTON_MAX_CONSECUTIVE_CLICKS times in a row means
+        the tap is not closing anything, so the rule pauses for CLOSE_BUTTON_SUPPRESS_SECONDS instead of
+        starving the flow."""
+        if not config.CLOSE_BUTTON_ENABLED or self.state_machine.current_state in X_LOCKED_STATES:
+            return False
+        now = time.monotonic()
+        if now < self._close_level_lock_until or now < self._close_suppressed_until:
+            return False
+        frame = self.window_capture.capture()
+        found = self.find_close_buttons(frame)
+        self._close_check_seconds += time.monotonic() - now
+        if not found:
+            self._close_last_pos, self._close_streak = None, 0
+            return False
+        target = found[0]
+        x, y = target[1], target[2]
+        last = self._close_last_pos
+        same_spot = last is not None and abs(last[0] - x) <= 3 and abs(last[1] - y) <= 3
+        if same_spot and self._close_streak >= config.CLOSE_BUTTON_MAX_CONSECUTIVE_CLICKS:
+            self.close_suppressed += 1
+            self._close_last_pos, self._close_streak = None, 0
+            self._close_suppressed_until = now + config.CLOSE_BUTTON_SUPPRESS_SECONDS
+            logger.warning(
+                "Red X at (%d, %d) still there after %d taps; ignoring X's for %.0f s",
+                x,
+                y,
+                config.CLOSE_BUTTON_MAX_CONSECUTIVE_CLICKS,
+                config.CLOSE_BUTTON_SUPPRESS_SECONDS,
+            )
+            return False
+        self._close_streak = self._close_streak + 1 if same_spot else 1
+        self._close_last_pos = (x, y)
+        self._tap_close_button(target)
+        return True
+
+    def _tap_close_button(self, target: BoxCandidate, *, remaining: float | None = None, recovery: bool = False) -> bool:
+        """Taps one detected X and waits out the modal settle (clamped to `remaining` seconds when the
+        recovery window is closing). Shared by the main-flow rule and the recovery window."""
+        confidence, x, y = target[0], target[1], target[2]
+        # check_forbidden=False: the X is the intended target, wherever the popup puts it.
+        clicked = self.mouse_controller.click(x, y, relative=True, check_forbidden=False)
+        if clicked:
+            self.close_clicks += 1
+            self.recovery_taps += int(recovery)
+        self.close_positions[(x, y)] = self.close_positions.get((x, y), 0) + 1
+        after = self._last_handled_state
+        logger.info(
+            "Closed popup at (%d, %d) conf=%.3f state=%s%s%s%s",
+            x,
+            y,
+            confidence,
+            self.state_machine.current_state.name,
+            " (recovery)" if recovery else "",
+            "" if clicked else " (tap failed)",
+            "" if after is None else f" after={after.name}",
+        )
+        settle = config.CLOSE_BUTTON_SETTLE_DELAY
+        self._sleep(settle if remaining is None else max(0.0, min(settle, remaining)))
+        return clicked
+
+    def _recover_popups(self) -> None:
+        """The recovery window after an adb relaunch: for the whole GAME_RECOVERY_RELAUNCH_SETTLE_SECONDS
+        ONLY the red-X rule runs. No handler, no other asset (red icons, boxes, unlock, scroll, idle
+        click), no New Level lock and no stand-down guard (nothing is in flight in a freshly restarted
+        game, and the window is time-bounded). It always runs the full window, even after the X is gone,
+        because popups can arrive late in a cold start. A capture error is retried until the deadline; a
+        stop request ends the window early."""
+        started = self._clock()
+        deadline = started + config.GAME_RECOVERY_RELAUNCH_SETTLE_SECONDS
+        tail_from = deadline - _RECOVERY_TAIL_SECONDS
+        tail: np.ndarray | None = None
+        last: np.ndarray | None = None
+        taps = capture_errors = 0
+        while self._clock() < deadline and not self._stop_requested.is_set():
+            remaining = deadline - self._clock()
+            try:
+                frame = self.window_capture.capture()
+                found = self.find_close_buttons(frame)
+            except WindowCaptureError as exc:
+                capture_errors += 1
+                if capture_errors == 1:
+                    logger.warning("Recovery: capture failed (%s); retrying until it ends", exc)
+                self._sleep(min(config.GAME_RECOVERY_POLL_SECONDS, remaining))
+                continue
+            last = _frame_thumbnail(frame)
+            if tail is None and self._clock() >= tail_from:
+                tail = last
+            if found:
+                taps += 1
+                self._tap_close_button(found[0], remaining=remaining, recovery=True)
+            else:
+                self._sleep(min(config.GAME_RECOVERY_POLL_SECONDS, remaining))
+        elapsed = self._clock() - started
+        if tail is None or last is None:  # stopped early or never captured: no verdict to give
+            logger.info("Recovery window ended after %.0f s: %d X tapped", elapsed, taps)
+            return
+        delta = float(np.abs(last - tail).mean())
+        changing = delta >= config.GAME_RECOVERY_STATIC_FRAME_DELTA
+        (logger.info if changing else logger.warning)(
+            "Recovery window ended after %.0f s: %d X tapped, screen %s "
+            "(frame delta %.2f over the last %.0f s)%s",
+            elapsed,
+            taps,
+            "changing" if changing else "still static",
+            delta,
+            _RECOVERY_TAIL_SECONDS,
+            "" if changing else "; the next stall alert will relaunch again",
+        )
+
+    def _game_looks_dead(self, thumb: np.ndarray) -> bool:
+        """Runs only on a stall probe (>= STALL_SCROLLS_BEFORE_ALERT idle scrolls). It runs on the scan
+        right after a drag, when a live game has just moved and a frozen one has not: the picture has
+        not changed since the streak began. Healthy idle streaks peak near 66 scrolls, so the scroll
+        count alone is no evidence; the frame is."""
+        before = self._streak_thumb
+        if before is None or self._launcher is None:  # no launcher = recovery switched off
+            return False
+        limit = config.GAME_RECOVERY_STATIC_FRAME_DELTA
+        delta = float(np.abs(thumb - before).mean())
+        static = delta < limit
+        # The decision's own inputs: the stall probe's "Frame delta vs last probe" compares a different
+        # pair of frames, so on its own it cannot tell whether a relaunch was justified.
+        logger.info(
+            "Dead-game check: frame delta vs streak start=%.2f (static below %.2f), idle_scrolls=%d -> %s",
+            delta,
+            limit,
+            self.idle_scrolls,
+            "static" if static else "alive",
+        )
+        if static and self._launcher.package is None:
+            logger.warning("Game appears dead (frame unchanged) but adb relaunch is not available")
+            return False
+        return static
+
+    def _relaunch_game(self) -> State:
+        """adb force-stop + launch, wait out the cold start, and restart the search from scratch. No cap
+        on repeats: the next chance is another full stall alert, many minutes away."""
+        launcher = self._launcher
+        assert launcher is not None  # _game_looks_dead only says yes when a launcher is armed
+        progress = (self.holds_completed, self.boxes_opened_total)
+        again = ""
+        if progress == self._relaunch_progress:
+            again = " (still static after the previous relaunch; the scrcpy window may be frozen)"
+        minutes = (time.monotonic() - self._idle_started_at) / 60
+        logger.warning(
+            "Game appears dead: frame unchanged for %.0f min%s; relaunching %s", minutes, again, launcher.package
+        )
+        self._relaunch_progress = progress
+        if launcher.relaunch():
+            self.relaunches += 1
+            self.telegram.notify_game_relaunch(True, minutes)
+            self._recover_popups()  # exclusive X-only window; the main flow resumes after it
+        else:
+            # Nothing restarted, so there is nothing to wait for: log (done by the launcher) and carry
+            # on with the main flow as before.
+            self.relaunch_failures += 1
+            self.telegram.notify_game_relaunch(False, minutes)
+        self.idle_scrolls = 0
+        self._reset_search_cycle()
+        self._streak_thumb = None
+        self._last_probe_thumb = None
+        # The restarted game starts the X rule from scratch: no stale stand-down or lock window.
+        self._close_last_pos, self._close_streak = None, 0
+        self._close_suppressed_until = self._close_level_lock_until = 0.0
+        return State.FIND_RED_ICONS
+
+    # --- metrics, stall alert and probes ------------------------------------------------------
 
     def _maybe_log_metrics(self) -> None:
         interval = config.METRICS_LOG_INTERVAL
@@ -938,8 +1291,8 @@ class EatventureBot:
         self._log_metrics()
 
     def _log_metrics(self) -> None:
-        """One parseable line: run_s is time spent inside handlers (not the event-loop wake), and
-        each state's share of it - where the run actually went."""
+        """One parseable line: run_s is time spent inside handlers (not the event-loop wake), and each
+        state's share of it - where the run actually went."""
         total = sum(self._state_seconds.values())
         shares = " ".join(
             f"{state.name}={100 * seconds / total:.1f}%"
@@ -948,7 +1301,11 @@ class EatventureBot:
         )
         logger.info(
             "metrics cfg=%s run_s=%.0f levels=%d holds=%d boxes=%d guard_trips=%d "
-            "idle_scrolls=%d stall_alerts=%d | %s",
+            "idle_scrolls=%d stall_alerts=%d hold_capped=%d hold_avg_s=%.1f nl_unlock_miss=%d "
+            "relaunches=%d relaunch_failures=%d frame_delta_5m=%s close_clicks=%d "
+            "close_suppressed=%d close_check_s=%.1f recovery_taps=%d close_top=%s "
+            "box_zone_skips=%d box_click_fails=%d stats_checks=%d stats_hits=%d "
+            "post_scroll_boxes=%d | %s",
             self._config_fingerprint,
             total,
             self.total_levels_completed,
@@ -957,86 +1314,182 @@ class EatventureBot:
             self.box_guard_trips,
             self.idle_scrolls,
             self.stall_alerts,
+            self.holds_capped,
+            self.hold_seconds_total / max(1, self.holds_completed),
+            self.nl_unlock_miss,
+            self.relaunches,
+            self.relaunch_failures,
+            self._frame_delta_since_last_metrics(),
+            self.close_clicks,
+            self.close_suppressed,
+            self._close_check_seconds,
+            self.recovery_taps,
+            _top_close_position(self.close_positions),
+            self.box_zone_skips,
+            self.box_click_fails,
+            self.stats_checks,
+            self.stats_hits,
+            self.post_scroll_boxes,
             shares or "-",
         )
 
+    def _frame_delta_since_last_metrics(self) -> str:
+        """Mean-abs-diff between the latest scan and the one at the previous metrics line: the
+        healthy-farm baseline that GAME_RECOVERY_STATIC_FRAME_DELTA is judged against (a dead game
+        reads ~0)."""
+        latest, before = self._latest_thumb, self._metrics_thumb
+        self._metrics_thumb = latest
+        if latest is None or before is None:
+            return "n/a"
+        return f"{np.abs(latest - before).mean():.1f}"
+
     def _maybe_alert_stall(self) -> None:
-        """After every landed scroll: idle_scrolls says how long the search has produced nothing.
-        Every STALL_SCROLLS_BEFORE_ALERT scrolls, log a WARNING and arm a one-shot probe of box
-        detection on the next OPEN_BOXES frame, so a silent stall names its own cause."""
-        if self.idle_scrolls == 1:
+        """After every landed scroll: idle_scrolls says how long the search has produced nothing. Every
+        STALL_SCROLLS_BEFORE_ALERT scrolls, log a WARNING and arm a one-shot probe of box detection on the
+        next OPEN_BOXES frame, so a silent stall names its own cause. No extra capture, gesture or click,
+        so no slowdown. Separately, at STALL_PROBE_SCROLLS (earlier, log-only) arm the early probe, which
+        also reads the red icons: the alert's probe is boxes only and a hand stop can beat it.
+        ponytail: a scroll re-anchor stays deferred until a probe shows it is the problem."""
+        idle = self.idle_scrolls
+        if idle == 1:
             self._idle_started_at = time.monotonic()
+            self._streak_anchor_pending = True
+        early = max(0, int(config.STALL_PROBE_SCROLLS))
+        if early > 0 and idle == early:
+            self._early_probe_pending = True
         every = max(0, int(config.STALL_SCROLLS_BEFORE_ALERT))
-        if every <= 0 or self.idle_scrolls % every != 0:
+        if every <= 0 or idle % every != 0:
             return
         self.stall_alerts += 1
         self._stall_probe_pending = True
         logger.warning(
             "Stall: %d scrolls over %.0f min with no box opened, upgrade held, stats upgrade or "
             "level completed (levels=%d holds=%d boxes=%d); probing box detection on the next scan",
-            self.idle_scrolls,
+            idle,
             (time.monotonic() - self._idle_started_at) / 60,
             self.total_levels_completed,
             self.holds_completed,
             self.boxes_opened_total,
         )
 
-    def _log_box_near_misses(self, limited_screenshot: Any, detected: int) -> None:
-        """One text line: how many boxes passed detection on this frame, and for each box template
-        its best raw match with no threshold/gate applied (template score, HSV ratio) and whether
+    def _log_box_near_misses(self, frame: Any, detected: int) -> None:
+        """One text line: how many boxes passed detection on this frame, and for each box template its
+        best raw match against the two gates a box must clear (template score, HSV ratio) and whether
         that spot is a forbidden zone. Tells a template/HSV miss from a zone block."""
         parts = []
-        for box_name in self._box_template_names():
-            template, mask = self.templates[box_name]
-            explained = self.image_matcher.explain_template(
-                limited_screenshot,
-                template,
-                mask=mask,
-                template_name=box_name,
-                hsv_ranges=config.BOX_HSV_RANGES,
-            )
-            if explained is None:
-                continue
-            name, confidence, (center_x, center_y), ratio = explained
-            zone = " IN-FORBIDDEN-ZONE" if self.mouse_controller.is_in_forbidden_zone(
-                center_x, center_y, relative=True
-            ) else ""
+        for name, confidence, center, ratio, _ in self.box_near_misses(frame):
             ratio_text = "n/a" if ratio is None else f"{ratio:.2f}"
-            parts.append(f"{name} conf={confidence:.3f} at ({center_x}, {center_y}) hsv={ratio_text}{zone}")
+            zone = "" if self._is_clickable(center) else " IN-FORBIDDEN-ZONE"
+            parts.append(f"{name} conf={confidence:.3f} at {center} hsv={ratio_text}{zone}")
+        thumb = _frame_thumbnail(frame)
+        previous, self._last_probe_thumb = self._last_probe_thumb, thumb
+        # delta ~0 between alerts (minutes apart) = frozen stream or static overlay; the quadrant means
+        # (TL TR BL BR) show a dimmed screen. Text only: no pixels leave the process.
+        delta = "n/a" if previous is None else f"{np.abs(thumb - previous).mean():.2f}"
+        quads = " ".join(f"{thumb[r : r + 18, c : c + 32].mean():.0f}" for r in (0, 18) for c in (0, 32))
         logger.warning(
-            "Stall probe: %d box(es) passed detection on this scan. Best raw match per template "
+            "Stall probe: %d box(es) passed detection on this scan. Frame delta vs last probe=%s, "
+            "quadrant brightness=[%s]. Best raw match per template "
             "(a box needs conf>=%.3f and hsv>=%.2f, outside forbidden zones): %s",
             detected,
+            delta,
+            quads,
             config.BOX_THRESHOLD,
             config.BOX_HSV_MIN_MATCH_RATIO,
             "; ".join(parts) or "none",
         )
 
-    def _state_from_red_icon_scan(self, best_new_level_icon: RedIcon | None) -> State:
-        if best_new_level_icon is not None:
+    def _log_early_probe(self, frame: Any, detected: int) -> None:
+        """One INFO line at STALL_PROBE_SCROLLS idle scrolls: what box AND red-icon detection saw on this
+        scan (best raw match per template, gates and zones not applied) and whether the last drag changed
+        the picture. Box vs red-icon confidence tells a crate-only miss from a miss of everything; a flat
+        picture change says the drag moved nothing. Log-only: no alert, never reaches the dead-game
+        check, leaves the alert probe's thumbnail alone, and a failure here is logged, not raised (an
+        unexpected handler error would stop the whole bot)."""
+        if self.idle_scrolls <= 0:  # progress ended the streak before this scan ran
+            return
+        try:
+            thumb = _frame_thumbnail(frame)
+            start = self._streak_thumb
+            streak = "n/a" if start is None else f"{np.abs(thumb - start).mean():.2f}"
+            drag = "n/a" if self._scan_delta is None else f"{self._scan_delta:.2f}"
+            quads = " ".join(f"{thumb[r : r + 18, c : c + 32].mean():.0f}" for r in (0, 18) for c in (0, 32))
+            boxes = _format_near_misses(self.box_near_misses(frame), self._is_clickable)
+            icons = _format_near_misses(self.red_icon_near_misses(frame))
             logger.info(
-                "New level red icon detected at (%s, %s) [%.3f]",
-                best_new_level_icon[1],
-                best_new_level_icon[2],
-                best_new_level_icon[0],
+                "Early probe: %d idle scrolls (%.1f min), %d box(es) passed detection, "
+                "box_zone_skips=%d box_click_fails=%d. Picture change across the last drag=%s, "
+                "vs streak start=%s, quadrant brightness=[%s]. "
+                "Boxes (need conf>=%.3f and hsv>=%.2f): %s. "
+                "Red icons (need conf>=%.3f and hsv>=%.2f): %s",
+                self.idle_scrolls,
+                (time.monotonic() - self._idle_started_at) / 60,
+                detected,
+                self.box_zone_skips,
+                self.box_click_fails,
+                drag,
+                streak,
+                quads,
+                config.BOX_THRESHOLD,
+                config.BOX_HSV_MIN_MATCH_RATIO,
+                boxes,
+                config.RED_ICON_THRESHOLD,
+                config.RED_ICON_HSV_MIN_MATCH_RATIO,
+                icons,
             )
-            self._new_level_red_icon_verified = False
-            return State.CHECK_NEW_LEVEL
+        except Exception:
+            logger.exception("Early probe failed")
 
-        if not self.red_icons:
-            return State.OPEN_BOXES
+    # --- level bookkeeping --------------------------------------------------------------------
 
-        filtered_icons = self._clickable_red_icons(self.red_icons)
-        if not filtered_icons:
-            logger.info("No valid red icons after forbidden-zone filtering")
-            return State.OPEN_BOXES
+    def _level_mark(self) -> LevelMark:
+        return LevelMark(
+            sum(self._state_seconds.values()), self.holds_completed, self.boxes_opened_total, self.nl_unlock_miss
+        )
 
-        self.red_icons = sorted(filtered_icons, key=self._red_icon_priority_key)
-        self.current_red_icon_index = 0
-        self.cycle_counter = 0
-        self.work_done = True
-        logger.info("%s red icons ready to process", len(self.red_icons))
-        return State.CLICK_RED_ICON
+    def _note_unlock_miss(self, frame: Any) -> None:
+        self.nl_unlock_miss += 1
+        # best_conf = the raw best `unlock` match, threshold not applied: low = the button is greyed out
+        # (cash is the limit), near the threshold = an appearance problem. Diagnostics only.
+        best = self.unlock_near_miss(frame)
+        logger.info(
+            "New level: unlock button not found (miss %d, levels=%d, best_conf=%s)",
+            self.nl_unlock_miss,
+            self.total_levels_completed,
+            "-" if best is None else f"{best[1]:.3f}",
+        )
+
+    def _report_level_completion(self) -> None:
+        now = time.monotonic()
+        started = self.current_level_start_time
+        elapsed = now - started if started is not None else 0.0
+        self.current_level_start_time = now
+        logger.info("Restaurant %s completed in %.1fs", self.total_levels_completed, elapsed)
+        # Breakdown in RUNNING seconds (the line above is wall-clock and includes stopped time). "before"
+        # = up to the first New Level sighting, "after" = from it to the completion; a level with no
+        # recorded sighting counts wholly as "before". The running time of the handler that is
+        # completing the level is not in _state_seconds yet (a few seconds at most).
+        start, end = self.level_start_mark, self._level_mark()
+        seen = self.nl_first_mark or end
+        self.level_start_mark, self.nl_first_mark = end, None
+        logger.info(
+            "Level %d breakdown: run_s=%.0f holds=%d boxes=%d unlock_miss=%d | "
+            "before_nl: run_s=%.0f holds=%d boxes=%d | after_nl: run_s=%.0f holds=%d boxes=%d",
+            self.total_levels_completed,
+            end.run_s - start.run_s,
+            end.holds - start.holds,
+            end.boxes - start.boxes,
+            end.unlock_miss - start.unlock_miss,
+            seen.run_s - start.run_s,
+            seen.holds - start.holds,
+            seen.boxes - start.boxes,
+            end.run_s - seen.run_s,
+            end.holds - seen.holds,
+            end.boxes - seen.boxes,
+        )
+        self.telegram.notify_new_level(self.total_levels_completed, elapsed)
+
+    # --- handlers -----------------------------------------------------------------------------
 
     def handle_find_red_icons(self) -> State:
         if not self._click_idle():
@@ -1044,44 +1497,56 @@ class EatventureBot:
 
         self.work_done = False
 
-        screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
-
-        found, confidence, x, y = self._find_new_level_button(limited_screenshot)
-        if found:
+        # The newLevel button is checked on a frame limited to MAX_SEARCH_Y, distinct from the full
+        # EXTENDED_SEARCH_Y frame used for the red-icon scan below.
+        frame = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+        if self._find_new_level_button(frame[: config.MAX_SEARCH_Y, :])[0]:
+            logger.info("New level button visible during red-icon scan")
             self.cycle_counter = 0
-            logger.info("newLevel.png found at (%s, %s)", x, y)
             return State.TRANSITION_LEVEL
 
-        scan_threshold = config.RED_ICON_THRESHOLD
-
-        min_matches = self._red_icon_min_matches()
-        self.red_icons, best_new_level_icon = self._scan_red_icon_frame(
-            screenshot,
-            limited_screenshot,
-            scan_threshold,
-            min_matches,
-        )
-
+        actionable, new_level_seen, _ = self.split_red_icons(self.find_red_icons(frame))
+        # Retry only when neither an ordinary icon nor the footer new-level icon was seen. A lone stats
+        # badge (classified out by split_red_icons) must not suppress it, but a new-level badge does:
+        # that goes straight to CHECK_NEW_LEVEL.
         if (
-            not self.red_icons
-            and best_new_level_icon is None
+            not actionable
+            and not new_level_seen
             and self._scrcpy_miss_recovery_sleep(config.SCRCPY_RED_ICON_MISS_RECOVERY_DELAY)
         ):
-            screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
-            limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
-            found, confidence, x, y = self._find_new_level_button(limited_screenshot)
-            if found:
+            frame = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+            if self._find_new_level_button(frame[: config.MAX_SEARCH_Y, :])[0]:
+                logger.info("New level button visible during red-icon scan after SCRCPY recovery")
                 self.cycle_counter = 0
-                logger.info("newLevel.png found at (%s, %s) after SCRCPY recovery", x, y)
                 return State.TRANSITION_LEVEL
-            self.red_icons, best_new_level_icon = self._scan_red_icon_frame(
-                screenshot,
-                limited_screenshot,
-                scan_threshold,
-                min_matches,
-            )
-        return self._state_from_red_icon_scan(best_new_level_icon)
+            actionable, new_level_seen, _ = self.split_red_icons(self.find_red_icons(frame))
+
+        clickable = [
+            icon
+            for icon in actionable
+            if self._is_clickable((icon[1] + config.RED_ICON_OFFSET_X, icon[2] + config.RED_ICON_OFFSET_Y))
+        ]
+        return self._state_from_red_icon_scan(new_level_seen, clickable)
+
+    def _state_from_red_icon_scan(self, new_level_seen: bool, clickable: list[RedIcon]) -> State:
+        if new_level_seen:
+            logger.info("New level footer red icon detected")
+            self._new_level_red_icon_verified = False
+            return State.CHECK_NEW_LEVEL
+
+        if not clickable:
+            # No-work loop: the stats badge gets a look before the crate scan (see stats_from_find for
+            # why the next step must know where it came from).
+            logger.info("No valid red icons; checking the stats badge before the boxes")
+            self.stats_from_find = True
+            return State.UPGRADE_STATS
+
+        self.red_icons = sorted(clickable, key=self._red_icon_priority_key)
+        self.current_red_icon_index = 0
+        self.cycle_counter = 0
+        self.work_done = True
+        logger.info("%s red icons ready to process", len(self.red_icons))
+        return State.CLICK_RED_ICON
 
     def handle_click_red_icon(self) -> State:
         if self.current_red_icon_index >= len(self.red_icons):
@@ -1116,19 +1581,8 @@ class EatventureBot:
 
         limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
 
-        template_pair = self._template("unlock")
-        if template_pair is None:
-            return State.SEARCH_UPGRADE_STATION
-
-        template, mask = template_pair
-        found, confidence, x, y = self.image_matcher.find_template(
-            limited_screenshot,
-            template,
-            mask=mask,
-            threshold=config.UNLOCK_THRESHOLD,
-            template_name="unlock",
-        )
-        if not found or self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
+        found, confidence, x, y = self.find_unlock_button(limited_screenshot)
+        if not found or not self._is_clickable((x, y)):
             return State.SEARCH_UPGRADE_STATION
 
         logger.info("Unlock found at (%s, %s) [%.3f]", x, y, confidence)
@@ -1136,117 +1590,65 @@ class EatventureBot:
             logger.warning("Unlock click failed at (%s, %s)", x, y)
             return State.CHECK_UNLOCK
 
-        if not self._sleep(config.SCRCPY_ACTION_SETTLE_DELAY):
-            return State.CHECK_UNLOCK
+        # A stop landing in this settle is handled by the next step(); the state flow does not change.
+        self._sleep(config.UNLOCK_SETTLE_DELAY)
         return State.SEARCH_UPGRADE_STATION
 
     def handle_search_upgrade_station(self) -> State:
-        base_threshold = config.UPGRADE_STATION_THRESHOLD
-        relaxed_threshold = max(0.0, base_threshold - 0.05)
+        # One attempt per step (state_attempt counts re-entries), so the popup rule, foreground check and
+        # watchdog run between attempts. The later attempts use the relaxed threshold.
+        attempt = self.state_attempt
         max_attempts = max(1, int(config.UPGRADE_SEARCH_ATTEMPTS))
+        threshold = self._relaxed_station_threshold() if attempt > 2 else config.UPGRADE_STATION_THRESHOLD
+        position = self._find_upgrade_station_position(threshold)
+        if position is not None:
+            logger.info("Upgrade station found at (%s, %s) on attempt %s", position[0], position[1], attempt)
+            self.upgrade_station_pos = position
+            self.upgrade_found_in_cycle = True
+            # Deliberately NOT resetting consecutive_failed_cycles here (moved to
+            # handle_hold_upgrade_station's genuine-completion point): a station that is found every
+            # cycle but never successfully held would otherwise re-zero this counter on every pass,
+            # before the hold below ever gets a chance to increment it past 1.
+            self.cycle_counter = 0
+            return State.HOLD_UPGRADE_STATION
 
-        for attempt in range(max_attempts):
-            if "upgradeStation" not in self.templates:
-                break
-
-            current_threshold = base_threshold if attempt < 2 else relaxed_threshold
-            match = self._find_upgrade_station_match(current_threshold)
-            if match is not None:
-                _, x, y = match
-                logger.info("Upgrade station found at (%s, %s) on attempt %s", x, y, attempt + 1)
-                self.upgrade_station_pos = (x, y)
-                self.upgrade_found_in_cycle = True
-                # Deliberately NOT resetting consecutive_failed_cycles here (moved to
-                # handle_hold_upgrade_station's genuine-completion point, see comment there): a
-                # station that is found every cycle but never successfully held would otherwise
-                # re-zero this counter on every pass, before the hold below ever gets a chance to
-                # increment it past 1.
-                self.cycle_counter = 0
-                return State.HOLD_UPGRADE_STATION
-
-            if attempt < max_attempts - 1 and not self._sleep(config.UPGRADE_SEARCH_INTERVAL):
-                return State.OPEN_BOXES
-
+        if attempt < max_attempts:
+            # No sleep before giving up on the last attempt.
+            self._sleep(config.UPGRADE_SEARCH_INTERVAL)
+            return State.SEARCH_UPGRADE_STATION
         self.consecutive_failed_cycles += 1
         logger.info("Upgrade station not found, returning to OPEN_BOXES")
         return State.OPEN_BOXES
 
-    def _verify_upgrade_station_hold_target(
-        self,
-        x: int,
-        y: int,
-    ) -> tuple[RedIcon, float, float] | None:
-        logger.info("Visually verifying upgrade station at (%s, %s) before holding", x, y)
-        if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
-            return None
-
-        base_threshold = config.UPGRADE_STATION_THRESHOLD
-        relaxed_threshold = max(0.0, base_threshold - 0.05)
-        verified_match, verification_completed = self._find_verified_upgrade_station_match(
-            base_threshold,
-            relaxed_threshold,
-        )
-        if not verification_completed:
-            return None
-
-        if verified_match is not None:
-            _, verified_x, verified_y = verified_match
-            logger.info("Single-clicking visually verified upgrade station at (%s, %s)", verified_x, verified_y)
-            clicked = self.mouse_controller.precise_click(verified_x, verified_y, relative=True)
-            if not clicked:
-                logger.warning("Upgrade station verification click failed at (%s, %s)", verified_x, verified_y)
-                return None
-            if not self._sleep(config.UPGRADE_STATION_VERIFY_SETTLE_DELAY):
-                return None
-            verified_match, verification_completed = self._find_verified_upgrade_station_match(
-                base_threshold,
-                relaxed_threshold,
-            )
-            if not verification_completed:
-                return None
-
-        if verified_match is None:
-            logger.info("Upgrade station was not visible during visual verification; continuing main flow")
-            self.upgrade_station_pos = None
-            self.upgrade_found_in_cycle = False
-            return None
-
-        confidence, verified_x, verified_y = verified_match
-        self.upgrade_station_pos = (verified_x, verified_y)
-        logger.info(
-            "Upgrade station verified active at (%s, %s) [%.3f]",
-            verified_x,
-            verified_y,
-            confidence,
-        )
-        return verified_match, base_threshold, relaxed_threshold
-
     def handle_hold_upgrade_station(self) -> State:
-        # Intentional deviation from literal v1 parity (this exact gap was unfixed): a red icon
+        # Intentional v2 deviation from the old v1 flow (this exact gap was unfixed there): a red icon
         # whose station is found every SEARCH but never actually holds/clicks successfully would
         # otherwise loop FIND_RED_ICONS<->OPEN_BOXES forever, since nothing here used to touch
-        # consecutive_failed_cycles and the same-state watchdog never fires (the state keeps
-        # changing every tick). Every early exit below now increments the same counter that
-        # already feeds the OPEN_BOXES->SCROLL escape (FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL),
-        # without adding a new counter or config value; it only resets on a genuinely completed
-        # hold further down, not on handle_search_upgrade_station's "found" branch, so repeated
-        # hold failures accumulate across cycles instead of being re-zeroed by the very next
-        # search success.
-        if not self.upgrade_station_pos:
+        # consecutive_failed_cycles and the same-state watchdog never fires (the state keeps changing
+        # every tick). Every early exit below counts as a failure and feeds the OPEN_BOXES->SCROLL escape
+        # (FAILED_UPGRADE_SEARCHES_BEFORE_SCROLL); it only resets on a genuinely COMPLETED hold, not on
+        # the search's "found" branch, so repeated hold failures accumulate across cycles.
+        position = self.upgrade_station_pos
+        if position is None:
+            self.consecutive_failed_cycles += 1
+            return State.OPEN_BOXES
+        if not self._is_clickable(position):
+            logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", position[0], position[1])
             self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
 
-        x, y = self.upgrade_station_pos
-        if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-            logger.warning("Upgrade station blocked by forbidden zone at (%s, %s)", x, y)
+        verified = self._verify_upgrade_station()
+        if verified is None:
+            self.upgrade_station_pos = None
+            self.upgrade_found_in_cycle = False
             self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
-
-        verified_target = self._verify_upgrade_station_hold_target(x, y)
-        if verified_target is None:
-            self.consecutive_failed_cycles += 1
-            return State.OPEN_BOXES
-        (_, x, y), base_threshold, relaxed_threshold = verified_target
+        target, relaxed_threshold = verified
+        # Replace the stored position with the freshly-verified one: if the hold below fails without
+        # clearing it, the next attempt retries against the accurate position.
+        self.upgrade_station_pos = target
+        # The red icon's row is learned as soon as its station verifies, before the hold, so it is
+        # remembered even if the hold then fails.
         if self.current_red_icon_index < len(self.red_icons):
             _, _, red_y = self.red_icons[self.current_red_icon_index]
             self._remember_successful_red_icon_position(red_y)
@@ -1255,164 +1657,146 @@ class EatventureBot:
             config.UPGRADE_HOLD_CHECK_INTERVAL_MIN,
             min(config.UPGRADE_HOLD_CHECK_INTERVAL_MAX, float(config.UPGRADE_STATION_VERIFY_SEARCH_INTERVAL)),
         )
-        hold_max_duration = self._hold_max_duration()
-        with self.mouse_controller._input_lock:
-            screen_position = self._position_cursor_for_upgrade_hold(x, y)
-            if screen_position is None:
-                self.consecutive_failed_cycles += 1
-                return State.OPEN_BOXES
-
-            logger.info("Press-and-holding upgrade station at (%s, %s)", x, y)
-            hold_completed, hold_stopped_by_max_duration, hold_elapsed = (
-                self._hold_upgrade_station_until_complete(
-                    screen_position,
-                    base_threshold,
-                    relaxed_threshold,
-                    hold_check_interval,
-                    hold_max_duration,
-                )
-            )
-        if not hold_completed:
+        logger.info("Press-and-holding upgrade station at (%s, %s)", target[0], target[1])
+        hold_started_at = time.monotonic()
+        held = self.mouse_controller.hold_at(
+            target[0],
+            target[1],
+            config.CLICK_HOLD_MAX_DURATION,
+            hold_check_interval,
+            self._make_disappearance_check(
+                relaxed_threshold, target, max(1, int(config.UPGRADE_STATION_DISAPPEAR_CONFIRMATION_COUNT))
+            ),
+        )
+        if not held:
+            # A failed hold returns without clearing the stored position.
             self.consecutive_failed_cycles += 1
             return State.OPEN_BOXES
+        self._record_hold(time.monotonic() - hold_started_at)
 
-        # The hold actually completed: real progress, so clear the streak here rather than at
-        # handle_search_upgrade_station's "found" branch (see comment there).
+        # The hold actually completed: real progress, so clear the streak here rather than at the search.
         self.consecutive_failed_cycles = 0
+        self.upgrade_station_pos = None
         self.holds_completed += 1
         self.box_only_passes = 0  # a purchase is progress: the dead-loop guard starts over
         self.idle_scrolls = 0
-
-        if hold_stopped_by_max_duration:
-            logger.info("Upgrade station hold released by max duration fallback after %.2fs", hold_elapsed)
-        else:
-            logger.info("Upgrade station no longer detected after %.2fs hold", hold_elapsed)
-        self.upgrade_station_pos = None
-
-        if not self._click_idle():
-            return State.OPEN_BOXES
-        if not self._sleep(config.STATE_DELAY):
+        if not (self._click_idle() and self._sleep(config.STATE_DELAY)):
             return State.OPEN_BOXES
         self.upgrade_station_counter += 1
         if self.upgrade_station_counter >= config.UPGRADES_BEFORE_STATS:
             self.upgrade_station_counter = 0
             logger.info("Upgrade counter reached stats threshold")
             return State.UPGRADE_STATS
-
         return State.OPEN_BOXES
 
     def handle_upgrade_stats(self) -> State:
+        # Consumed on every entry, even through the idle-click bail-out below, so it cannot go stale.
+        from_find = self.stats_from_find
+        self.stats_from_find = False
+        # Single-shot, no retry loop and no scrcpy recovery here. This is also the one state where an
+        # idle-click failure does NOT retry itself.
         if not self._click_idle():
             return State.OPEN_BOXES
 
-        screenshot = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
-        limited_screenshot = screenshot[: config.MAX_SEARCH_Y, :]
-
-        found, _, _, _ = self._find_new_level_button(limited_screenshot)
-        if found:
+        frame = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+        if self._find_new_level_button(frame[: config.MAX_SEARCH_Y, :])[0]:
             return State.TRANSITION_LEVEL
 
-        best_stats_match = self._find_best_zone_red_icon(
-            screenshot,
-            config.STATS_RED_ICON_THRESHOLD,
-            config.UPGRADE_RED_ICON_X_MIN,
-            config.UPGRADE_RED_ICON_X_MAX,
-            config.UPGRADE_RED_ICON_Y_MIN,
-            config.UPGRADE_RED_ICON_Y_MAX,
-            min_distance=80,
-        )
-
-        if best_stats_match is None:
+        self.stats_checks += 1
+        # Reuses the shared red-icon scan; split_red_icons applies the stats-icon threshold.
+        _, _, stats_seen = self.split_red_icons(self.find_red_icons(frame))
+        if not stats_seen:
             logger.info("No stats icon detected")
-            return State.SCROLL
+            # After a hold a miss goes straight to SCROLL; in the no-work loop (from_find) it goes to
+            # OPEN_BOXES, and that loop's own scroll comes after it.
+            return State.OPEN_BOXES if from_find else State.SCROLL
 
+        self.stats_hits += 1
         self.cycle_counter = 0
-        self.idle_scrolls = 0
+        # A hit after a hold is progress. A hit found by the idle loop is NOT: a badge that stays up
+        # would zero the stall counter every cycle, so the early probe and the stall alert would never
+        # fire, and a frozen frame that shows the badge would never be relaunched.
+        if not from_find:
+            self.idle_scrolls = 0
         logger.info("Stats icon found, upgrading")
         opened = self.mouse_controller.click(
             config.STATS_UPGRADE_BUTTON_POS[0],
             config.STATS_UPGRADE_BUTTON_POS[1],
             relative=True,
         )
-        if not opened:
-            return State.OPEN_BOXES
-
-        if not self._sleep(config.STATE_DELAY):
-            return State.OPEN_BOXES
-        clicked = self.mouse_controller.spam_click_at(
-            config.STATS_UPGRADE_POS[0],
-            config.STATS_UPGRADE_POS[1],
-            duration=config.STATS_UPGRADE_CLICK_DURATION,
-            click_delay=config.STATS_UPGRADE_CLICK_DELAY,
-            mouse_down_duration=config.STATS_UPGRADE_CLICK_DELAY,
-            mouse_up_duration=0.0,
-            relative=True,
-        )
-        if not clicked:
-            logger.warning("Stats upgrade spam-click failed at %s", config.STATS_UPGRADE_POS)
-            return State.OPEN_BOXES
-
-        if not self._click_idle():
-            return State.OPEN_BOXES
-        logger.info("Stats upgrade completed")
+        if opened and self._sleep(config.STATE_DELAY):
+            # The stats panel is already open and covers the event banner the forbidden event zones
+            # protect, so that protection is a false positive for this one call: bypass it rather than
+            # shrinking the zones or moving this confirmed-correct click target.
+            if self.mouse_controller.spam_click_at(
+                config.STATS_UPGRADE_POS[0],
+                config.STATS_UPGRADE_POS[1],
+                duration=config.STATS_UPGRADE_CLICK_DURATION,
+                click_delay=config.STATS_UPGRADE_CLICK_DELAY,
+                mouse_down_duration=config.STATS_UPGRADE_MOUSE_DOWN_DURATION,
+                mouse_up_duration=config.STATS_UPGRADE_MOUSE_UP_DURATION,
+                relative=True,
+                check_forbidden=False,
+            ):
+                self._click_idle()
+                logger.info("Stats upgrade completed")
+            else:
+                logger.warning("Stats upgrade spam-click failed at %s", config.STATS_UPGRADE_POS)
         return State.OPEN_BOXES
 
     def handle_open_boxes(self) -> State:
         if not self._click_idle():
-            return State.OPEN_BOXES
+            return State.OPEN_BOXES  # retries this same pass, so the after-scroll flag is kept
 
-        limited_screenshot = self.window_capture.capture(max_y=config.BOX_SEARCH_Y)
+        # Consumed only now that the pass is really running (see scan_boxes_after_scroll).
+        after_scroll = self.scan_boxes_after_scroll
+        self.scan_boxes_after_scroll = False
+        frame = self.window_capture.capture(max_y=config.BOX_SEARCH_Y)
+        thumb = _frame_thumbnail(frame)
+        previous = self._latest_thumb
+        self._scan_delta = None if previous is None else float(np.abs(thumb - previous).mean())
+        self._latest_thumb = thumb
+        # First scan after the first scroll of an idle streak. Armed once per streak, not keyed on
+        # idle_scrolls == 1: that stays 1 for the next cycle too, whose scan would overwrite it.
+        if self._streak_anchor_pending:
+            self._streak_anchor_pending = False
+            self._streak_thumb = thumb
 
-        found, _, _, _ = self._find_new_level_button(limited_screenshot)
-        if found:
+        if self._find_new_level_button(frame)[0]:
             logger.info("New level found while opening boxes")
             return State.TRANSITION_LEVEL
 
-        box_threshold = config.BOX_THRESHOLD
-        box_candidates = self._collect_box_candidates(limited_screenshot, box_threshold)
-        if not box_candidates and self._scrcpy_miss_recovery_sleep(config.SCRCPY_BOX_MISS_RECOVERY_DELAY):
-            limited_screenshot = self.window_capture.capture(max_y=config.BOX_SEARCH_Y)
-            found, _, _, _ = self._find_new_level_button(limited_screenshot)
-            if found:
+        boxes = self.find_boxes(frame)
+        if not boxes and self._scrcpy_miss_recovery_sleep(config.SCRCPY_BOX_MISS_RECOVERY_DELAY):
+            frame = self.window_capture.capture(max_y=config.BOX_SEARCH_Y)
+            if self._find_new_level_button(frame)[0]:
                 logger.info("New level found while opening boxes after SCRCPY recovery")
                 return State.TRANSITION_LEVEL
-            box_candidates = self._collect_box_candidates(limited_screenshot, box_threshold)
+            boxes = self.find_boxes(frame)
 
-        merged_boxes = self.image_matcher.suppress_overlaps(box_candidates, 0.20)
+        if self._early_probe_pending:  # log-only: kept clear of the relaunch decision below
+            self._early_probe_pending = False
+            self._log_early_probe(frame, len(boxes))
 
         if self._stall_probe_pending:
             self._stall_probe_pending = False
-            self._log_box_near_misses(limited_screenshot, len(merged_boxes))
+            self._log_box_near_misses(frame, len(boxes))
+            if self._game_looks_dead(_frame_thumbnail(frame)):
+                return self._relaunch_game()
 
-        boxes_found = self._click_box_candidates(merged_boxes)
-
-        if boxes_found > 0:
-            self.work_done = True
-            self.cycle_counter = 0
-            self.idle_scrolls = 0
-            self.boxes_opened_total += boxes_found
-            logger.info("Opened %s boxes", boxes_found)
-            # Deliberate deviation from v1 parity (v1 never scrolls while boxes keep opening):
-            # live v2 logs showed a stuck "box" re-clicked for hours, work_done re-arming every
-            # pass, so SCROLL (and with it every off-screen upgrade) was starved and the
-            # same-state watchdog never fired because the state changes each tick. Zero-box passes
-            # do not reset the count, so an alternating stuck target can't dodge it.
-            # ponytail: interleave only. A UI-fixed stuck target still burns (K-1)/K of passes;
-            # upgrade path: ignore a position clicked K times in a row (positions are logged on
-            # trip via _recent_box_clicks).
-            self.box_only_passes += 1
-            if self.box_only_passes >= max(2, int(config.MAX_BOX_ONLY_PASSES)):
-                self.box_only_passes = 0
-                self.box_guard_trips += 1
-                logger.warning(
-                    "Box loop guard: %s box passes without a scroll or upgrade; forcing a "
-                    "scroll. Last clicked positions: %s",
-                    config.MAX_BOX_ONLY_PASSES,
-                    list(self._recent_box_clicks),
-                )
-                return State.SCROLL
-
-        return self._next_state_after_box_cycle()
+        opened = 0
+        for confidence, x, y, _, _, _ in boxes:
+            if not self._is_clickable((x, y)):
+                self.box_zone_skips += 1
+                continue
+            if self.mouse_controller.click(x, y, relative=True):
+                opened += 1
+                self._recent_box_clicks.append((x, y, confidence))
+            else:
+                self.box_click_fails += 1
+        if opened:
+            logger.info("Opened %s boxes", opened)
+        return self._next_state_after_box_cycle(opened, after_scroll)
 
     def handle_scroll(self) -> State:
         if not self._click_idle():
@@ -1421,11 +1805,19 @@ class EatventureBot:
             return State.SCROLL
         self.cycle_counter = 0
         self.box_only_passes = 0
+        # Progress elsewhere (box opened, hold, stats, level) zeroes this; a run of landed scrolls with
+        # none of those is the stall the alert in _maybe_alert_stall reports.
         self.idle_scrolls += 1
+        # The post-scroll crate scan runs before the next red-icon scan (see _next_state_after_box_cycle).
+        self.scan_boxes_after_scroll = True
         self._maybe_alert_stall()
-        return State.FIND_RED_ICONS
+        return State.OPEN_BOXES
 
     def handle_check_new_level(self) -> State:
+        if self.nl_first_mark is None:  # every sighting routes here; first one per level
+            self.nl_first_mark = self._level_mark()
+        # No attempt caps and no scrcpy recovery here: a verify miss resets immediately (single-shot),
+        # and the click-retry tail is an unbounded, watchdog-only loop.
         if not self._click_idle():
             logger.warning("Failed to clear focus before confirming the new level")
             return State.CHECK_NEW_LEVEL
@@ -1436,20 +1828,14 @@ class EatventureBot:
                 logger.warning("Failed to perform verification scroll for new level red icon")
                 return State.CHECK_NEW_LEVEL
 
-            confirmed_icon = self._find_new_level_red_icon()
-            if confirmed_icon is None:
+            frame = self.window_capture.capture(max_y=config.EXTENDED_SEARCH_Y)
+            _, verified, _ = self.split_red_icons(self.find_red_icons(frame))
+            if not verified:
                 logger.info("New level red icon disappeared before visual confirmation; resuming main flow")
-                self._new_level_red_icon_verified = False
                 self._reset_search_cycle()
                 return State.FIND_RED_ICONS
-
-            self._new_level_red_icon_verified = True
-            logger.info(
-                "New level red icon confirmed at (%s, %s) [%.3f]",
-                confirmed_icon[1],
-                confirmed_icon[2],
-                confirmed_icon[0],
-            )
+            logger.info("New level red icon confirmed")
+        self._new_level_red_icon_verified = True
 
         opened = self.mouse_controller.click(
             config.NEW_LEVEL_BUTTON_POS[0],
@@ -1469,36 +1855,39 @@ class EatventureBot:
         if not advanced:
             logger.warning("Failed to click the level transition button at %s", config.LEVEL_TRANSITION_POS)
             return State.CHECK_NEW_LEVEL
-        if not self._sleep(config.LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY):
-            return State.WAIT_FOR_UNLOCK
+        self._sleep(config.LEVEL_TRANSITION_SECONDARY_SETTLE_DELAY)
         logger.info("Verified red-icon level transition submitted; awaiting unlock confirmation")
         return State.WAIT_FOR_UNLOCK
 
     def handle_transition_level(self) -> State:
-        if not self._click_idle():
+        attempt = self.state_attempt
+        max_attempts = max(1, int(config.NEW_LEVEL_SEARCH_ATTEMPTS))
+        # One idle click ahead of the whole search (not one per capture), and a failed idle click retries
+        # without consuming a search attempt: step() charges one for every same-state return, so net it out.
+        if attempt == 1 and not self._click_idle():
+            self.state_attempt -= 1
             return State.TRANSITION_LEVEL
 
-        max_attempts = max(1, int(config.NEW_LEVEL_SEARCH_ATTEMPTS))
-        for attempt in range(max_attempts):
-            limited_screenshot = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
-
-            found, _, x, y = self._find_new_level_button(limited_screenshot)
-            if found:
-                logger.info("New level button found at (%s, %s) on attempt %s", x, y, attempt + 1)
-                clicked = self.mouse_controller.click(x, y, relative=True)
-                if not clicked:
-                    logger.warning("New level button click failed at (%s, %s)", x, y)
-                    return State.CHECK_NEW_LEVEL
-                if self._sleep(config.LEVEL_TRANSITION_SETTLE_DELAY):
-                    logger.info("New-level transition submitted; awaiting unlock confirmation")
-                return State.WAIT_FOR_UNLOCK
-
-            if attempt < max_attempts - 1 and not self._sleep(config.NEW_LEVEL_SEARCH_INTERVAL):
+        frame = self.window_capture.capture(max_y=config.MAX_SEARCH_Y)
+        found, _, x, y = self._find_new_level_button(frame)
+        if not found:
+            if attempt < max_attempts:
+                # No sleep before giving up on the last attempt.
+                self._sleep(config.NEW_LEVEL_SEARCH_INTERVAL)
                 return State.TRANSITION_LEVEL
+            logger.warning("New level button not found after %s attempts", max_attempts)
+            self._reset_search_cycle()
+            return State.FIND_RED_ICONS
 
-        logger.warning("New level button not found after %s attempts", max_attempts)
-        self._reset_search_cycle()
-        return State.FIND_RED_ICONS
+        logger.info("New level button found at (%s, %s) on attempt %s", x, y, attempt)
+        # No forbidden-zone pre-gate: a forbidden match is handed to click(), which rejects it, and the
+        # failed click routes to CHECK_NEW_LEVEL.
+        if not self.mouse_controller.click(x, y, relative=True):
+            logger.warning("New level button click failed at (%s, %s)", x, y)
+            return State.CHECK_NEW_LEVEL
+        if self._sleep(config.LEVEL_TRANSITION_SETTLE_DELAY):
+            logger.info("New-level transition submitted; awaiting unlock confirmation")
+        return State.WAIT_FOR_UNLOCK
 
     def handle_wait_for_unlock(self) -> State:
         if not self._click_idle():
@@ -1507,52 +1896,35 @@ class EatventureBot:
         if not self._sleep(config.FOCUS_SETTLE_DELAY):
             return State.WAIT_FOR_UNLOCK
 
+        # Full-window capture here, distinct from CHECK_UNLOCK, which looks for the same template in a
+        # MAX_SEARCH_Y frame.
+        frame = self.window_capture.capture()
+        found, confidence, x, y = self.find_unlock_button(frame)
+        if found and self._is_clickable((x, y)):
+            if self.mouse_controller.click(x, y, relative=True):
+                logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
+                self.total_levels_completed += 1
+                self.idle_scrolls = 0
+                self.wait_for_unlock_attempts = 0
+                self._reset_search_cycle()
+                self._report_level_completion()
+                self._sleep(config.UNLOCK_SETTLE_DELAY)
+                return State.FIND_RED_ICONS
+            logger.warning("Unlock button click failed at (%s, %s)", x, y)
+        else:
+            if found:
+                logger.warning("Unlock button found in forbidden zone at (%s, %s)", x, y)
+            self._sleep(config.UNLOCK_SEARCH_INTERVAL)
+
+        # A miss, a forbidden match and a failed click all count against the attempt cap.
         self.wait_for_unlock_attempts += 1
-        if self.wait_for_unlock_attempts > self.max_wait_for_unlock_attempts:
+        if self.wait_for_unlock_attempts >= self.max_wait_for_unlock_attempts:
             logger.warning(
                 "Unlock button not found after %s attempts, resetting",
                 self.max_wait_for_unlock_attempts,
             )
             self.wait_for_unlock_attempts = 0
             self._reset_search_cycle()
+            self._note_unlock_miss(frame)
             return State.FIND_RED_ICONS
-
-        screenshot = self.window_capture.capture()
-        template_pair = self._template("unlock")
-        if template_pair is None:
-            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
-                return State.WAIT_FOR_UNLOCK
-            return State.WAIT_FOR_UNLOCK
-
-        template, mask = template_pair
-        found, confidence, x, y = self.image_matcher.find_template(
-            screenshot,
-            template,
-            mask=mask,
-            threshold=config.UNLOCK_THRESHOLD,
-            template_name="unlock",
-        )
-        if not found:
-            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
-                return State.WAIT_FOR_UNLOCK
-            return State.WAIT_FOR_UNLOCK
-
-        logger.info("Unlock button found at (%s, %s) [%.3f]", x, y, confidence)
-        if self.mouse_controller.is_in_forbidden_zone(x, y, relative=True):
-            logger.warning("Unlock button found in forbidden zone at (%s, %s)", x, y)
-            if not self._sleep(config.UNLOCK_SEARCH_INTERVAL):
-                return State.WAIT_FOR_UNLOCK
-            return State.WAIT_FOR_UNLOCK
-        if not self.mouse_controller.click(x, y, relative=True):
-            logger.warning("Unlock button click failed at (%s, %s)", x, y)
-            return State.WAIT_FOR_UNLOCK
-
-        elapsed = self._record_level_completion()
-        logger.info(
-            "Level %s confirmed by unlock. Time spent: %.1fs",
-            self.total_levels_completed,
-            elapsed,
-        )
-        if not self._sleep(config.UNLOCK_SETTLE_DELAY):
-            return State.FIND_RED_ICONS
-        return State.FIND_RED_ICONS
+        return State.WAIT_FOR_UNLOCK

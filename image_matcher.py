@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import cv2
@@ -14,6 +15,11 @@ HsvRange = tuple[np.ndarray, np.ndarray]
 # (template_name, confidence, center, hsv_ratio) - hsv_ratio is None when no gate was given or it
 # could not be measured. Diagnostics only; see ImageMatcher.explain_template.
 TemplateExplanation = tuple[str, float, Point, float | None]
+# explain_template_detailed adds the median (H, S, V) of the matched pixels, so a miss can be judged in
+# numbers instead of images. Diagnostics only.
+TemplateExplanationDetailed = tuple[str, float, Point, float | None, tuple[int, int, int] | None]
+# A multi-template candidate: (confidence, center_x, center_y, width, height, template_name).
+NamedCandidate = tuple[float, int, int, int, int, str]
 
 
 class ImageMatcher:
@@ -256,6 +262,7 @@ class ImageMatcher:
         mask: np.ndarray | None,
         hsv_ranges: list[HsvRange],
         hsv_match_threshold: float,
+        hsv_frame: np.ndarray | None = None,
     ) -> bool:
         x, y = location
         template_height, template_width = template.shape[:2]
@@ -276,11 +283,16 @@ class ImageMatcher:
         if not hsv_ranges:
             return False
 
-        try:
-            hsv_region = cv2.cvtColor(region_of_interest, cv2.COLOR_BGR2HSV)
-        except cv2.error as exc:
-            logger.debug("HSV gate conversion failed: %s", exc)
-            return False
+        if hsv_frame is not None:
+            # The caller converted the whole frame to HSV once and shares it across templates;
+            # slicing it is identical to converting this region (the conversion is per pixel).
+            hsv_region = hsv_frame[y : y + template_height, x : x + template_width]
+        else:
+            try:
+                hsv_region = cv2.cvtColor(region_of_interest, cv2.COLOR_BGR2HSV)
+            except cv2.error as exc:
+                logger.debug("HSV gate conversion failed: %s", exc)
+                return False
 
         combined = np.zeros((template_height, template_width), dtype=np.uint8)
         for lower, upper in hsv_ranges:
@@ -326,6 +338,31 @@ class ImageMatcher:
         matched_count = int(np.count_nonzero((combined > 0) & active_mask))
         return matched_count / active_count
 
+    @staticmethod
+    def _hsv_median(
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        location: Point,
+        mask: np.ndarray | None,
+    ) -> tuple[int, int, int] | None:
+        """Median (H, S, V) of the template's visible pixels at `location`; None when the window
+        falls off the frame, has no visible pixels or cannot be converted. Diagnostics only."""
+        x, y = location
+        template_height, template_width = template.shape[:2]
+        region_of_interest = screenshot[y : y + template_height, x : x + template_width]
+        if region_of_interest.shape[:2] != template.shape[:2]:
+            return None
+        active_mask = np.ones((template_height, template_width), dtype=bool) if mask is None else mask > 0
+        if not active_mask.any():
+            return None
+        try:
+            hsv_region = cv2.cvtColor(region_of_interest, cv2.COLOR_BGR2HSV)
+        except cv2.error as exc:
+            logger.debug("HSV median conversion failed: %s", exc)
+            return None
+        hue, saturation, value = (int(np.median(hsv_region[:, :, channel][active_mask])) for channel in range(3))
+        return hue, saturation, value
+
     def explain_template(
         self,
         screenshot: np.ndarray,
@@ -337,6 +374,19 @@ class ImageMatcher:
         """The single best raw match of a template with no threshold or gate applied, plus how
         much of it sits inside hsv_ranges - what the detector saw when it reported no match.
         Diagnostics only (the stall probe); never used to decide a click."""
+        detailed = self.explain_template_detailed(screenshot, template, mask, template_name, hsv_ranges)
+        return None if detailed is None else detailed[:4]
+
+    def explain_template_detailed(
+        self,
+        screenshot: np.ndarray,
+        template: np.ndarray,
+        mask: np.ndarray | None = None,
+        template_name: str = "Unknown",
+        hsv_ranges: Any = None,
+    ) -> TemplateExplanationDetailed | None:
+        """explain_template plus the median (H, S, V) of the matched pixels, so the HSV gate can be
+        judged in numbers. Diagnostics only (the stall probes); never used to decide a click."""
         try:
             screenshot = self._normalize_image(screenshot, "screenshot")
             template = self._normalize_image(template, template_name)
@@ -363,7 +413,8 @@ class ImageMatcher:
             else self._hsv_match_ratio(screenshot, template, min_location, mask, normalized_hsv_ranges)
         )
         center_x, center_y = self._center_from_location(min_location, template)
-        return template_name, confidence, (center_x, center_y), ratio
+        median = self._hsv_median(screenshot, template, min_location, mask)
+        return template_name, confidence, (center_x, center_y), ratio, median
 
     def find_all_templates(
         self,
@@ -375,6 +426,7 @@ class ImageMatcher:
         template_name: str = "Unknown",
         hsv_ranges: Any = None,
         hsv_match_threshold: float = 0.9,
+        nms_iou_threshold: float = 0.20,
     ) -> list[tuple[float, int, int]]:
         all_matches = self.find_template_candidates(
             screenshot,
@@ -387,7 +439,7 @@ class ImageMatcher:
             hsv_match_threshold=hsv_match_threshold,
         )
         if all_matches:
-            all_matches = self.suppress_overlaps(all_matches, 0.20, min_distance)
+            all_matches = self.suppress_overlaps(all_matches, nms_iou_threshold)
         return [(conf, x, y) for conf, x, y, _, _ in all_matches]
 
     @staticmethod
@@ -408,6 +460,7 @@ class ImageMatcher:
         template_name: str = "Unknown",
         hsv_ranges: Any = None,
         hsv_match_threshold: float = 0.9,
+        hsv_frame: np.ndarray | None = None,
     ) -> list[MatchCandidate]:
         thresh = self.threshold if threshold is None else self._normalize_threshold(threshold, self.threshold)
         all_matches: list[MatchCandidate] = []
@@ -438,6 +491,7 @@ class ImageMatcher:
                 mask,
                 normalized_hsv_ranges,
                 normalized_hsv_threshold,
+                hsv_frame=hsv_frame,
             ):
                 continue
             all_matches.append(
@@ -451,6 +505,114 @@ class ImageMatcher:
             )
 
         return sorted(all_matches, key=lambda match: match[0], reverse=True)
+
+    def find_candidates_across_templates(
+        self,
+        screenshot: np.ndarray,
+        templates: Iterable[tuple[str, np.ndarray, np.ndarray | None]],
+        threshold: float | None = None,
+        min_distance: int = 15,
+        hsv_ranges: Any = None,
+        hsv_match_threshold: float = 0.9,
+    ) -> list[NamedCandidate]:
+        """Candidates of several (name, template, mask) templates over ONE frame. The frame is
+        converted to HSV at most once (only when hsv_ranges is given) and shared by every template's
+        gate instead of each candidate re-converting its own region. Each result carries its
+        template name so a later step can ask how many distinct templates agree on a spot."""
+        try:
+            frame = self._normalize_image(screenshot, "screenshot")
+        except ValueError as exc:
+            logger.warning("Invalid multi-template input: %s", exc)
+            return []
+        hsv_frame = None
+        if hsv_ranges is not None:
+            try:
+                hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            except cv2.error as exc:
+                logger.debug("Shared HSV conversion failed; gating per candidate instead: %s", exc)
+        named: list[NamedCandidate] = []
+        for template_name, template, mask in templates:
+            for confidence, x, y, width, height in self.find_template_candidates(
+                frame,
+                template,
+                mask=mask,
+                threshold=threshold,
+                min_distance=min_distance,
+                template_name=template_name,
+                hsv_ranges=hsv_ranges,
+                hsv_match_threshold=hsv_match_threshold,
+                hsv_frame=hsv_frame,
+            ):
+                named.append((confidence, x, y, width, height, template_name))
+        return named
+
+    @classmethod
+    def filter_by_template_consensus(
+        cls,
+        candidates: list[NamedCandidate],
+        min_matches: int,
+        iou_threshold: float = 0.20,
+    ) -> list[NamedCandidate]:
+        """Keeps only spots where at least `min_matches` DISTINCT templates agree, returning the
+        highest-confidence candidate of each surviving cluster. Candidates cluster when their boxes
+        overlap by more than `iou_threshold`. It suppresses a spot that only one template variant
+        happens to like. With min_matches <= 1 nothing is clustered: just confidence order."""
+        ordered = sorted(candidates, key=lambda candidate: candidate[0], reverse=True)
+        if min_matches <= 1:
+            return ordered
+        threshold = cls._normalize_threshold(iou_threshold, 0.20)
+        clusters: list[list[NamedCandidate]] = []
+        for candidate in ordered:
+            for cluster in clusters:
+                if cls._box_intersection_over_union(cluster[0], candidate) > threshold:
+                    cluster.append(candidate)
+                    break
+            else:
+                clusters.append([candidate])
+        return [cluster[0] for cluster in clusters if len({member[5] for member in cluster}) >= min_matches]
+
+    @classmethod
+    def red_block_area(
+        cls,
+        screenshot: np.ndarray,
+        hsv_ranges: Any,
+        window: int,
+        min_fraction: float,
+    ) -> tuple[int, int, int, int] | None:
+        """Bounding area (left, top, right, bottom) around every solid block of colour at least
+        `window` pixels across, or None when the frame has none. A cheap gate (a box filter over a
+        colour mask, a few ms) in front of the far costlier masked template match: only a frame
+        that holds such a block, and only the area around it, is handed on to the match."""
+        try:
+            frame = cls._normalize_image(screenshot, "screenshot")
+        except ValueError:
+            return None
+        normalized_ranges = cls._normalize_hsv_ranges(hsv_ranges)
+        if not normalized_ranges:
+            return None
+        window = max(3, int(window))
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        coloured = np.zeros(frame.shape[:2], dtype=np.uint8)
+        for lower, upper in normalized_ranges:
+            coloured = cv2.bitwise_or(coloured, cls._apply_hsv_range_mask(hsv, lower, upper))
+        share = cv2.boxFilter(
+            (coloured > 0).astype(np.float32),
+            -1,
+            (window, window),
+            normalize=True,
+            borderType=cv2.BORDER_CONSTANT,
+        )
+        rows, cols = np.where(share >= min_fraction)
+        if rows.size == 0:
+            return None
+        reach = window // 2 + window // 2 + 6  # block centre -> far edge of a template placed on it
+        height, width = frame.shape[:2]
+        return (
+            max(0, int(cols.min()) - reach),
+            max(0, int(rows.min()) - reach),
+            min(width, int(cols.max()) + reach),
+            min(height, int(rows.max()) + reach),
+        )
 
     @staticmethod
     def _local_minima_candidates(result: np.ndarray | None, max_score: float, min_distance: int) -> list[Point]:
@@ -472,7 +634,7 @@ class ImageMatcher:
         if not np.any(candidate_mask):
             return []
         mask = candidate_mask.astype(np.uint8)
-        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         candidates = []
         for index in range(1, count):
             component_x, component_y, component_width, component_height, component_area = stats[index]
@@ -482,6 +644,14 @@ class ImageMatcher:
                 component_y : component_y + component_height,
                 component_x : component_x + component_width,
             ]
+            # Two components can have overlapping bounding rectangles even when their pixels are
+            # disjoint (non-convex shapes). Take the minimum over this component's own labelled
+            # pixels so a neighbour's lower score is never attributed to the wrong candidate.
+            label_region = labels[
+                component_y : component_y + component_height,
+                component_x : component_x + component_width,
+            ]
+            region = np.where(label_region == index, region, 1.0).astype(np.float32)
             min_value, _, min_location, _ = cv2.minMaxLoc(region)
             if min_value <= normalized_max_score:
                 candidates.append((int(component_x + min_location[0]), int(component_y + min_location[1])))
@@ -512,10 +682,15 @@ class ImageMatcher:
         first_height = max(0.0, first_height)
         second_width = max(0.0, second_width)
         second_height = max(0.0, second_height)
-        left = max(first_center_x - first_width / 2.0, second_center_x - second_width / 2.0)
-        top = max(first_center_y - first_height / 2.0, second_center_y - second_height / 2.0)
-        right = min(first_center_x + first_width / 2.0, second_center_x + second_width / 2.0)
-        bottom = min(first_center_y + first_height / 2.0, second_center_y + second_height / 2.0)
+        # Boxes are (x, y, x + w, y + h) with x = centre - w // 2 (a candidate's centre is x + w // 2), the
+        # integer boxes v2 uses. Centre +/- w / 2 shifts odd-sized templates by half a pixel, which flips
+        # the keep/drop decision for a small share of near-threshold overlaps between different sizes.
+        first_left, first_top = first_center_x - first_width // 2, first_center_y - first_height // 2
+        second_left, second_top = second_center_x - second_width // 2, second_center_y - second_height // 2
+        left = max(first_left, second_left)
+        top = max(first_top, second_top)
+        right = min(first_left + first_width, second_left + second_width)
+        bottom = min(first_top + first_height, second_top + second_height)
         if right <= left or bottom <= top:
             return 0.0
         intersection = (right - left) * (bottom - top)
@@ -525,32 +700,18 @@ class ImageMatcher:
         return intersection / union if union > 0 else 0.0
 
     @classmethod
-    def suppress_overlaps(
-        cls,
-        matches: list[Any],
-        iou_threshold: float = 0.20,
-        min_distance: int | None = None,
-    ) -> list[Any]:
+    def suppress_overlaps(cls, matches: list[Any], iou_threshold: float = 0.20) -> list[Any]:
+        """Non-maximum suppression by overlap alone (IoU): the higher-confidence match wins. v1 used
+        to skip the overlap test unless both axes were within a min_distance, which kept large,
+        heavily overlapping templates (the upgrade station) as near-duplicates; v2 does not."""
         if not matches:
             return []
         iou_threshold = cls._normalize_threshold(iou_threshold, 0.20)
-        if min_distance is not None:
-            min_distance = cls._normalize_min_distance(min_distance)
         matches = sorted(matches, key=lambda match: match[0], reverse=True)
         filtered: list[Any] = []
 
         for candidate in matches:
-            overlaps = False
-            for existing in filtered:
-                if min_distance is not None and (
-                    abs(candidate[1] - existing[1]) >= min_distance
-                    or abs(candidate[2] - existing[2]) >= min_distance
-                ):
-                    continue
-                if cls._box_intersection_over_union(candidate, existing) > iou_threshold:
-                    overlaps = True
-                    break
-            if not overlaps:
+            if not any(cls._box_intersection_over_union(candidate, existing) > iou_threshold for existing in filtered):
                 filtered.append(candidate)
 
         return filtered

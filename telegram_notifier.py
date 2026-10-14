@@ -49,7 +49,9 @@ class TelegramNotifier:
                 self._queue.task_done()
 
     def _send_message_now(self, message: str) -> bool:
-        if not self.enabled or self._session is None:
+        # Gated on the session, not on `enabled`: close() clears `enabled` first so nothing new is
+        # accepted, yet the worker must still deliver what was already queued.
+        if self._session is None:
             return False
 
         try:
@@ -101,21 +103,15 @@ class TelegramNotifier:
                 logger.warning("Telegram queue is full; dropping notification")
                 return False
 
-    def _discard_pending_messages(self) -> None:
-        while True:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                return
-            self._queue.task_done()
-
     def close(self) -> None:
+        """Stops accepting new messages and lets the worker drain what is already queued (including
+        a "Bot Stopped" sent moments before close()) before exiting, bounded by the close timeout.
+        Pending messages are not discarded."""
         with self._lifecycle_lock:
             if not self.enabled and self._session is None:
                 return
             self._stop.set()
             self.enabled = False
-            self._discard_pending_messages()
             if self._thread is not None and self._thread.is_alive():
                 try:
                     close_timeout = float(config.TELEGRAM_CLOSE_TIMEOUT)
@@ -145,6 +141,13 @@ class TelegramNotifier:
 
         message = f"{level_number}. restaurant completed! Time spent: {time_str}"
         self.send_message(message)
+
+    def notify_game_relaunch(self, succeeded: bool, minutes: float) -> None:
+        outcome = "relaunch OK" if succeeded else "relaunch FAILED"
+        self.send_message(f"Game looked dead for {minutes:.0f} min: {outcome}")
+
+    def notify_bot_self_stopped(self, reason: str, minutes: float) -> None:
+        self.send_message(f"Bot stopped itself (ran {minutes:.0f} min): {reason}")
 
     def notify_level_milestone(self, total_levels: int) -> None:
         message = f"Milestone Reached\nTotal cities completed: {total_levels}"

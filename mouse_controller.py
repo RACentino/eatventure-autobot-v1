@@ -60,6 +60,13 @@ class MouseController:
         self.input_retry_delay = self._coerce_non_negative_float(config.INPUT_RETRY_DELAY)
         self._forbidden_zones = tuple(self._configured_forbidden_zones())
         self._input_lock = threading.RLock()
+        # Pixels the live cursor may sit off its target at press and hold time (0 = exact equality).
+        self.cursor_drift_tolerance_px = int(
+            self._coerce_non_negative_float(config.CURSOR_DRIFT_TOLERANCE_PX, 0.0)
+        )
+        # True between a LEFTDOWN this controller sent and the LEFTUP that ends it, so stop() can
+        # release a stuck button without ever sending a stray LEFTUP when nothing is pressed.
+        self._left_pressed = False
 
     @staticmethod
     def _coerce_non_negative_float(value: Any, default: float = 0.0) -> float:
@@ -118,6 +125,18 @@ class MouseController:
         matches = int(current_x) == screen_x and int(current_y) == screen_y
         return matches, current_x, current_y
 
+    def _cursor_near_position(self, screen_x: int, screen_y: int) -> tuple[bool, int, int]:
+        """_cursor_matches_position with CURSOR_DRIFT_TOLERANCE_PX of slack per axis: used where a
+        press or hold must abort on real drift but not on DPI or driver rounding."""
+        current_x, current_y = win32api.GetCursorPos()
+        tolerance = self.cursor_drift_tolerance_px
+        near = abs(int(current_x) - screen_x) <= tolerance and abs(int(current_y) - screen_y) <= tolerance
+        return near, current_x, current_y
+
+    def get_cursor_position(self) -> Point:
+        x, y = win32api.GetCursorPos()
+        return int(x), int(y)
+
     def _wait(self, duration: Any) -> bool:
         delay = self._coerce_non_negative_float(duration)
         if self._stop_event is None:
@@ -131,10 +150,10 @@ class MouseController:
     def _sleep_before_input_retry(self, attempt: int) -> bool:
         return attempt >= self.input_retry_count or self._wait(self.input_retry_delay)
 
-    def _set_cursor_pos(self, x: Any, y: Any) -> bool:
+    def _set_cursor_pos(self, x: Any, y: Any, check_forbidden: bool = True) -> bool:
         screen_x = int(x)
         screen_y = int(y)
-        if self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
+        if check_forbidden and self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
             logger.warning("Rejected cursor move into forbidden zone at (%s, %s)", screen_x, screen_y)
             return False
         last_exc = None
@@ -164,7 +183,7 @@ class MouseController:
         logger.error("SetCursorPos failed at (%s, %s): %s", screen_x, screen_y, last_exc)
         return False
 
-    def _mouse_event(self, event: int, x: Any, y: Any) -> bool:
+    def _mouse_event(self, event: int, x: Any, y: Any, check_forbidden: bool = True) -> bool:
         screen_x = int(x)
         screen_y = int(y)
         releases_left_button = bool(event & win32con.MOUSEEVENTF_LEFTUP)
@@ -175,7 +194,9 @@ class MouseController:
             try:
                 if (
                     not releases_left_button
-                    and self._resolve_screen_position(screen_x, screen_y, relative=False)
+                    and self._resolve_screen_position(
+                        screen_x, screen_y, relative=False, check_forbidden=check_forbidden
+                    )
                     != (screen_x, screen_y)
                 ):
                     return False
@@ -183,7 +204,7 @@ class MouseController:
                 current_x = screen_x
                 current_y = screen_y
                 if not releases_left_button:
-                    cursor_matches, current_x, current_y = self._cursor_matches_position(
+                    cursor_matches, current_x, current_y = self._cursor_near_position(
                         screen_x,
                         screen_y,
                     )
@@ -195,6 +216,10 @@ class MouseController:
                     )
                     return False
                 win32api.mouse_event(event, screen_x, screen_y, 0, 0)
+                if releases_left_button:
+                    self._left_pressed = False
+                elif event & win32con.MOUSEEVENTF_LEFTDOWN:
+                    self._left_pressed = True
                 return True
             except pywintypes.error as exc:
                 last_exc = exc
@@ -217,7 +242,21 @@ class MouseController:
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, int(x), int(y), 0, 0)
         except pywintypes.error:
             return False
+        self._left_pressed = False
         return True
+
+    def release_left_button(self) -> bool:
+        """Releases the left button only if this controller still holds it down (a stop that lands
+        mid-click or mid-hold). Sends nothing otherwise, so a stop never injects a stray LEFTUP into
+        something the user is doing. True when no button is left pressed."""
+        if not self._left_pressed:
+            return True
+        try:
+            x, y = win32api.GetCursorPos()
+        except pywintypes.error:
+            x = y = 0
+        self._best_effort_left_up(x, y)
+        return not self._left_pressed
 
     @staticmethod
     def _configured_forbidden_zones() -> list[ForbiddenZone]:
@@ -321,8 +360,9 @@ class MouseController:
         screen_x: Any,
         screen_y: Any,
         duration: Any = None,
+        check_forbidden: bool = True,
     ) -> bool:
-        if self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
+        if check_forbidden and self.is_in_forbidden_zone(screen_x, screen_y, relative=False):
             logger.warning("Rejected click in forbidden zone at (%s, %s)", screen_x, screen_y)
             return False
         try:
@@ -330,11 +370,16 @@ class MouseController:
         except pywintypes.error as exc:
             logger.error("Cannot verify cursor position before click: %s", exc)
             return False
-        if self.is_in_forbidden_zone(current_x, current_y, relative=False):
+        if check_forbidden and self.is_in_forbidden_zone(current_x, current_y, relative=False):
             logger.warning("Rejected click at forbidden cursor position (%s, %s)", current_x, current_y)
             return False
-        if not self._mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y):
-            self._best_effort_left_up(screen_x, screen_y)
+        if not self._mouse_event(
+            win32con.MOUSEEVENTF_LEFTDOWN, screen_x, screen_y, check_forbidden=check_forbidden
+        ):
+            # Only let go of a button this controller really pressed: a rejected press sent nothing, and a
+            # stray LEFTUP could cut short something the user is doing in another window.
+            if self._left_pressed:
+                self._best_effort_left_up(screen_x, screen_y)
             return False
         wait_time = (
             self._get_mouse_down_duration()
@@ -368,13 +413,19 @@ class MouseController:
         screen_y: Any,
         down_duration: Any = None,
         up_duration: Any = None,
+        check_forbidden: bool = True,
     ) -> bool:
         with self._input_lock:
-            pressed = self._left_down_at_screen(screen_x, screen_y, down_duration)
+            pressed = self._left_down_at_screen(
+                screen_x, screen_y, down_duration, check_forbidden=check_forbidden
+            )
             if not pressed:
                 return False
             released = False
             try:
+                if not self._cursor_near_position(screen_x, screen_y)[0]:
+                    logger.warning("Cursor moved during click at (%s, %s); releasing", screen_x, screen_y)
+                    return False
                 released = self._left_up_at_screen(screen_x, screen_y, up_duration)
                 return released
             finally:
@@ -386,18 +437,28 @@ class MouseController:
         wait_time = self._coerce_non_negative_float(wait_time, self.click_delay)
         return self._wait(wait_time)
 
-    def click(self, x: Any, y: Any, relative: bool = True, delay: Any = None) -> bool:
+    def click(
+        self,
+        x: Any,
+        y: Any,
+        relative: bool = True,
+        delay: Any = None,
+        check_forbidden: bool = True,
+    ) -> bool:
+        """check_forbidden=False skips every forbidden-zone check (target, cursor and press) for a
+        click whose target is the intended one wherever the game puts it, e.g. a popup's red X. The
+        window-bounds, foreground and stop checks still apply."""
         with self._input_lock:
-            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=check_forbidden)
             if screen_pos is None:
                 return False
             screen_x, screen_y = screen_pos
             down_up_delay = self._click_down_up_delay(0.02)
-            if not self._set_cursor_pos(screen_x, screen_y):
+            if not self._set_cursor_pos(screen_x, screen_y, check_forbidden=check_forbidden):
                 return False
             if not self._wait(self.move_delay) or not self._hover_before_click():
                 return False
-            if not self._left_click_at_screen(screen_x, screen_y, down_up_delay):
+            if not self._left_click_at_screen(screen_x, screen_y, down_up_delay, check_forbidden=check_forbidden):
                 logger.error("Click failed at (%s, %s)", screen_x, screen_y)
                 return False
             logger.debug("Clicked at (%s, %s)", screen_x, screen_y)
@@ -438,6 +499,7 @@ class MouseController:
         click_delay: float,
         click_down_up_delay: float,
         click_up_delay: float | None,
+        check_forbidden: bool = True,
     ) -> int | None:
         start_time = time.perf_counter()
         end_time = start_time + duration
@@ -471,6 +533,7 @@ class MouseController:
                 base_y,
                 down_duration=click_down_up_delay,
                 up_duration=click_up_delay,
+                check_forbidden=check_forbidden,
             ):
                 return None
 
@@ -486,6 +549,7 @@ class MouseController:
         relative: bool = True,
         mouse_down_duration: Any = None,
         mouse_up_duration: Any = None,
+        check_forbidden: bool = True,
     ) -> bool:
         with self._input_lock:
             if duration is None:
@@ -496,14 +560,15 @@ class MouseController:
             duration = self._coerce_non_negative_float(duration, config.SPAM_CLICK_DURATION)
             click_delay = max(0.001, self._coerce_non_negative_float(click_delay, config.SPAM_CLICK_DELAY))
 
-            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            screen_pos = self._resolve_screen_position(x, y, relative=relative, check_forbidden=check_forbidden)
             if screen_pos is None:
                 return False
 
             base_x, base_y = screen_pos
-            if not self._set_cursor_pos(base_x, base_y):
+            if not self._set_cursor_pos(base_x, base_y, check_forbidden=check_forbidden):
                 return False
-            if not self._wait(self.move_delay) or not self._hover_before_click():
+            # No hover before a spam: the first click of the burst does not need one (v2 parity).
+            if not self._wait(self.move_delay):
                 return False
 
             click_down_up_delay = (
@@ -523,12 +588,57 @@ class MouseController:
                 click_delay,
                 click_down_up_delay,
                 click_up_delay,
+                check_forbidden=check_forbidden,
             )
             if click_count is None:
                 return False
 
             logger.debug("Spam-click complete: %s clicks", click_count)
-            return self._wait(self.click_delay)
+            # A burst that clicked nothing (zero duration) is a failure, as in v2.
+            return click_count > 0 and self._wait(self.click_delay)
+
+    def hold_at(
+        self,
+        x: Any,
+        y: Any,
+        duration: Any,
+        check_interval: Any,
+        interrupt_check: Any,
+        relative: bool = True,
+    ) -> bool:
+        """Press and hold at (x, y), polling interrupt_check() every check_interval seconds until it
+        returns True or `duration` elapses, then release. Returns False (after releasing) if the cursor
+        drifts off target, the target window loses foreground, or a stop is requested mid-hold. The
+        press itself does not wait: the first poll comes one check_interval later."""
+        with self._input_lock:
+            screen_pos = self._resolve_screen_position(x, y, relative=relative)
+            if screen_pos is None:
+                return False
+            screen_x, screen_y = screen_pos
+            if not self._set_cursor_pos(screen_x, screen_y) or not self._wait(self.move_delay):
+                return False
+            if not self._left_down_at_screen(screen_x, screen_y, 0.0):
+                return False
+            released = False
+            try:
+                deadline = time.monotonic() + self._coerce_non_negative_float(duration, 0.0)
+                interval = max(0.001, self._coerce_non_negative_float(check_interval, 0.001))
+                while time.monotonic() < deadline:
+                    if not self._wait(min(interval, max(0.0, deadline - time.monotonic()))):
+                        return False
+                    if not self._cursor_near_position(screen_x, screen_y)[0]:
+                        logger.warning("Cursor moved during hold at (%s, %s); releasing", screen_x, screen_y)
+                        return False
+                    if not self.is_target_foreground():
+                        logger.warning("Target lost foreground during hold; releasing")
+                        return False
+                    if interrupt_check():
+                        break
+                released = self._left_up_at_screen(screen_x, screen_y)
+                return released
+            finally:
+                if not released:
+                    self._best_effort_left_up(screen_x, screen_y)
 
     def _move_drag_cursor(
         self,

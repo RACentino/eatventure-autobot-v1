@@ -10,31 +10,39 @@ The Eatventure Autobot is a sophisticated screen automation tool that interacts 
 
 ### State Handlers
 
-The bot runs a complete **Finite State Machine (FSM)**: every state has one handler and every handler returns an explicit next state. Between handlers, a 15-second same-state watchdog resets stalled flows to `FIND_RED_ICONS`.
+The bot runs a complete **Finite State Machine (FSM)**: every state has one handler and every handler returns an explicit next state. Between handlers, a 9-second same-state watchdog (`STATE_STALL_TIMEOUT_SECONDS`) resets stalled flows to `FIND_RED_ICONS`.
 
-* **FIND_RED_ICONS**: Scans the screen for actionable red icons.
+* **FIND_RED_ICONS**: Scans the screen for actionable red icons. When none are visible it checks the stats badge first (`UPGRADE_STATS`) before scanning for boxes.
 * **CLICK_RED_ICON**: Executes precise clicks on detected targets with sub-pixel refinement.
 * **CHECK_UNLOCK**: Handles an unlock prompt after a red-icon action.
-* **SEARCH_UPGRADE_STATION**: Locates the active cooking station to apply upgrades.
+* **SEARCH_UPGRADE_STATION**: Locates the active cooking station to apply upgrades. One search attempt per bot step, so popup handling and the watchdog run between attempts.
 * **HOLD_UPGRADE_STATION**: Simulates a "long-press" to rapidly purchase upgrades.
 * **OPEN_BOXES**: Automatically detects and collects gift box rewards.
 * **UPGRADE_STATS**: Manages the secondary stat-boost menu to maximize efficiency.
-* **SCROLL**: Executes intelligent, oscillating search patterns when no targets are visible.
+* **SCROLL**: Executes intelligent, oscillating search patterns when no targets are visible. Every landed scroll is followed by a box scan before the next red-icon scan.
 * **CHECK_NEW_LEVEL / TRANSITION_LEVEL**: Detects restaurant completion and handles the travel sequence to the next city.
 * **WAIT_FOR_UNLOCK**: Confirms the next restaurant is ready before restarting the scan.
 
-Normal flow: `FIND_RED_ICONS → CLICK_RED_ICON → CHECK_UNLOCK → SEARCH_UPGRADE_STATION → HOLD_UPGRADE_STATION → OPEN_BOXES → FIND_RED_ICONS/SCROLL`. Level-complete detections preempt that loop through `CHECK_NEW_LEVEL/TRANSITION_LEVEL → WAIT_FOR_UNLOCK → FIND_RED_ICONS`.
+Work loop: `FIND_RED_ICONS → CLICK_RED_ICON → CHECK_UNLOCK → SEARCH_UPGRADE_STATION → HOLD_UPGRADE_STATION → OPEN_BOXES → FIND_RED_ICONS`. No-work loop: `FIND_RED_ICONS → UPGRADE_STATS → OPEN_BOXES → SCROLL → OPEN_BOXES → FIND_RED_ICONS`. Level-complete detections preempt either loop through `CHECK_NEW_LEVEL/TRANSITION_LEVEL → WAIT_FOR_UNLOCK → FIND_RED_ICONS`.
 
 ### Priority and Interrupts
 
 The bot gives level transitions priority during normal state processing. Before it commits to most upgrade, box, and red-icon actions, it re-checks for the large **New Level** button or the bottom **Level Complete** indicator so completed restaurants are handled before the next search cycle continues.
+
+### Popup Handling (Red X)
+
+Before every state handler except the New Level states, the bot looks for the red **X** that closes boot and event popups (for example the Offline Earnings dialog after the game restarts) and taps it. The look is cheap: a colour prefilter must find a solid red block the size of the X before the full template match (`Assets/redX.png`) runs.
+
+* **New Level lock**: while `CHECK_NEW_LEVEL`, `TRANSITION_LEVEL` or `WAIT_FOR_UNLOCK` owns the screen, and for `CLOSE_BUTTON_NEW_LEVEL_LOCK_SECONDS` afterwards, the rule stays off, because the New Level dialog has an X that looks identical.
+* **Stand-down**: the same spot tapped `CLOSE_BUTTON_MAX_CONSECUTIVE_CLICKS` times in a row means the tap is not closing anything, so the rule pauses for `CLOSE_BUTTON_SUPPRESS_SECONDS`.
+* Set `CLOSE_BUTTON_ENABLED = False` in `config.py` to turn the rule off.
 
 ### Better Computer Vision
 
 The vision system is built around masked OpenCV template matching with a few practical safeguards:
 
 * **Masked Template Matching**: Uses transparent PNG masks so icon shape matching stays stable.
-* **Calibrated Fast Mode**: By default, red icons use the configured `RedIcon5` template and HSV gate. Disabling Fast Mode enables multi-template consensus.
+* **Calibrated Fast Mode**: By default, red icons use the configured `RedIcon5` template and HSV gate. Press `M` while the bot is stopped to switch to Normal mode, which matches `RED_ICON_NORMAL_TEMPLATE_NAMES` and requires `RED_ICON_MIN_MATCHES` templates to agree on a spot.
 * **HSV-Only Color Verification**: Red-icon, box, and upgrade-station candidates pass one HSV pixel-ratio gate.
 * **Fixed Calibrated Thresholds**: Detection behavior comes directly from `config.py`, so the same frame produces the same decision.
 
@@ -49,7 +57,7 @@ A comprehensive logging system tracks every decision the bot makes. It includes:
 
 The bot provides tools for real-time calibration and transparency:
 
-* **Forbidden Zone Overlay**: When enabled, the bot draws a **semi-transparent red overlay** directly over the game window. This visualizes the "Dead Zones" where the bot is forbidden from clicking (e.g., ad menus, settings buttons), allowing for pixel-perfect configuration of the `FORBIDDEN_ZONES`.
+* **Forbidden Zone Overlay**: When enabled, the bot draws a **semi-transparent red overlay** directly over the game window. This visualizes the "Dead Zones" where the bot is forbidden from clicking (e.g., ad menus, settings buttons), allowing for pixel-perfect configuration of `FORBIDDEN_CLICK_*`, `NUMBERED_FORBIDDEN_ZONE_BOUNDS` and `EVENT_FORBIDDEN_ZONE_OPTIONS`.
 
 ### Forbidden Zone Configuration
 
@@ -105,8 +113,28 @@ running stops it; the next run will ask for the active-event count again.
 Runtime hotkeys:
 
 * `Z`: prime, start, retry, or stop automation according to its current state.
+* `M`: toggle Fast/Normal red-icon matching (only while stopped).
 * `X`: log the cursor position relative to the scrcpy client.
 * `P`: exit cleanly.
+
+## Game Recovery and Auto-Resume
+
+Both are **off by default** and only act on what the logs already show.
+
+* **Game recovery** (`GAME_RECOVERY_ENABLED`): when a long idle streak (`STALL_SCROLLS_BEFORE_ALERT` scrolls) ends on a frozen screen, the bot force-stops and relaunches the game over `adb`, then runs only the red-X rule for `GAME_RECOVERY_RELAUNCH_SETTLE_SECONDS` to clear the cold-start popups. It needs `adb` on `PATH` (it ships with scrcpy) and finds the game as the single installed package whose id contains `GAME_RECOVERY_PACKAGE_HINT`. Zero or several matches disable it rather than guess.
+* **Auto-resume** (`RESUME_ENABLED`): after the bot stops itself on a window or focus error it can start itself again once the window is already in the right state and nobody has touched the keyboard or mouse for `RESUME_IDLE_SECONDS`. While disabled it only logs what it would have done ("shadow mode"), so you can measure the downtime it would recover before letting it act.
+* Whenever the bot stops itself it logs a `Self-stop:` line with the window state and, if Telegram is configured, sends a message.
+
+## Testing
+
+The test suite runs without Windows or a phone: `tests/conftest.py` stubs `pywin32`, and the real bot is exercised against fakes plus the real-frame fixtures in `tests/fixtures/`.
+
+```bash
+pip install pytest
+python -m pytest tests
+```
+
+`tests/golden/red_icon_v1_baseline.json` is the recorded output of the detector before the v2-parity port. It must not be regenerated to make a test pass.
 
 ## Coming Soon
 
@@ -147,6 +175,6 @@ This bot is developed for **educational purposes only**. Using automation tools 
 
 ## License
 
-Eatventure Autobot is open-source software. It is free to use, modify, and distribute for personal and educational use.
+Apache License 2.0. See [LICENSE](LICENSE).
 
 Keywords: [eatventure bot, python automation, opencv, scrcpy, mobile game bot, image recognition, state machine, android automation, game botting]
